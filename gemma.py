@@ -3,7 +3,7 @@ Demonstration of how to deploy a custom model. All it requires is a standardized
 `__init__`, `__call__`, and `get_params`.
 """
 
-import kagglehub, onnxruntime as ort, os, numpy as np
+import kagglehub, onnxruntime as ort, os, numpy as np, onnx
 from transformers import AutoConfig, AutoProcessor, GenerationConfig
 
 class ConvenienceWrapper():
@@ -13,16 +13,16 @@ class ConvenienceWrapper():
         """
         super().__init__(**args, **kwargs)
         ## Load config and processor
-        MODEL_PATH = kagglehub.model_download("google/gemma-4/onnx/gemma-4-e2b-it-onnx")
-        self.processor = AutoProcessor.from_pretrained(MODEL_PATH)
-        config = AutoConfig.from_pretrained(MODEL_PATH)
-        generation_config = GenerationConfig.from_pretrained(MODEL_PATH)
+        self.model_path = kagglehub.model_download("google/gemma-4/onnx/gemma-4-e2b-it-onnx")
+        self.processor = AutoProcessor.from_pretrained(self.model_path)
+        config = AutoConfig.from_pretrained(self.model_path)
+        generation_config = GenerationConfig.from_pretrained(self.model_path)
 
         ## Load sessions
-        self.vision_session = ort.InferenceSession(os.path.join(MODEL_PATH, "onnx/vision_encoder.onnx"))
-        self.audio_session = ort.InferenceSession(os.path.join(MODEL_PATH, "onnx/audio_encoder.onnx"))
-        self.embed_session = ort.InferenceSession(os.path.join(MODEL_PATH, "onnx/embed_tokens_q4.onnx"))
-        self.decoder_session = ort.InferenceSession(os.path.join(MODEL_PATH, "onnx/decoder_model_merged_q4.onnx"))
+        self.vision_session = ort.InferenceSession(os.path.join(self.model_path, "onnx/vision_encoder.onnx"))
+        self.audio_session = ort.InferenceSession(os.path.join(self.model_path, "onnx/audio_encoder.onnx"))
+        self.embed_session = ort.InferenceSession(os.path.join(self.model_path, "onnx/embed_tokens_q4.onnx"))
+        self.decoder_session = ort.InferenceSession(os.path.join(self.model_path, "onnx/decoder_model_merged_q4.onnx"))
 
         ## Set config values
         self.eos_token_id = generation_config.eos_token_id
@@ -62,7 +62,7 @@ class ConvenienceWrapper():
         generated_tokens = np.zeros((batch_size, 0), dtype=np.int64)
         image_features = None
         audio_features = None
-        for i in range(max_new_tokens):
+        for _ in range(max_new_tokens):
             ## Embed the input tokens
             inputs_embeds, per_layer_inputs = self.embed_session.run(None, {"input_ids": input_ids})
             ## Insert image features into embedding
@@ -108,4 +108,6 @@ class ConvenienceWrapper():
             print(self.processor.decode(input_ids[0]), end="", flush=True)
 
     def get_params(self):
-        pass
+        model = onnx.load(os.path.join(self.model_path, "onnx/decoder_model_merged_q4.onnx"), load_external_data=True)
+        params = {init.name: onnx.numpy_helper.to_array(init) for init in model.graph.initializer}
+        return params
