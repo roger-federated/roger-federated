@@ -30,7 +30,7 @@ class ConvenienceWrapper():
         self.image_token_id = config.image_token_id
         self.audio_token_id = config.audio_token_id
 
-    def __call__(self, messages) -> Generator[str, None, None]:
+    def __call__(self, messages, enable_thinking=True, tools=None) -> Generator[str, None, None]:
         """
         Return a generator that yields the model output. The input messages should be formatted according to the processor's expected JSON template.
         """
@@ -41,7 +41,8 @@ class ConvenienceWrapper():
             tokenize=True,
             return_tensors="pt",
             return_dict=True,
-            enable_thinking=True
+            enable_thinking=enable_thinking,
+            tools=tools
         )
         ## Extract some of the inputs
         attention_mask = inputs["attention_mask"].numpy()
@@ -64,7 +65,7 @@ class ConvenienceWrapper():
         generated_tokens = np.zeros((batch_size, 0), dtype=np.int64)
         image_features = None
         audio_features = None
-        thinking = False
+        background = False
         for _ in range(max_new_tokens):
             ## Embed the input tokens
             inputs_embeds, per_layer_inputs = self.embed_session.run(None, {"input_ids": input_tokens})
@@ -108,13 +109,13 @@ class ConvenienceWrapper():
             if np.isin(input_tokens, self.eos_token_id).any():
                 break
             ## Stream output
-            out = self.processor.decode(input_tokens[0])
-            if out=="<|channel>":
-                thinking = True
-            if not thinking:
-                yield out
-            if out=="<channel|>":
-                thinking = False
+            chunk = self.processor.decode(input_tokens[0])
+            if "<|" in chunk:
+                background = True
+            if not background:
+                yield chunk
+            if "|>" in chunk:
+                background = False
 
     def get_params(self):
         model = onnx.load(os.path.join(self.model_path, "onnx/decoder_model_merged_q4.onnx"), load_external_data=True)
