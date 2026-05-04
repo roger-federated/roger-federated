@@ -119,7 +119,7 @@ class ConvenienceWrapper():
             if "|>" in chunk:
                 background -= 1
 
-    def fetch_params(self):
+    def fetch_params(self) -> dict[str, np.ndarray]:
         """
         Fetch the model parameters as a dictionary mapping parameter names to numpy arrays. This is used internally for calculating updates to the model's weights. \
         Therefore, for the purpose of consistency, the parameters must be fetched from an ONNX model.
@@ -128,11 +128,15 @@ class ConvenienceWrapper():
         params = {init.name: numpy_helper.to_array(init) for init in model.graph.initializer}
         return params
 
-    def update_params(self, new_params):
+    def update_params(self, new_params:dict[str, np.ndarray]):
         """
         Overwrite the model parameters with new values provided in a dictionary (`new_params`) that maps parameter names to numpy arrays. \
         Note: For the purpose of consistency, the modifications must be made using the ONNX framework.
         """
+        typeconverter = {v: k for k, v in onnx.TensorProto.DataType.items()}[init.data_type]
         model = onnx.load(os.path.join(self.model_path, "onnx/decoder_model_merged_q4.onnx"), load_external_data=True)
         for init in model.graph.initializer:
-            init.CopyFrom(numpy_helper.from_array(new_params[init.name], init.name))
+            init.CopyFrom(numpy_helper.from_array(
+                new_params[init.name].astype(typeconverter[init.data_type].lower()), 
+                name=init.name
+            ))
