@@ -1,11 +1,13 @@
 """
 Demonstration of how to deploy a custom model. All it requires is a standardized convenience wrapper, \
-implementing `__init__`, `__call__`, and `get_params`.
+implementing at least `__init__`, `__call__`, `fetch_params`, and `update_params`. \
+See corresponding docstrings for details on each method.
 """
 
 import kagglehub, onnxruntime as ort, os, numpy as np, onnx
 from transformers import AutoConfig, AutoProcessor, GenerationConfig
 from typing import Generator
+from onnx import numpy_helper
 
 class ConvenienceWrapper():
     def __init__(self, *args, **kwargs):
@@ -65,7 +67,7 @@ class ConvenienceWrapper():
         generated_tokens = np.zeros((batch_size, 0), dtype=np.int64)
         image_features = None
         audio_features = None
-        background = False
+        background = 0
         for _ in range(max_new_tokens):
             ## Embed the input tokens
             inputs_embeds, per_layer_inputs = self.embed_session.run(None, {"input_ids": input_tokens})
@@ -111,13 +113,26 @@ class ConvenienceWrapper():
             ## Stream output
             chunk = self.processor.decode(input_tokens[0])
             if "<|" in chunk:
-                background = True
-            if not background:
+                background += 1
+            if background==0:
                 yield chunk
             if "|>" in chunk:
-                background = False
+                background -= 1
 
-    def get_params(self):
+    def fetch_params(self):
+        """
+        Fetch the model parameters as a dictionary mapping parameter names to numpy arrays. This is used internally for calculating updates to the model's weights. \
+        Therefore, for the purpose of consistency, the parameters must be fetched from an ONNX model.
+        """
         model = onnx.load(os.path.join(self.model_path, "onnx/decoder_model_merged_q4.onnx"), load_external_data=True)
-        params = {init.name: onnx.numpy_helper.to_array(init) for init in model.graph.initializer}
+        params = {init.name: numpy_helper.to_array(init) for init in model.graph.initializer}
         return params
+
+    def update_params(self, new_params):
+        """
+        Overwrite the model parameters with new values provided in a dictionary (`new_params`) that maps parameter names to numpy arrays. \
+        Note: For the purpose of consistency, the modifications must be made using the ONNX framework.
+        """
+        model = onnx.load(os.path.join(self.model_path, "onnx/decoder_model_merged_q4.onnx"), load_external_data=True)
+        for init in model.graph.initializer:
+            init.CopyFrom(numpy_helper.from_array(new_params[init.name], init.name))
