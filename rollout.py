@@ -1,4 +1,5 @@
-import torch
+import torch, transformers
+from PIL import Image
 
 def init_new_tokens(new_tokens, like_tokens, weights, model, tokenizer):
     """
@@ -23,3 +24,66 @@ def init_new_tokens(new_tokens, like_tokens, weights, model, tokenizer):
     with torch.no_grad():
         embed_layer.weight.data[-len(new_tokens):] = embeds
     return tokenizer.encode(new_tokens)
+
+def parse_actions(text:str) -> list:
+    actions = []
+    while "<|action>" in text and "<action|>" in text:
+        start = text.index("<|action>") + len("<|action>")
+        end = text.index("<action|>")
+        action_text = text[start:end].strip()
+        actions.append(action_text)
+        text = text[end + len("<action|>"):]
+    return actions
+
+async def execute(model:transformers.modeling_utils.PreTrainedModel, tokenizer, env, state_token_id, text:str, image:str|Image.Image=None, tools=[], max_steps=10) -> list:
+    # Initialize trajectory and get initial state
+    trajectory = []
+    state = await env.observe()
+    # Create input message
+    messages = [{"role": "system", "content": 
+                """
+                You are an agent, will be given a task description, and must interact with the environment by generating actions. \
+                Format your actions between <|action> and <action|> tags. The environment will respond with observations and rewards based on your actions. \
+                After observing the new state, you can choose to generate another action or end the episode by generating a "done" action. \
+                """},
+                {"role": "user", "content": []}
+    ]
+    if image is not None:
+        messages[1]["content"] += [{"type": "image", "image": image}]
+    messages[1]["content"] += [{"type": "text", "text": text}, {"type": "text", "text": "<|state>"+"<|state|>"*256+"<state|>"}]
+    # Tokenize input
+    tokens = tokenizer.apply_chat_template(
+        messages,
+        add_generation_prompt=True,
+        tokenize=True,
+        return_tensors="pt",
+        return_dict=True,
+        enable_thinking=True,
+        tools=tools
+    ).to(model.device)
+    # Get embeddings
+    inputs_embeds = model.get_input_embeddings()(tokens["input_ids"])
+
+    for i in range(max_steps):
+        # Determine location in embedding for the state representation
+        if i==0:
+            mask = (tokens["input_ids"] == torch.tensor(state_token_id).to(model.device)).reshape(-1)
+        # Format current state into prompt
+        state_features = state_encoder(state)
+        inputs_embeds[mask] = state_features
+
+        # Generate action
+        logits, past_key_values = autoregress(model, inputs_embeds, past_key_values)
+        text = tokenizer.decode(logits.argmax(axis=-1))
+
+        # Parse and execute action
+        actions = parse_actions(text)
+        state, reward = await env.step(actions)
+
+        trajectory.append({"inputs_embeds": inputs_embeds, "logits": logits, "reward": reward})
+        messages = [{"role": "user", "content": [{"type": "text", "text": "Determine the next action based on the new state. <|state>"+"<|state|>"*256+"<state|>"}]}]
+
+        if "done" in actions:
+            break
+
+    return trajectory
