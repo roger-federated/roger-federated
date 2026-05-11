@@ -75,22 +75,23 @@ async def execute(model:transformers.modeling_utils.PreTrainedModel, tokenizer, 
 
         # Most models are decoder-only, so we can directly pass (modified) embeddings, while `input_ids` will typically
         # only be used to find `per_layer_inputs` and to encode images/audio.
-        logits = model.generate(
+        outputs = model.generate(
             input_ids=inputs["input_ids"],
             inputs_embeds=inputs_embeds,
             attention_mask=inputs["attention_mask"],
             mm_token_type_ids=inputs["mm_token_type_ids"],
             use_cache=True,
             logits_to_keep=1,
-            output_scores=True
+            output_logits=True,
+            return_dict_in_generate=True
         )
-        text = tokenizer.decode(logits.argmax(axis=-1), skip_special_tokens=False)
+        text = tokenizer.decode(outputs.sequences, skip_special_tokens=False)
 
         # Parse and execute action
         actions = parse_actions(text)
         state, reward = await env.step(actions)
 
-        trajectory.append({"inputs_embeds": inputs_embeds, "logits": logits, "reward": reward})
+        trajectory.append({"inputs_embeds": inputs_embeds, "logits": torch.stack(outputs.logits).squeeze(), "reward": reward})
         messages = [{"role": "user", "content": [{"type": "text", "text": "Determine the next action based on the new state. <|state>"+"<|state|>"*256+"<state|>"}]}]
 
         if "done" in actions:
