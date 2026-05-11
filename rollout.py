@@ -42,9 +42,10 @@ async def execute(model:transformers.modeling_utils.PreTrainedModel, tokenizer, 
     # Create input message
     messages = [{"role": "system", "content": 
                 """
-                You are an agent, will be given a task description, and must interact with the environment by generating actions. \
-                Format your actions between <|action> and <action|> tags. The environment will respond with observations and rewards based on your actions. \
-                After observing the new state, you can choose to generate another action or end the episode by generating a "done" action. \
+                You are an agent, will be given a current state and a task description, and must interact with the environment by generating actions. \
+                The state will be provided between a start state token (i.e., <|state>) and an end state token (i.e., <|state|>), and will be represented as a fixed-length vector embedding. \
+                Please format your actions between a start action token (i.e., <|action>) and an end action token (i.e., <action|>) tags. \
+                The environment will respond with observations and rewards based on your actions. \
                 """},
                 {"role": "user", "content": []}
     ]
@@ -52,7 +53,7 @@ async def execute(model:transformers.modeling_utils.PreTrainedModel, tokenizer, 
         messages[1]["content"] += [{"type": "image", "image": image}]
     messages[1]["content"] += [{"type": "text", "text": text}, {"type": "text", "text": "<|state>"+"<|state|>"*256+"<state|>"}]
     # Tokenize input
-    tokens = tokenizer.apply_chat_template(
+    inputs = tokenizer.apply_chat_template(
         messages,
         add_generation_prompt=True,
         tokenize=True,
@@ -62,19 +63,28 @@ async def execute(model:transformers.modeling_utils.PreTrainedModel, tokenizer, 
         tools=tools
     ).to(model.device)
     # Get embeddings
-    inputs_embeds = model.get_input_embeddings()(tokens["input_ids"])
+    inputs_embeds = model.get_input_embeddings()(inputs["input_ids"])
 
     for i in range(max_steps):
         # Determine location in embedding for the state representation
         if i==0:
-            mask = (tokens["input_ids"] == torch.tensor(state_token_id).to(model.device)).reshape(-1)
+            state_mask = (inputs["input_ids"] == torch.tensor(state_token_id).to(model.device)).reshape(-1)
         # Format current state into prompt
         state_features = state_encoder(state)
-        inputs_embeds[mask] = state_features
+        inputs_embeds[state_mask] = state_features
 
-        # Generate action
-        logits, past_key_values = autoregress(model, inputs_embeds, past_key_values)
-        text = tokenizer.decode(logits.argmax(axis=-1))
+        # Most models are decoder-only, so we can directly pass (modified) embeddings, while `input_ids` will typically
+        # only be used to find `per_layer_inputs` and to encode images/audio.
+        logits = model.generate(
+            input_ids=inputs["input_ids"],
+            inputs_embeds=inputs_embeds,
+            attention_mask=inputs["attention_mask"],
+            mm_token_type_ids=inputs["mm_token_type_ids"],
+            use_cache=True,
+            logits_to_keep=1,
+            output_scores=True
+        )
+        text = tokenizer.decode(logits.argmax(axis=-1), skip_special_tokens=False)
 
         # Parse and execute action
         actions = parse_actions(text)
