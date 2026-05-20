@@ -64,6 +64,8 @@ async def execute(model:transformers.modeling_utils.PreTrainedModel, tokenizer, 
     ).to(model.device)
     # Get embeddings
     inputs_embeds = model.get_input_embeddings()(inputs["input_ids"])
+    if submodel:=next((m for m in model.modules() if hasattr(m, "get_per_layer_inputs")), False):
+        per_layer_inputs = submodel.get_per_layer_inputs(inputs["input_ids"], None)
 
     for i in range(max_steps):
         # Determine location in embedding for the state representation
@@ -73,17 +75,25 @@ async def execute(model:transformers.modeling_utils.PreTrainedModel, tokenizer, 
         state_features = state_encoder(state)
         inputs_embeds[state_mask] = state_features
 
-        # Most models are decoder-only, so we can directly pass (modified) embeddings, while `input_ids` will typically
-        # only be used to find `per_layer_inputs` and to encode images/audio.
+        # Most models are decoder-only, so we can directly pass (modified) embeddings
+        kwargs = {
+            "attention_mask": inputs["attention_mask"],
+            "mm_token_type_ids": inputs["mm_token_type_ids"],
+            "use_cache": True,
+            "logits_to_keep": 1,
+            "output_logits": True,
+            "return_dict_in_generate": True
+        }
+        if i==0:
+            kwargs["inputs_embeds"] = inputs_embeds
+            if submodel: 
+                kwargs["per_layer_inputs"] = per_layer_inputs
+        else:
+            kwargs["input_ids"] = inputs["input_ids"]
+        
+        # Generate next action
         outputs = model.generate(
-            input_ids=inputs["input_ids"],
-            inputs_embeds=inputs_embeds,
-            attention_mask=inputs["attention_mask"],
-            mm_token_type_ids=inputs["mm_token_type_ids"],
-            use_cache=True,
-            logits_to_keep=1,
-            output_logits=True,
-            return_dict_in_generate=True
+            **kwargs
         )
         text = tokenizer.decode(outputs.sequences, skip_special_tokens=False)
 
