@@ -1,13 +1,35 @@
 import torch, transformers
 from PIL import Image
+from lmformatenforcer import JsonSchemaParser
+from lmformatenforcer.integrations.transformers import build_transformers_prefix_allowed_tokens_fn
 
-def execute_tools(tools, text):
+TOOL_CALL_TOKENS = [
+    ("<|tool_call>", "<tool_call|>"),
+    ("<|tool_calls_section_begin|>", "<|tool_calls_section_end|>")
+]
+
+def _make_tool_call_prefix_fn(tokenizer):
+    """Restrict generation to valid JSON tool call format once <tool_call> is emitted."""
+    schema = {"type": "object", "properties": {"name": {"type": "string"}, "arguments": {"type": "object"}}, "required": ["name", "arguments"]}
+    inner = build_transformers_prefix_allowed_tokens_fn(tokenizer, JsonSchemaParser(schema))
+    def prefix_fn(batch_id, sent_tokens):
+        decoded:str = tokenizer.decode(sent_tokens)
+        tool_call = [start in decoded for start, end in TOOL_CALL_TOKENS]
+        if not any(tool_call):
+            return list(range(tokenizer.vocab_size))
+        tool_call_tokens = TOOL_CALL_TOKENS[tool_call.index(True)]
+        after = decoded.rsplit(tool_call_tokens[0], 1)[0]
+        before = after.rsplit(tool_call_tokens[1], 1)[-1]
+        return inner(batch_id, torch.tensor(tokenizer.encode(before, add_special_tokens=False)))
+    return prefix_fn
+
+def execute_tools(text, tool_handlers):
     pass
 
 def state_encoder(state) -> torch.Tensor:
     pass
 
-async def execute(model:transformers.modeling_utils.PreTrainedModel, tokenizer, env, text:str, image:str|Image.Image=None, tools=[], max_steps=10) -> list:
+async def execute(model:transformers.modeling_utils.PreTrainedModel, tokenizer, env, text:str, image:str|Image.Image=None, tools=[], tool_handlers:dict={}, max_steps=10) -> list:
     # Initialize trajectory and get initial state
     trajectory = []
     # Create initial input message
@@ -24,6 +46,7 @@ async def execute(model:transformers.modeling_utils.PreTrainedModel, tokenizer, 
         messages[1]["content"] += [{"type": "image", "image": image}]
     messages[1]["content"] += [{"type": "text", "text": text}, {"type": "text", "text": "<|state>"+"<state|>"}]
 
+    prefix_fn = _make_tool_call_prefix_fn(tokenizer)
     for _ in range(max_steps):
         # Tokenize input
         inputs = tokenizer.apply_chat_template(
@@ -44,10 +67,10 @@ async def execute(model:transformers.modeling_utils.PreTrainedModel, tokenizer, 
 
         # Determine location in embedding for the state representation
         state_token_id = tokenizer.encode("<|state>")[0]
-        state_mask = (inputs["input_ids"] == torch.tensor(state_token_id).to(model.device)).reshape(-1)
+        state_idx = (inputs["input_ids"] == torch.tensor(state_token_id).to(model.device)).reshape(-1)
         # Format current state into prompt
         state_features = state_encoder(env.state)
-        inputs_embeds[state_mask:state_mask+len(state_features)] = state_features
+        inputs_embeds[state_idx:state_idx+len(state_features)] = state_features
         
         # Prepare inputs for generation
         kwargs = {
@@ -57,7 +80,8 @@ async def execute(model:transformers.modeling_utils.PreTrainedModel, tokenizer, 
             "logits_to_keep": 1,
             "output_logits": True,
             "return_dict_in_generate": True,
-            "inputs_embeds": inputs_embeds
+            "inputs_embeds": inputs_embeds,
+            "prefix_allowed_tokens_fn": prefix_fn
         }
         if ple_submodel:
             kwargs["per_layer_inputs"] = per_layer_inputs
@@ -68,7 +92,7 @@ async def execute(model:transformers.modeling_utils.PreTrainedModel, tokenizer, 
         text = tokenizer.decode(outputs.sequences, skip_special_tokens=False)
 
         # Parse and execute action
-        actions = execute_tools(tools, text)
+        actions = execute_tools(text, tool_handlers)
         env = await env.step(actions)
 
         trajectory.append({"inputs_embeds": inputs_embeds, "logits": torch.stack(outputs.logits).squeeze(), "reward": env.reward})
