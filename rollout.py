@@ -38,11 +38,10 @@ def parse_actions(text:str) -> list:
 def state_encoder(state) -> torch.Tensor:
     pass
 
-async def execute(model:transformers.modeling_utils.PreTrainedModel, tokenizer, env, state_token_id, text:str, image:str|Image.Image=None, tools=[], max_steps=10) -> list:
+async def execute(model:transformers.modeling_utils.PreTrainedModel, tokenizer, env, text:str, image:str|Image.Image=None, tools=[], max_steps=10) -> list:
     # Initialize trajectory and get initial state
     trajectory = []
-    state = await env.observe()
-    # Create input message
+    # Create initial input message
     messages = [{"role": "system", "content": 
                 """
                 You are an agent, will be given a current state and a task description, and must interact with the environment by generating actions. \
@@ -54,7 +53,7 @@ async def execute(model:transformers.modeling_utils.PreTrainedModel, tokenizer, 
     ]
     if image is not None:
         messages[1]["content"] += [{"type": "image", "image": image}]
-    messages[1]["content"] += [{"type": "text", "text": text}, {"type": "text", "text": "<|state>"+"<|state|>"*256+"<state|>"}]
+    messages[1]["content"] += [{"type": "text", "text": text}, {"type": "text", "text": "<|state>"+"<state|>"}]
     # Tokenize input
     inputs = tokenizer.apply_chat_template(
         messages,
@@ -72,10 +71,11 @@ async def execute(model:transformers.modeling_utils.PreTrainedModel, tokenizer, 
 
     for _ in range(max_steps):
         # Determine location in embedding for the state representation
+        state_token_id = tokenizer.encode("<|state>")[0]
         state_mask = (inputs["input_ids"] == torch.tensor(state_token_id).to(model.device)).reshape(-1)
         # Format current state into prompt
         state_features = state_encoder(env.state)
-        inputs_embeds[state_mask] = state_features
+        inputs_embeds[state_mask:state_mask+len(state_features)] = state_features
 
         # Most models are decoder-only, so we can directly pass (modified) embeddings
         kwargs = {
@@ -101,7 +101,7 @@ async def execute(model:transformers.modeling_utils.PreTrainedModel, tokenizer, 
         env = await env.step(actions)
 
         trajectory.append({"inputs_embeds": inputs_embeds, "logits": torch.stack(outputs.logits).squeeze(), "reward": env.reward})
-        messages = [{"role": "user", "content": [{"type": "text", "text": "Determine the next action based on the new state. <|state>"+"<|state|>"*256+"<state|>"}]}]
+        messages = [{"role": "user", "content": [{"type": "text", "text": "Determine the next action based on the new state. <|state>"+"<state|>"}]}]
 
         if "done" in actions:
             break
