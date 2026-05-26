@@ -1,15 +1,8 @@
 import torch, transformers
 from PIL import Image
 
-def parse_actions(text:str) -> list:
-    actions = []
-    while "<|action>" in text and "<action|>" in text:
-        start = text.index("<|action>") + len("<|action>")
-        end = text.index("<action|>")
-        action_text = text[start:end].strip()
-        actions.append(action_text)
-        text = text[end + len("<action|>"):]
-    return actions
+def execute_tools(tools, text):
+    pass
 
 def state_encoder(state) -> torch.Tensor:
     pass
@@ -75,7 +68,7 @@ async def execute(model:transformers.modeling_utils.PreTrainedModel, tokenizer, 
         text = tokenizer.decode(outputs.sequences, skip_special_tokens=False)
 
         # Parse and execute action
-        actions = parse_actions(text)
+        actions = execute_tools(tools, text)
         env = await env.step(actions)
 
         trajectory.append({"inputs_embeds": inputs_embeds, "logits": torch.stack(outputs.logits).squeeze(), "reward": env.reward})
