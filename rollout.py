@@ -44,10 +44,10 @@ async def execute(model:transformers.modeling_utils.PreTrainedModel, tokenizer, 
     # Create initial input message
     messages = [{"role": "system", "content": 
                 """
-                You are an agent, will be given a current state and a task description, and must interact with the environment by generating actions. \
-                The state will be provided between a start state token (i.e., <|state>) and an end state token (i.e., <|state|>), and will be represented as a fixed-length vector embedding. \
-                Please format your actions between a start action token (i.e., <|action>) and an end action token (i.e., <action|>) tags. \
-                The environment will respond with observations and rewards based on your actions. \
+                You are an agent, will be given a current state and a task description, and must interact with the provided tools and MCPs in order to accomplish the task. \
+                The current state will be provided between a start state token (i.e., <|state>) and an end state token (i.e., <state|>). \
+                After thinking about your long and short-term intent, immediately format your actions between a start action token (i.e., <|action>) and an end action token (i.e., <action|>). \
+                After having performed this action, a new state will be provided for you to act upon. \
                 """},
                 {"role": "user", "content": []}
     ]
@@ -103,7 +103,7 @@ async def execute(model:transformers.modeling_utils.PreTrainedModel, tokenizer, 
         env = await env.step(actions)
 
         trajectory.append({"inputs_embeds": inputs_embeds, "logits": torch.stack(outputs.logits).squeeze(), "reward": env.reward})
-        messages = [{"role": "user", "content": [{"type": "text", "text": "Determine the next action based on the new state. <|state>"+"<state|>"}]}]
+        messages = [{"role": "user", "content": [{"type": "text", "text": "Determine your next action based on the new state. <|state>"+"<state|>"}]}]
 
         if "done" in actions:
             break
