@@ -35,6 +35,9 @@ def parse_actions(text:str) -> list:
         text = text[end + len("<action|>"):]
     return actions
 
+def state_encoder(state) -> torch.Tensor:
+    pass
+
 async def execute(model:transformers.modeling_utils.PreTrainedModel, tokenizer, env, state_token_id, text:str, image:str|Image.Image=None, tools=[], max_steps=10) -> list:
     # Initialize trajectory and get initial state
     trajectory = []
@@ -72,7 +75,7 @@ async def execute(model:transformers.modeling_utils.PreTrainedModel, tokenizer, 
         if i==0:
             state_mask = (inputs["input_ids"] == torch.tensor(state_token_id).to(model.device)).reshape(-1)
         # Format current state into prompt
-        state_features = state_encoder(state)
+        state_features = state_encoder(env.state)
         inputs_embeds[state_mask] = state_features
 
         # Most models are decoder-only, so we can directly pass (modified) embeddings
@@ -99,9 +102,9 @@ async def execute(model:transformers.modeling_utils.PreTrainedModel, tokenizer, 
 
         # Parse and execute action
         actions = parse_actions(text)
-        state, reward = await env.step(actions)
+        env = await env.step(actions)
 
-        trajectory.append({"inputs_embeds": inputs_embeds, "logits": torch.stack(outputs.logits).squeeze(), "reward": reward})
+        trajectory.append({"inputs_embeds": inputs_embeds, "logits": torch.stack(outputs.logits).squeeze(), "reward": env.reward})
         messages = [{"role": "user", "content": [{"type": "text", "text": "Determine the next action based on the new state. <|state>"+"<|state|>"*256+"<state|>"}]}]
 
         if "done" in actions:
