@@ -67,13 +67,12 @@ async def execute(model:transformers.modeling_utils.PreTrainedModel, tokenizer, 
     ).to(model.device)
     # Get embeddings
     inputs_embeds = model.get_input_embeddings()(inputs["input_ids"])
-    if submodel:=next((m for m in model.modules() if hasattr(m, "get_per_layer_inputs")), False):
-        per_layer_inputs = submodel.get_per_layer_inputs(inputs["input_ids"], None)
+    if ple_submodel:=next((m for m in model.modules() if hasattr(m, "get_per_layer_inputs")), False):
+        per_layer_inputs = ple_submodel.get_per_layer_inputs(inputs["input_ids"], None)
 
-    for i in range(max_steps):
+    for _ in range(max_steps):
         # Determine location in embedding for the state representation
-        if i==0:
-            state_mask = (inputs["input_ids"] == torch.tensor(state_token_id).to(model.device)).reshape(-1)
+        state_mask = (inputs["input_ids"] == torch.tensor(state_token_id).to(model.device)).reshape(-1)
         # Format current state into prompt
         state_features = state_encoder(env.state)
         inputs_embeds[state_mask] = state_features
@@ -87,12 +86,9 @@ async def execute(model:transformers.modeling_utils.PreTrainedModel, tokenizer, 
             "output_logits": True,
             "return_dict_in_generate": True
         }
-        if i==0:
-            kwargs["inputs_embeds"] = inputs_embeds
-            if submodel: 
-                kwargs["per_layer_inputs"] = per_layer_inputs
-        else:
-            kwargs["input_ids"] = inputs["input_ids"]
+        kwargs["inputs_embeds"] = inputs_embeds
+        if ple_submodel: 
+            kwargs["per_layer_inputs"] = per_layer_inputs
         
         # Generate next action
         outputs = model.generate(
