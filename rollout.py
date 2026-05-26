@@ -1,30 +1,6 @@
 import torch, transformers
 from PIL import Image
 
-def init_new_tokens(new_tokens, like_tokens, weights, model, tokenizer):
-    """
-    Args:
-        new_tokens: list of new token strings to add to the tokenizer
-        like_tokens: list of existing token strings to base the new token embeddings on
-        weights: tensor of shape (len(new_tokens), len(like_tokens)) specifying the weights for combining the like_token embeddings to create the new token embeddings
-    Returns:
-        list of new token ids corresponding to the new_tokens
-    """
-    # Find embeddings of related tokens
-    token_ids = tokenizer.encode(like_tokens)
-    embed_layer = model.get_input_embeddings()
-    embeds = embed_layer(torch.tensor(token_ids, device=embed_layer.weight.device)).squeeze(1)
-    # Merge them into new similar tokens
-    assert weights.shape == (len(new_tokens), len(like_tokens))
-    assert torch.allclose(weights.sum(axis=1), torch.ones(len(new_tokens)))
-    embeds = (embeds * weights.to(embeds.device, embeds.dtype).unsqueeze(-1)).sum(axis=1)
-    # Insert into tokenizer
-    tokenizer.add_special_tokens({"additional_special_tokens": new_tokens})
-    model.resize_token_embeddings(len(tokenizer), mean_resizing=False)
-    with torch.no_grad():
-        embed_layer.weight.data[-len(new_tokens):] = embeds
-    return tokenizer.encode(new_tokens)
-
 def parse_actions(text:str) -> list:
     actions = []
     while "<|action>" in text and "<action|>" in text:
@@ -44,9 +20,9 @@ async def execute(model:transformers.modeling_utils.PreTrainedModel, tokenizer, 
     # Create initial input message
     messages = [{"role": "system", "content": 
                 """
-                You are an agent, will be given a current state and a task description, and must interact with the provided tools and MCPs in order to accomplish the task. \
+                You are an agent, will be given a current state and a task description, and must interact with the provided (MCP) tools in order to accomplish the task. \
                 The current state will be provided between a start state token (i.e., <|state>) and an end state token (i.e., <state|>). \
-                After thinking about your long and short-term intent, immediately format your actions between a start action token (i.e., <|action>) and an end action token (i.e., <action|>). \
+                After thinking about your long and short-term intent, immediately provide your tool call. \
                 After having performed this action, a new state will be provided for you to act upon. \
                 """},
                 {"role": "user", "content": []}
