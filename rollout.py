@@ -23,7 +23,7 @@ def _make_tool_call_prefix_fn(tokenizer):
         return inner(batch_id, torch.tensor(tokenizer.encode(before, add_special_tokens=False)))
     return prefix_fn
 
-def execute_tools(text, tool_handlers):
+async def execute_tools(text, tool_handlers, env):
     pass
 
 def state_encoder(state) -> torch.Tensor:
@@ -92,13 +92,13 @@ async def execute(model:transformers.modeling_utils.PreTrainedModel, tokenizer, 
         text = tokenizer.decode(outputs.sequences, skip_special_tokens=False)
 
         # Parse and execute action
-        actions = execute_tools(text, tool_handlers)
-        env = await env.step(actions)
-
+        env = await execute_tools(text, tool_handlers, env)
+        
+        # Save trajectory
         trajectory.append({"inputs_embeds": inputs_embeds, "logits": torch.stack(outputs.logits).squeeze(), "reward": env.reward})
         messages = [{"role": "user", "content": [{"type": "text", "text": "Determine your next action based on the new state. <|state>"+"<state|>"}]}]
 
-        if "done" in actions:
+        if env.state == "terminal":
             break
 
     return trajectory
