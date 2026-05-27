@@ -3,28 +3,10 @@ from PIL import Image
 from lmformatenforcer import JsonSchemaParser
 from lmformatenforcer.integrations.transformers import build_transformers_prefix_allowed_tokens_fn
 
-TOOL_CALL_TOKENS = [
-    ("<|tool_call>", "<tool_call|>"),
-    ("<|tool_calls_section_begin|>", "<|tool_calls_section_end|>"),
-    ("<|python_tag|>", "<|eom_id|>"),
-    ("<|tool_call_begin|>", "<|tool_call_end|>"),
-    ("[TOOL_CALLS]", "") # latter will not result in len(encoded)==1
-]
-
-def _make_tool_call_prefix_fn(tokenizer: transformers.PreTrainedTokenizer):
+def _make_tool_call_prefix_fn(tokenizer: transformers.PreTrainedTokenizer, tool_tokens:tuple[int,int]):
     """Restrict generation to valid JSON tool call format while inside a tool call block."""
     schema = {"type": "object", "properties": {"name": {"type": "string"}, "arguments": {"type": "object"}}, "required": ["name", "arguments"]}
     inner = build_transformers_prefix_allowed_tokens_fn(tokenizer, JsonSchemaParser(schema))
-    # Find which pair of tool call delimiters this model's tokenizer knows as single tokens
-    tool_tokens = None
-    for start, end in TOOL_CALL_TOKENS:
-        s = tokenizer.encode(start, add_special_tokens=False)
-        e = tokenizer.encode(end, add_special_tokens=False)
-        if len(s) == 1 and len(e) == 1:
-            tool_tokens = (s[0], e[0])
-            break
-    else:
-        raise ValueError("Tokenizer does not encode any of the known tool call tokens.")
     def prefix_fn(batch_id, sent_tokens: torch.Tensor):
         tokens = sent_tokens.tolist()
         if tool_tokens[0] in tokens and tool_tokens[1] not in tokens:
@@ -34,13 +16,13 @@ def _make_tool_call_prefix_fn(tokenizer: transformers.PreTrainedTokenizer):
         return list(range(tokenizer.vocab_size))
     return prefix_fn
 
-async def execute_tools(text, tool_handlers, env):
+async def execute_tools(text, tool_handlers, env, tool_tokens):
     pass
 
 def state_encoder(state) -> torch.Tensor:
     pass
 
-async def execute(model:transformers.modeling_utils.PreTrainedModel, tokenizer, env, text:str, image:str|Image.Image=None, tools=[], tool_handlers:dict={}, max_steps=10) -> list:
+async def execute(model:transformers.modeling_utils.PreTrainedModel, tokenizer, env, text:str, tool_tokens:tuple[int,int], image:str|Image.Image=None, tools=[], tool_handlers:dict={}, max_steps=10) -> list:
     # Initialize trajectory and get initial state
     trajectory = []
     # Create initial input message
@@ -57,7 +39,7 @@ async def execute(model:transformers.modeling_utils.PreTrainedModel, tokenizer, 
         messages[1]["content"] += [{"type": "image", "image": image}]
     messages[1]["content"] += [{"type": "text", "text": text}, {"type": "text", "text": "<|state>"+"<state|>"}]
 
-    prefix_fn = _make_tool_call_prefix_fn(tokenizer)
+    prefix_fn = _make_tool_call_prefix_fn(tokenizer, tool_tokens)
     for _ in range(max_steps):
         # Tokenize input
         inputs = tokenizer.apply_chat_template(
@@ -88,7 +70,6 @@ async def execute(model:transformers.modeling_utils.PreTrainedModel, tokenizer, 
             "attention_mask": inputs["attention_mask"],
             "mm_token_type_ids": inputs["mm_token_type_ids"],
             "use_cache": True,
-            "logits_to_keep": 1,
             "output_logits": True,
             "return_dict_in_generate": True,
             "inputs_embeds": inputs_embeds,
@@ -96,17 +77,18 @@ async def execute(model:transformers.modeling_utils.PreTrainedModel, tokenizer, 
         }
         if ple_submodel:
             kwargs["per_layer_inputs"] = per_layer_inputs
-        # Generate next action
+        # Generate next action 
+        # TODO: Is this correct since persistent KV caching is required? Or should a custom autoregression be implemented?
         outputs = model.generate(
             **kwargs
         )
         text = tokenizer.decode(outputs.sequences, skip_special_tokens=False)
 
         # Parse and execute action
-        env = await execute_tools(text, tool_handlers, env)
+        env = await execute_tools(text, tool_handlers, env, tool_tokens)
 
         # Save trajectory
-        trajectory.append({"inputs_embeds": inputs_embeds, "logits": torch.stack(outputs.logits).squeeze(), "reward": env.reward})
+        trajectory.append({"inputs_embeds": inputs_embeds, "logits": torch.stack(outputs.logits), "reward": env.reward})
         messages = [{"role": "user", "content": [{"type": "text", "text": "Determine your next action based on the new state. <|state>"+"<state|>"}]}]
 
         if env.state == "terminal":

@@ -6,6 +6,25 @@
 from transformers import AutoProcessor, AutoModelForImageTextToText, BitsAndBytesConfig
 import torch
 
+def find_tool_call_tokens(tokenizer):
+    # Common tool call tokens
+    tool_call_tokens = [
+        ("<|tool_call>", "<tool_call|>"),
+        ("<|tool_calls_section_begin|>", "<|tool_calls_section_end|>"),
+        ("<|python_tag|>", "<|eom_id|>"),
+        ("<|tool_call_begin|>", "<|tool_call_end|>"),
+    ]
+    # Find which pair of tool call delimiters this model's tokenizer knows as single tokens
+    tool_tokens = None
+    for start, end in tool_call_tokens:
+        s = tokenizer.encode(start, add_special_tokens=False)
+        e = tokenizer.encode(end, add_special_tokens=False)
+        if len(s) == 1 and len(e) == 1: # TODO: does not support Mistral's omittance of end token
+            tool_tokens = (s[0], e[0])
+            return tool_tokens
+    else:
+        raise ValueError("Tokenizer does not encode any of the known tool call tokens.")
+
 def fetch_model(model_id="google/gemma-4-E2B-it"):
     # Quantization
     gpu_available = torch.cuda.is_available()
@@ -27,7 +46,9 @@ def fetch_model(model_id="google/gemma-4-E2B-it"):
     processor = AutoProcessor.from_pretrained(model_id)
     # Add new special tokens for state representation
     init_new_tokens(["<|state>", "<state|>"], ["environment", "observation", "start", "end"], torch.tensor([[.3,.3,.4,0.],[.3,.3,0.,.4]]), model, processor.tokenizer)
-    return model, processor
+    # Find tool call tokens
+    tool_tokens = find_tool_call_tokens(processor.tokenizer)
+    return model, processor, tool_tokens
 
 def init_new_tokens(new_tokens, like_tokens, weights, model, tokenizer):
     """
