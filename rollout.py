@@ -52,7 +52,7 @@ async def execute(model:transformers.modeling_utils.PreTrainedModel, tokenizer, 
     messages[1]["content"] += [{"type": "text", "text": text}, {"type": "text", "text": "<|state>"+"<state|>"}]
 
     prefix_fn = _make_tool_call_prefix_fn(tokenizer, tool_tokens)
-    for _ in range(max_steps):
+    for i in range(max_steps):
         # Tokenize input
         inputs = tokenizer.apply_chat_template(
             messages,
@@ -89,17 +89,21 @@ async def execute(model:transformers.modeling_utils.PreTrainedModel, tokenizer, 
         }
         if ple_submodel:
             kwargs["per_layer_inputs"] = per_layer_inputs
+        if i>0:
+            kwargs["past_key_values"] = outputs.past_key_values
         # Generate next action 
-        # TODO: Is this correct since persistent KV caching is required? Or should a custom autoregression be implemented?
-        outputs = model.generate(
-            **kwargs
-        )
-        # Parse and execute tool calls; TODO: update env from results
-        env = await execute_tools(outputs.sequences[0], tokenizer, tool_handlers, tool_tokens, env)
+        outputs = model.generate(**kwargs)
+
+        # Parse and execute tool calls
+        generated_ids = outputs.sequences[0][inputs["input_ids"].shape[1]:]
+        env = await execute_tools(generated_ids, tokenizer, tool_handlers, tool_tokens, env)
 
         # Save trajectory
         trajectory.append({"inputs_embeds": inputs_embeds, "logits": torch.stack(outputs.logits), "reward": env.reward})
-        messages = [{"role": "user", "content": [{"type": "text", "text": "Determine your next action based on the new state. <|state>"+"<state|>"}]}]
+
+        # Accumulate conversation history so the model sees previous tool results
+        messages.append({"role": "assistant", "content": tokenizer.decode(generated_ids, skip_special_tokens=False)})
+        messages.append({"role": "user", "content": "Determine your next action based on the new state. <|state>"+"<state|>"})
 
         if env.state == "terminal":
             break
