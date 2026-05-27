@@ -1,4 +1,6 @@
-import torch, transformers
+# TODO: `env` should be a class with `state` and `reward` attributes, and an `update` method that takes in a list of (tool_name, result) tuples and updates the state and reward accordingly.
+
+import torch, transformers, json, inspect
 from PIL import Image
 from lmformatenforcer import JsonSchemaParser
 from lmformatenforcer.integrations.transformers import build_transformers_prefix_allowed_tokens_fn
@@ -16,11 +18,21 @@ def _make_tool_call_prefix_fn(tokenizer: transformers.PreTrainedTokenizer, tool_
         return list(range(tokenizer.vocab_size))
     return prefix_fn
 
-async def execute_tools(text, tool_handlers, env, tool_tokens):
-    pass
-
-def state_encoder(state) -> torch.Tensor:
-    pass
+async def execute_tools(sequences: torch.Tensor, tokenizer, tool_handlers: dict, tool_tokens: tuple[int,int], env) -> list:
+    """Extract and execute all tool calls from output token sequence. Returns list of (name, result) tuples."""
+    tokens, results, i = sequences.tolist(), [], 0
+    while i < len(tokens):
+        if tokens[i] == tool_tokens[0]:
+            try: j = tokens.index(tool_tokens[1], i + 1)
+            except ValueError: break  # unclosed call
+            call = json.loads(tokenizer.decode(sequences[i+1:j], skip_special_tokens=False))
+            if handler := tool_handlers.get(call["name"]):
+                result = await handler(**call["arguments"]) if inspect.iscoroutinefunction(handler) else handler(**call["arguments"])
+                results.append((call["name"], result))
+            i = j + 1
+        else:
+            i += 1
+    return env.update(results)
 
 async def execute(model:transformers.modeling_utils.PreTrainedModel, tokenizer, env, text:str, tool_tokens:tuple[int,int], image:str|Image.Image=None, tools=[], tool_handlers:dict={}, max_steps=10) -> list:
     # Initialize trajectory and get initial state
@@ -62,7 +74,7 @@ async def execute(model:transformers.modeling_utils.PreTrainedModel, tokenizer, 
         state_token_id = tokenizer.encode("<|state>")[0]
         state_idx = (inputs["input_ids"] == torch.tensor(state_token_id).to(model.device)).reshape(-1)
         # Format current state into prompt
-        state_features = state_encoder(env.state)
+        state_features = env.state
         inputs_embeds[state_idx:state_idx+len(state_features)] = state_features
         
         # Prepare inputs for generation
@@ -82,10 +94,8 @@ async def execute(model:transformers.modeling_utils.PreTrainedModel, tokenizer, 
         outputs = model.generate(
             **kwargs
         )
-        text = tokenizer.decode(outputs.sequences, skip_special_tokens=False)
-
-        # Parse and execute action
-        env = await execute_tools(text, tool_handlers, env, tool_tokens)
+        # Parse and execute tool calls; TODO: update env from results
+        env = await execute_tools(outputs.sequences[0], tokenizer, tool_handlers, tool_tokens, env)
 
         # Save trajectory
         trajectory.append({"inputs_embeds": inputs_embeds, "logits": torch.stack(outputs.logits), "reward": env.reward})
