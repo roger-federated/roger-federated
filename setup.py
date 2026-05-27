@@ -25,6 +25,8 @@ def fetch_model(model_id="google/gemma-4-E2B-it"):
         offload_buffers=True,
     )
     processor = AutoProcessor.from_pretrained(model_id)
+    # Add new special tokens for state representation
+    init_new_tokens(["<|state>", "<state|>"], ["environment", "observation", "start", "end"], torch.tensor([[.3,.3,.4,0.],[.3,.3,0.,.4]]), model, processor.tokenizer)
     return model, processor
 
 def init_new_tokens(new_tokens, like_tokens, weights, model, tokenizer):
