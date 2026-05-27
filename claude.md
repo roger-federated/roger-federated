@@ -6,8 +6,15 @@ This codebase has the following purpose:
 
 Over time, the LLM foundation model becomes finetuned specifically for agentic workflows, which may arguably be better than the current agents which are basically language models with tools.
 
+The codebase should eventually be split into several folders:
+- `agency/` -- rollout loop, state encoding, action parsing
+- `envs/` -- concrete environment implementations (shell, browser, code)
+- `serving/` -- model loading, quantization, inference wrapper
+- `training/` -- GRPO trainer, LoRA config, reward functions
+- `federated` -- gradient aggregation, differential privacy, strategies
+
 The `readme.md` contains some potentially unrealistic promises, some of which are not entirely relevant anymore.
 
-During code generation, be concise and space-efficient. Write plentiful dense comments.
+During code generation, be concise and efficient. Write plentiful information-dense comments.
 
 Also, account for `.gitignore` in your context.
