@@ -5,22 +5,33 @@ from lmformatenforcer.integrations.transformers import build_transformers_prefix
 
 TOOL_CALL_TOKENS = [
     ("<|tool_call>", "<tool_call|>"),
-    ("<|tool_calls_section_begin|>", "<|tool_calls_section_end|>")
+    ("<|tool_calls_section_begin|>", "<|tool_calls_section_end|>"),
+    ("<|python_tag|>", "<|eom_id|>"),
+    ("<|tool_call_begin|>", "<|tool_call_end|>"),
+    ("[TOOL_CALLS]", "") # latter will not result in len(encoded)==1
 ]
 
-def _make_tool_call_prefix_fn(tokenizer):
-    """Restrict generation to valid JSON tool call format once <tool_call> is emitted."""
+def _make_tool_call_prefix_fn(tokenizer: transformers.PreTrainedTokenizer):
+    """Restrict generation to valid JSON tool call format while inside a tool call block."""
     schema = {"type": "object", "properties": {"name": {"type": "string"}, "arguments": {"type": "object"}}, "required": ["name", "arguments"]}
     inner = build_transformers_prefix_allowed_tokens_fn(tokenizer, JsonSchemaParser(schema))
-    def prefix_fn(batch_id, sent_tokens):
-        decoded:str = tokenizer.decode(sent_tokens)
-        tool_call = [start in decoded for start, end in TOOL_CALL_TOKENS]
-        if not any(tool_call):
-            return list(range(tokenizer.vocab_size))
-        tool_call_tokens = TOOL_CALL_TOKENS[tool_call.index(True)]
-        after = decoded.rsplit(tool_call_tokens[0], 1)[0]
-        before = after.rsplit(tool_call_tokens[1], 1)[-1]
-        return inner(batch_id, torch.tensor(tokenizer.encode(before, add_special_tokens=False)))
+    # Find which pair of tool call delimiters this model's tokenizer knows as single tokens
+    tool_tokens = None
+    for start, end in TOOL_CALL_TOKENS:
+        s = tokenizer.encode(start, add_special_tokens=False)
+        e = tokenizer.encode(end, add_special_tokens=False)
+        if len(s) == 1 and len(e) == 1:
+            tool_tokens = (s[0], e[0])
+            break
+    else:
+        raise ValueError("Tokenizer does not encode any of the known tool call tokens.")
+    def prefix_fn(batch_id, sent_tokens: torch.Tensor):
+        tokens = sent_tokens.tolist()
+        if tool_tokens[0] in tokens and tool_tokens[1] not in tokens:
+            # Filter tokens to after and before tool call tokens
+            idx_start = tokens.index(tool_tokens[0])
+            return inner(batch_id, sent_tokens[idx_start + 1:])
+        return list(range(tokenizer.vocab_size))
     return prefix_fn
 
 async def execute_tools(text, tool_handlers, env):
@@ -37,7 +48,7 @@ async def execute(model:transformers.modeling_utils.PreTrainedModel, tokenizer, 
                 """
                 You are an agent, will be given a current state and a task description, and must interact with the provided (MCP) tools in order to accomplish the task. \
                 The current state will be provided between a start state token (i.e., <|state>) and an end state token (i.e., <state|>). \
-                After thinking about your long and short-term intent, immediately provide your tool call. \
+                After thinking about the long-term and short-term intent, immediately provide your tool call. \
                 After having performed this action, a new state will be provided for you to act upon. \
                 """},
                 {"role": "user", "content": []}
@@ -93,7 +104,7 @@ async def execute(model:transformers.modeling_utils.PreTrainedModel, tokenizer, 
 
         # Parse and execute action
         env = await execute_tools(text, tool_handlers, env)
-        
+
         # Save trajectory
         trajectory.append({"inputs_embeds": inputs_embeds, "logits": torch.stack(outputs.logits).squeeze(), "reward": env.reward})
         messages = [{"role": "user", "content": [{"type": "text", "text": "Determine your next action based on the new state. <|state>"+"<state|>"}]}]
