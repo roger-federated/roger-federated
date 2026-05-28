@@ -52,60 +52,64 @@ async def execute(model:transformers.modeling_utils.PreTrainedModel, tokenizer, 
     messages[1]["content"] += [{"type": "text", "text": text}, {"type": "text", "text": "<|state>"+"<state|>"}]
 
     prefix_fn = _make_tool_call_prefix_fn(tokenizer, tool_tokens)
+    state_token_id = tokenizer.encode("<|state>")[0]
+    past_key_values = None
     for i in range(max_steps):
         # Tokenize input
         inputs = tokenizer.apply_chat_template(
             messages,
-            add_generation_prompt=True,
-            tokenize=True,
-            return_tensors="pt",
-            return_dict=True,
-            enable_thinking=True,
-            tools=tools
+            add_generation_prompt=True, tokenize=True,
+            return_tensors="pt", return_dict=True,
+            enable_thinking=True, tools=tools
         ).to(model.device)
+        # Remove bos token at subsequent calls
+        if i>0 and inputs["input_ids"][0, 0] == tokenizer.bos_token_id:
+            inputs["input_ids"] = inputs["input_ids"][:, 1:]
+            inputs["attention_mask"] = inputs["attention_mask"][:, 1:]
 
         # Most models are decoder-only, so we can directly pass (modified) embeddings
-        inputs_embeds = model.get_input_embeddings()(inputs["input_ids"])
-        # Some models have per-layer embeddings
-        if ple_submodel:=next((m for m in model.modules() if hasattr(m, "get_per_layer_inputs")), False):
-            per_layer_inputs = ple_submodel.get_per_layer_inputs(inputs["input_ids"], None)
+        embeds = model.get_input_embeddings()(inputs["input_ids"])
+        # Inject current state into prompt
+        state_idx = (inputs["input_ids"][0] == state_token_id).nonzero()[-1].item()
+        embeds = torch.cat([embeds[...,:state_idx], env.state, embeds[...,state_idx+1:]], dim=1)
 
-        # Determine location in embedding for the state representation
-        state_token_id = tokenizer.encode("<|state>")[0]
-        state_idx = (inputs["input_ids"] == torch.tensor(state_token_id).to(model.device)).reshape(-1)
-        # Format current state into prompt
-        state_features = env.state
-        inputs_embeds[state_idx:state_idx+len(state_features)] = state_features
-        
-        # Prepare inputs for generation
+        # Attention mask must cover the full sequence: cached prefix + new tokens
+        cached_len = past_key_values[0][0].shape[2] if past_key_values else 0
+        attn_mask = torch.ones(1, cached_len + embeds.shape[1], device=model.device, dtype=torch.long)
+
+        # Prepare generation arguments
         kwargs = {
-            "attention_mask": inputs["attention_mask"],
-            "mm_token_type_ids": inputs["mm_token_type_ids"],
+            "inputs_embeds": embeds,
+            "attention_mask": attn_mask,
+            "past_key_values": past_key_values,
             "use_cache": True,
             "output_logits": True,
             "return_dict_in_generate": True,
-            "inputs_embeds": inputs_embeds,
             "prefix_allowed_tokens_fn": prefix_fn
         }
-        if ple_submodel:
-            kwargs["per_layer_inputs"] = per_layer_inputs
-        if i>0:
-            kwargs["past_key_values"] = outputs.past_key_values
-        # Generate next action 
+        # Some models have per-layer embeddings
+        if ple_submodel:=next((m for m in model.modules() if hasattr(m, "get_per_layer_inputs")), False):
+            kwargs["mm_token_type_ids"] = inputs.get("mm_token_type_ids")
+            kwargs["per_layer_inputs"] = ple_submodel.get_per_layer_inputs(inputs["input_ids"], None)
+        # Generate
         outputs = model.generate(**kwargs)
+        past_key_values = outputs.past_key_values
 
-        # Parse and execute tool calls
-        generated_ids = outputs.sequences[0][inputs["input_ids"].shape[1]:]
+        # Parse and execute tool calls from the newly generated tokens only
+        generated_ids = outputs.sequences[0][embeds.shape[1]:]
         env = await execute_tools(generated_ids, tokenizer, tool_handlers, tool_tokens, env)
 
         # Save trajectory
-        trajectory.append({"inputs_embeds": inputs_embeds, "logits": torch.stack(outputs.logits), "reward": env.reward})
-
-        # Accumulate conversation history so the model sees previous tool results
-        messages.append({"role": "assistant", "content": tokenizer.decode(generated_ids, skip_special_tokens=False)})
-        messages.append({"role": "user", "content": "Determine your next action based on the new state. <|state>"+"<state|>"})
-
+        trajectory.append({"inputs_embeds": embeds, "logits": torch.stack(outputs.logits), "reward": env.reward})
+        
+        # Check for terminal state
         if env.state == "terminal":
             break
+
+        # Append new message
+        messages = [
+            {"role": "assistant", "content": tokenizer.decode(generated_ids, skip_special_tokens=False)},
+            {"role": "user", "content": "Again, after thinking about the long-term and short-term intent based on the new state, immediately determine your tool call. <|state>"+"<state|>"}
+        ]
 
     return trajectory
