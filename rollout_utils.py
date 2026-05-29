@@ -11,7 +11,9 @@ def _make_tool_call_prefix_fn(tokenizer:transformers.PreTrainedTokenizer, tool_t
         tokens = sent_tokens.tolist()
         if tool_tokens[0] in tokens and tool_tokens[1] not in tokens:
             idx_start = tokens.index(tool_tokens[0])
-            return inner(batch_id, sent_tokens[idx_start + 1:])
+            allowed = inner(batch_id, sent_tokens[idx_start + 1:])
+            allowed.append(tool_tokens[1])
+            return allowed
         return list(range(tokenizer.vocab_size))
     return prefix_fn
 
@@ -39,7 +41,7 @@ async def rollout(model:transformers.modeling_utils.PreTrainedModel, tokenizer:t
     messages = [{"role": "system", "content": 
                 """
                 You are an agent, will be given a current state and a task description, and must interact with the provided (MCP) tools in order to accomplish the task. \
-                After thinking about the long-term and short-term intent, immediately provide your tool call. \
+                After thinking about the long-term and short-term intent, immediately provide your tool call in JSON format. \
                 A special tool is `get_state`, in which case the overall task status will be provided between a start state token (i.e., <|state>) and an end state token (i.e., <state|>).
                 """},
                 {"role": "user", "content": []}
