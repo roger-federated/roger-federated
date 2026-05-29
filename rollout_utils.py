@@ -1,4 +1,4 @@
-# TODO: `env` should be a class with `state` and `reward` attributes, and an `update` method that takes in a list of (tool_name, result) tuples and updates the state and reward accordingly.
+# TODO: `env` should be a class with `state` and `reward` attributes, an `update` method that takes in (tool call, result) tuples and updates the state and reward accordingly, and a method `get_state` that is used as a tool to query the env state.
 
 import torch, transformers, json, inspect
 from PIL import Image
@@ -19,40 +19,32 @@ def _make_tool_call_prefix_fn(tokenizer:transformers.PreTrainedTokenizer, tool_t
     return prefix_fn
 
 async def execute_tools(sequences:torch.Tensor, tokenizer:transformers.PreTrainedTokenizer, 
-                        tool_handlers:dict, tool_tokens:tuple[int,int], env) -> list:
-    """Extract and execute all tool calls from output token sequence. Returns list of (name, result) tuples."""
-    tokens, results, i = sequences.tolist(), [], 0
-    while i < len(tokens):
-        if tokens[i] == tool_tokens[0]:
-            try: j = tokens.index(tool_tokens[1], i + 1)
-            except ValueError: break  # unclosed call
-            call = json.loads(tokenizer.decode(sequences[i+1:j], skip_special_tokens=False))
-            if handler := tool_handlers.get(call["name"]):
-                result = await handler(**call["arguments"]) if inspect.iscoroutinefunction(handler) else handler(**call["arguments"])
-                results.append((call["name"], result))
-            i = j + 1
-        else:
-            i += 1
-    return env.update(results)
+                        tool_handlers:dict, tool_tokens:tuple[int,int]) -> tuple[dict, str|torch.Tensor]:
+    """Extract and execute (a single) tool call from output token sequence."""
+    start_tool_idx = sequences.tolist().index(tool_tokens[0])
+    end_tool_idx = sequences.tolist().index(tool_tokens[1])
+
+    call = json.loads(tokenizer.decode(sequences[start_tool_idx+1:end_tool_idx], skip_special_tokens=False))
+    if handler := tool_handlers.get(call["name"], False):
+        result = await handler(**call["arguments"]) if inspect.iscoroutinefunction(handler) else handler(**call["arguments"])
+
+    return call, result
 
 async def rollout(model:transformers.modeling_utils.PreTrainedModel, tokenizer:transformers.PreTrainedTokenizer, 
                   env, text:str, tool_tokens:tuple[int,int], image:str|Image.Image=None, tools=[], 
                   tool_handlers:dict={}, max_steps=10) -> list:
-    # Initialize trajectory and get initial state
+    # Initialize trajectory and provide model with state-getter
     trajectory = []
+    tools.append(env.get_state)
     # Create initial input message
     messages = [{"role": "system", "content": 
                 """
                 You are an agent, will be given a current state and a task description, and must interact with the provided (MCP) tools in order to accomplish the task. \
-                The current state will be provided between a start state token (i.e., <|state>) and an end state token (i.e., <state|>). \
                 After thinking about the long-term and short-term intent, immediately provide your tool call. \
-                After having performed this action, a new state will be provided for you to act upon. \
+                A special tool is `get_state`, in which case the overall task status will be provided between a start state token (i.e., <|state>) and an end state token (i.e., <state|>).
                 """},
-                {"role": "user", "content": []}
+                {"role": "user", "content": [{"type": "image", "image": image}]}
     ]
-    if image is not None:
-        messages[1]["content"] += [{"type": "image", "image": image}]
-    messages[1]["content"] += [{"type": "text", "text": text}, {"type": "text", "text": "<|state>"+"<state|>"}]
 
     prefix_fn = _make_tool_call_prefix_fn(tokenizer, tool_tokens)
     ple_submodel = next((m for m in model.modules() if hasattr(m, "get_per_layer_inputs")), False)
@@ -73,9 +65,10 @@ async def rollout(model:transformers.modeling_utils.PreTrainedModel, tokenizer:t
 
         # Most models are decoder-only, so we can directly pass (modified) embeddings
         embeds = model.get_input_embeddings()(inputs["input_ids"])
-        # Inject current state into prompt
-        state_idx = (inputs["input_ids"][0] == state_token_id).nonzero()[-1].item()
-        embeds = torch.cat([embeds[:,:state_idx], env.state, embeds[:,state_idx+1:]], dim=1)
+        # Inject current state into prompt IF requested tool call was state query
+        if state_token_id in inputs["input_ids"][0]:
+            state_idx = inputs["input_ids"][0].tolist().index(state_token_id)
+            embeds = torch.cat([embeds[:,:state_idx], env.state, embeds[:,state_idx+1:]], dim=1)
 
         # Attention mask must cover the full sequence: cached prefix + new tokens
         cached_len = past_key_values[0][0].shape[2] if past_key_values else 0
@@ -101,7 +94,8 @@ async def rollout(model:transformers.modeling_utils.PreTrainedModel, tokenizer:t
 
         # Parse and execute tool calls from the newly generated tokens only
         generated_ids = outputs.sequences[0][embeds.shape[1]:]
-        env = await execute_tools(generated_ids, tokenizer, tool_handlers, tool_tokens, env)
+        call, result = await execute_tools(generated_ids, tokenizer, tool_handlers, tool_tokens)
+        env.update(call, result)
 
         # Save trajectory
         trajectory.append({"inputs_embeds": embeds, "logits": torch.stack(outputs.logits), "reward": env.reward})
@@ -110,10 +104,14 @@ async def rollout(model:transformers.modeling_utils.PreTrainedModel, tokenizer:t
         if env.state == "terminal":
             break
 
+        # Special case if tool call was state query
+        if call["name"]==env.get_state.__name__:
+            result = "Again, after thinking about the long-term and short-term intent based \
+                on the new state, immediately determine your tool call. <|state><state|>"
         # Append new message
         messages = [
-            {"role": "user", "content": "Again, after thinking about the long-term and short-term intent based on the new state, \
-             immediately determine your tool call. <|state>"+"<state|>"}
+            {"role": "assistant", "tool_calls": [{"type":"function", "function": call}]},
+            {"role": "tool", "content": result}
         ]
 
     return trajectory
