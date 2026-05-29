@@ -5,15 +5,22 @@ from lmformatenforcer.integrations.transformers import build_transformers_prefix
 
 def _make_tool_call_prefix_fn(tokenizer:transformers.PreTrainedTokenizer, tool_tokens:tuple[int,int]):
     """Restrict generation to valid JSON tool call format while inside a tool call block."""
+    # Prepare JSON format
     schema = {"type": "object", "properties": {"name": {"type": "string"}, "arguments": {"type": "object"}}, "required": ["name", "arguments"]}
     inner = build_transformers_prefix_allowed_tokens_fn(tokenizer, JsonSchemaParser(schema))
     def prefix_fn(batch_id, sent_tokens: torch.Tensor):
         tokens = sent_tokens.tolist()
+        # Parse start of tool call
         if tool_tokens[0] in tokens and tool_tokens[1] not in tokens:
             idx_start = tokens.index(tool_tokens[0])
             allowed = inner(batch_id, sent_tokens[idx_start + 1:])
+            # Tool needs to be closed
+            if tokenizer.eos_token_id in allowed: allowed.remove(tokenizer.eos_token_id)
             allowed.append(tool_tokens[1])
             return allowed
+        # Force immediate end afterwards
+        if tool_tokens[1] in tokens:
+            return [tokenizer.eos_token_id]
         return list(range(tokenizer.vocab_size))
     return prefix_fn
 
@@ -99,6 +106,7 @@ async def rollout(model:transformers.modeling_utils.PreTrainedModel, tokenizer:t
 
         # Parse and execute tool calls from the newly generated tokens only
         generated_ids = outputs.sequences[0]
+        print(tokenizer.decode(generated_ids))
         call, result = await execute_tools(generated_ids, tokenizer, tool_handlers, tool_tokens)
         env.update(call, result)
 
