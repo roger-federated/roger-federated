@@ -1,4 +1,4 @@
-# TODO: `env` should be a class with `state` and `reward` attributes, an `update` method that takes in (tool call, result) tuples and updates the state and reward accordingly, and a method `get_state` that is used as a tool to query the env state.
+# TODO: `env` should be a class with a `get_reward` method, an `update` method that takes in (tool call, result) tuples and updates the state and reward accordingly, and a method `get_state` that is used as a tool to query the env state.
 
 import torch, transformers, json, inspect
 from PIL import Image
@@ -19,7 +19,7 @@ def _make_tool_call_prefix_fn(tokenizer:transformers.PreTrainedTokenizer, tool_t
     return prefix_fn
 
 async def execute_tools(sequences:torch.Tensor, tokenizer:transformers.PreTrainedTokenizer, 
-                        tool_handlers:dict, tool_tokens:tuple[int,int]) -> tuple[dict, str|torch.Tensor]:
+                        tool_handlers:dict, tool_tokens:tuple[int,int]) -> tuple[str, str|torch.Tensor]:
     """Extract and execute (a single) tool call from output token sequence."""
     start_tool_idx = sequences.tolist().index(tool_tokens[0])
     end_tool_idx = sequences.tolist().index(tool_tokens[1])
@@ -27,6 +27,8 @@ async def execute_tools(sequences:torch.Tensor, tokenizer:transformers.PreTraine
     call = json.loads(tokenizer.decode(sequences[start_tool_idx+1:end_tool_idx], skip_special_tokens=False))
     if handler := tool_handlers.get(call["name"], False):
         result = await handler(**call["arguments"]) if inspect.iscoroutinefunction(handler) else handler(**call["arguments"])
+    else:
+        raise NotImplementedError(f"No tool handler provided for {call['name']}")
 
     return call, result
 
@@ -43,8 +45,11 @@ async def rollout(model:transformers.modeling_utils.PreTrainedModel, tokenizer:t
                 After thinking about the long-term and short-term intent, immediately provide your tool call. \
                 A special tool is `get_state`, in which case the overall task status will be provided between a start state token (i.e., <|state>) and an end state token (i.e., <state|>).
                 """},
-                {"role": "user", "content": [{"type": "image", "image": image}]}
+                {"role": "user", "content": []}
     ]
+    if image is not None:
+        messages[1]["content"] += [{"type": "image", "image": image}]
+    messages[1]["content"] += [{"type": "text", "text": text}]
 
     prefix_fn = _make_tool_call_prefix_fn(tokenizer, tool_tokens)
     ple_submodel = next((m for m in model.modules() if hasattr(m, "get_per_layer_inputs")), False)
@@ -65,10 +70,10 @@ async def rollout(model:transformers.modeling_utils.PreTrainedModel, tokenizer:t
 
         # Most models are decoder-only, so we can directly pass (modified) embeddings
         embeds = model.get_input_embeddings()(inputs["input_ids"])
-        # Inject current state into prompt IF requested tool call was state query
+        # Inject current state into prompt IF requested tool call was state query, i.e., result is state
         if state_token_id in inputs["input_ids"][0]:
             state_idx = inputs["input_ids"][0].tolist().index(state_token_id)
-            embeds = torch.cat([embeds[:,:state_idx], env.state, embeds[:,state_idx+1:]], dim=1)
+            embeds = torch.cat([embeds[:,:state_idx], result, embeds[:,state_idx+1:]], dim=1)
 
         # Attention mask must cover the full sequence: cached prefix + new tokens
         cached_len = past_key_values[0][0].shape[2] if past_key_values else 0
@@ -98,16 +103,16 @@ async def rollout(model:transformers.modeling_utils.PreTrainedModel, tokenizer:t
         env.update(call, result)
 
         # Save trajectory
-        trajectory.append({"inputs_embeds": embeds, "logits": torch.stack(outputs.logits), "reward": env.reward})
+        trajectory.append({"inputs_embeds": embeds, "logits": torch.stack(outputs.logits), "reward": env.get_reward()})
         
         # Check for terminal state
-        if env.state == "terminal":
+        if env.get_state() == "terminal":
             break
 
         # Special case if tool call was state query
         if call["name"]==env.get_state.__name__:
-            result = "Again, after thinking about the long-term and short-term intent based \
-                on the new state, immediately determine your tool call. <|state><state|>"
+            result = "Task ongoing. Again, after thinking about the long-term and short-term intent based \
+                on the provided state, immediately emitq your tool call. <|state><state|>"
         # Append new message
         messages = [
             {"role": "assistant", "tool_calls": [{"type":"function", "function": call}]},
