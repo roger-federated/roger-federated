@@ -1,5 +1,3 @@
-# TODO: `env` should be a class with a `get_reward` method, an `update` method that takes in (tool call, result) tuples and updates the state and reward accordingly, and a method `get_state` that is used as a tool to query the env state.
-
 import torch, transformers, json, inspect
 from PIL import Image
 from lmformatenforcer import JsonSchemaParser
@@ -12,7 +10,6 @@ def _make_tool_call_prefix_fn(tokenizer:transformers.PreTrainedTokenizer, tool_t
     def prefix_fn(batch_id, sent_tokens: torch.Tensor):
         tokens = sent_tokens.tolist()
         if tool_tokens[0] in tokens and tool_tokens[1] not in tokens:
-            # Filter tokens to after and before tool call tokens
             idx_start = tokens.index(tool_tokens[0])
             return inner(batch_id, sent_tokens[idx_start + 1:])
         return list(range(tokenizer.vocab_size))
@@ -21,10 +18,10 @@ def _make_tool_call_prefix_fn(tokenizer:transformers.PreTrainedTokenizer, tool_t
 async def execute_tools(sequences:torch.Tensor, tokenizer:transformers.PreTrainedTokenizer, 
                         tool_handlers:dict, tool_tokens:tuple[int,int]) -> tuple[str, str|torch.Tensor]:
     """Extract and execute (a single) tool call from output token sequence."""
-    start_tool_idx = sequences.tolist().index(tool_tokens[0])
-    end_tool_idx = sequences.tolist().index(tool_tokens[1])
+    start_tool_idx = sequences.squeeze().tolist().index(tool_tokens[0])
+    end_tool_idx = sequences.squeeze().tolist().index(tool_tokens[1])
 
-    call = json.loads(tokenizer.decode(sequences[start_tool_idx+1:end_tool_idx], skip_special_tokens=False))
+    call = json.loads(tokenizer.decode(sequences.squeeze()[start_tool_idx+1:end_tool_idx], skip_special_tokens=False))
     if handler := tool_handlers.get(call["name"], False):
         result = await handler(**call["arguments"]) if inspect.iscoroutinefunction(handler) else handler(**call["arguments"])
     else:
@@ -32,9 +29,9 @@ async def execute_tools(sequences:torch.Tensor, tokenizer:transformers.PreTraine
 
     return call, result
 
-async def rollout(model:transformers.modeling_utils.PreTrainedModel, tokenizer:transformers.PreTrainedTokenizer, 
-                  env, text:str, tool_tokens:tuple[int,int], image:str|Image.Image=None, tools=[], 
-                  tool_handlers:dict={}, max_steps=10) -> list:
+async def rollout(model:transformers.modeling_utils.PreTrainedModel, tokenizer:transformers.PreTrainedTokenizer,
+                  env, text:str, tool_tokens:tuple[int,int], image:str|Image.Image=None, tools=[],
+                  tool_handlers:dict={}, max_steps:int=10, max_new_tokens:int|None=4096) -> list:
     # Initialize trajectory and provide model with state-getter
     trajectory = []
     tools.append(env.get_state)
@@ -63,7 +60,7 @@ async def rollout(model:transformers.modeling_utils.PreTrainedModel, tokenizer:t
             return_tensors="pt", return_dict=True,
             enable_thinking=True, tools=tools
         ).to(model.device)
-        # Remove bos token at subsequent calls
+        # Remove bos token at subsequent calls TODO: same for eos in cache?
         if i>0 and inputs["input_ids"][0, 0] == tokenizer.bos_token_id:
             inputs["input_ids"] = inputs["input_ids"][:, 1:]
             inputs["attention_mask"] = inputs["attention_mask"][:, 1:]
@@ -71,7 +68,7 @@ async def rollout(model:transformers.modeling_utils.PreTrainedModel, tokenizer:t
         # Most models are decoder-only, so we can directly pass (modified) embeddings
         embeds = model.get_input_embeddings()(inputs["input_ids"])
         # Inject current state into prompt IF requested tool call was state query, i.e., result is state
-        if state_token_id in inputs["input_ids"][0]:
+        if i>0 and state_token_id in inputs["input_ids"][0]:
             state_idx = inputs["input_ids"][0].tolist().index(state_token_id)
             embeds = torch.cat([embeds[:,:state_idx], result, embeds[:,state_idx+1:]], dim=1)
 
@@ -87,7 +84,8 @@ async def rollout(model:transformers.modeling_utils.PreTrainedModel, tokenizer:t
             "use_cache": True,
             "output_logits": True,
             "return_dict_in_generate": True,
-            "prefix_allowed_tokens_fn": prefix_fn
+            "prefix_allowed_tokens_fn": prefix_fn, # TODO: this overwrites logits instead of ignoring them, obstructing downstream RL
+            "max_new_tokens": max_new_tokens
         }
         # Some models have per-layer embeddings
         if ple_submodel:
@@ -98,7 +96,7 @@ async def rollout(model:transformers.modeling_utils.PreTrainedModel, tokenizer:t
         past_key_values = outputs.past_key_values
 
         # Parse and execute tool calls from the newly generated tokens only
-        generated_ids = outputs.sequences[0][embeds.shape[1]:]
+        generated_ids = outputs.sequences[0]
         call, result = await execute_tools(generated_ids, tokenizer, tool_handlers, tool_tokens)
         env.update(call, result)
 
@@ -112,7 +110,7 @@ async def rollout(model:transformers.modeling_utils.PreTrainedModel, tokenizer:t
         # Special case if tool call was state query
         if call["name"]==env.get_state.__name__:
             result = "Task ongoing. Again, after thinking about the long-term and short-term intent based \
-                on the provided state, immediately emitq your tool call. <|state><state|>"
+                on the provided state, immediately emit your tool call. <|state><state|>"
         # Append new message
         messages = [
             {"role": "assistant", "tool_calls": [{"type":"function", "function": call}]},
