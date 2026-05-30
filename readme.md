@@ -32,11 +32,14 @@ The product is still in development. Below is a non-exhaustive list of to-do ite
 - [ ] ~~Make the finetuning framework compatible with LoRA.~~
 - [x] Set up automatic model loading
 - [x] Write code to handle and record agentic rollouts using HF models and vLLM inference.
-- [ ] Investigate how to programmatically interact with the OS.
-- [ ] Give the model agency, i.e., integrate tool use, reasoning, etc., with the LLM as foundation.
-- [ ] Give the agent autonomy, i.e., ability to execute in a background VM/sandbox.
+- [ ] ~Investigate how to programmatically interact with the OS.~
+- [x] Give the model agency, i.e., integrate tool use, reasoning, etc., with the LLM as foundation.
+- [ ] Set up MCP integration.
+- [ ] ~Give the agent autonomy, i.e., ability to execute in a background VM/sandbox.~
+- [ ] Make it executable.
+- [ ] Congrats, you now have a semi-basic agent.
 - [ ] Implement what the finetuning framework considers as rewards.
-- [ ] Congrats, you now have a working prototype.
+- [ ] Implement automatic RL execution.
 - [ ] Implement federated learning-style hives.
-- [ ] Integrate product into an application in which an account is set up, hives are selected, finetuning is scheduled, gradient sharing settings are applied, as well as (background/execution) autonomy settings, and (file) permission settings.
+- [ ] Integrate product into an (CLI) application in which an account is set up, hives are selected, finetuning is scheduled, gradient sharing settings are applied, as well as (background/execution) autonomy settings, and (file) permission settings.
 - [ ] Congrats, you now have a product.
