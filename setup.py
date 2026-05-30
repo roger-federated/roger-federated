@@ -25,7 +25,7 @@ def find_tool_call_tokens(tokenizer):
     else:
         raise ValueError("Tokenizer does not encode any of the known tool call tokens.")
 
-def fetch_model(model_id="google/gemma-4-E2B-it"):
+def fetch_model(model_id="google/gemma-4-E2B-it") -> tuple[AutoModelForImageTextToText, AutoProcessor, tuple[int, int]]:
     # Quantization
     gpu_available = torch.cuda.is_available()
     bnb_config = BitsAndBytesConfig(
