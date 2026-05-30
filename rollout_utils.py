@@ -15,8 +15,9 @@ def _make_tool_call_prefix_fn(tokenizer:transformers.PreTrainedTokenizer, tool_t
             idx_start = tokens.index(tool_tokens[0])
             allowed = inner(batch_id, sent_tokens[idx_start + 1:])
             # Tool needs to be closed
-            if tokenizer.eos_token_id in allowed: allowed.remove(tokenizer.eos_token_id)
-            allowed.append(tool_tokens[1])
+            if tokenizer.eos_token_id in allowed: 
+                allowed.remove(tokenizer.eos_token_id)
+                allowed.append(tool_tokens[1])
             return allowed
         # Force immediate end afterwards
         if tool_tokens[1] in tokens:
@@ -48,7 +49,7 @@ async def rollout(model:transformers.modeling_utils.PreTrainedModel, tokenizer:t
     messages = [{"role": "system", "content": 
                 """
                 You are an agent, will be given a current state and a task description, and must interact with the provided (MCP) tools in order to accomplish the task. \
-                After thinking about the long-term and short-term intent, immediately provide your tool call in JSON format. \
+                After concisely thinking about the long-term and short-term intent, immediately provide your tool call in JSON format. \
                 A special tool is `get_state`, in which case the overall task status will be provided between a start state token (i.e., <|state>) and an end state token (i.e., <state|>).
                 """},
                 {"role": "user", "content": []}
@@ -84,7 +85,7 @@ async def rollout(model:transformers.modeling_utils.PreTrainedModel, tokenizer:t
         # Attention mask covers the full sequence (cached prefix accounted for by past_key_values)
         attn_mask = torch.ones(1, embeds.shape[1], device=model.device, dtype=torch.long)
 
-        # Prepare inputs and rely on internal slicing
+        # Prepare inputs and rely on internal slicing based on kv cache length
         kwargs = {
             "inputs_embeds": embeds,
             "attention_mask": attn_mask,
@@ -95,20 +96,21 @@ async def rollout(model:transformers.modeling_utils.PreTrainedModel, tokenizer:t
             "prefix_allowed_tokens_fn": prefix_fn, # TODO: this overwrites logits instead of ignoring them, obstructing downstream RL
             "max_new_tokens": max_new_tokens
         }
-        # Some models use per-layer-embeddings (this must be pre-sliced)
-        cached_len = past_key_values.get_seq_length() if past_key_values else 0
+        # Keep track of what is cached, i.e., all but the newly inserted message
+        if past_key_values: cached_idx = embeds.shape[1] - past_key_values.get_seq_length()
+        else: cached_idx = 0
+        # Some models use per-layer-embeddings
         if ple_submodel:
             ple = ple_submodel.get_per_layer_inputs(inputs["input_ids"], None)
-            kwargs["per_layer_inputs"] = ple[:, cached_len:]
+            kwargs["per_layer_inputs"] = ple[:, -cached_idx:]
         if mm:=inputs.get("mm_token_type_ids"):
-            kwargs["mm_token_type_ids"] = mm[:, cached_len:]
+            kwargs["mm_token_type_ids"] = mm[:, -cached_idx:]
         # Generate
         outputs = model.generate(**kwargs)
+        generated_ids = outputs.sequences[0]
         past_key_values = outputs.past_key_values
 
         # Parse and execute tool calls from the newly generated tokens only
-        generated_ids = outputs.sequences[0]
-        print(tokenizer.decode(generated_ids)) # DEBUGGING ONLY
         call, result = await execute_tools(generated_ids, tokenizer, tool_handlers, tool_tokens)
         env.update(call, result)
 
@@ -120,13 +122,12 @@ async def rollout(model:transformers.modeling_utils.PreTrainedModel, tokenizer:t
             break
 
         # Special case if tool call was state query
-        if call["name"]==env.get_state.__name__:
-            inject_state = True
-            result = "Task ongoing. Again, after thinking about the long-term and short-term intent based \
+        if inject_state:=(call["name"]==env.get_state.__name__):
+            result = "Task ongoing. Again, after concisely thinking about the long-term and short-term intent based \
                 on the provided state, immediately emit your tool call. <|state><state|>"
         # Accumulate conversation
         messages += [
-            {"role": "assistant", "tool_calls": [{"type":"function", "function": call}]},
+            {"role": "assistant", "content": tokenizer.decode(generated_ids, skip_special_tokens=False)},
             {"role": "tool", "content": result}
         ]
 
