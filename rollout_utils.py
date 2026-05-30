@@ -57,11 +57,14 @@ async def rollout(model:transformers.modeling_utils.PreTrainedModel, tokenizer:t
         messages[1]["content"] += [{"type": "image", "image": image}]
     messages[1]["content"] += [{"type": "text", "text": text}]
 
+    # Init and loop conversation
+    embed_submodel = model.get_input_embeddings()
     prefix_fn = _make_tool_call_prefix_fn(tokenizer, tool_tokens)
     ple_submodel = next((m for m in model.modules() if hasattr(m, "get_per_layer_inputs")), False)
     state_token_id = tokenizer.encode("<|state>")[0]
+    inject_state = False
     past_key_values = None
-    for i in range(max_steps):
+    for _ in range(max_steps):
         # Tokenize full conversation every step, internally sliced when kv cache is passed
         inputs = tokenizer.apply_chat_template(
             messages,
@@ -71,11 +74,12 @@ async def rollout(model:transformers.modeling_utils.PreTrainedModel, tokenizer:t
         ).to(model.device)
 
         # Most models are decoder-only, so we can directly pass embeddings
-        embeds = model.get_input_embeddings()(inputs["input_ids"])
-        # Inject state at last <|state> position if present
-        if i>0 and state_token_id in inputs["input_ids"][0]:
-            state_idx = inputs["input_ids"][0].tolist().index(state_token_id)
-            embeds = torch.cat([embeds[:,:state_idx], result, embeds[:,state_idx+1:]], dim=1)
+        embeds = embed_submodel(inputs["input_ids"])
+        # Inject state at last <|state> occurence if present
+        if inject_state:
+            tmp = inputs["input_ids"][0].tolist()
+            state_idx = len(tmp) - tmp[-1::-1].index(state_token_id)
+            embeds = torch.cat([embeds[:,:state_idx], result, embeds[:,state_idx:]], dim=1)
 
         # Attention mask covers the full sequence (cached prefix accounted for by past_key_values)
         attn_mask = torch.ones(1, embeds.shape[1], device=model.device, dtype=torch.long)
@@ -117,6 +121,7 @@ async def rollout(model:transformers.modeling_utils.PreTrainedModel, tokenizer:t
 
         # Special case if tool call was state query
         if call["name"]==env.get_state.__name__:
+            inject_state = True
             result = "Task ongoing. Again, after thinking about the long-term and short-term intent based \
                 on the provided state, immediately emit your tool call. <|state><state|>"
         # Accumulate conversation
