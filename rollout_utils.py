@@ -26,11 +26,15 @@ def _make_tool_call_prefix_fn(tokenizer:transformers.PreTrainedTokenizer, tool_t
         return list(range(tokenizer.vocab_size))
     return prefix_fn
 
-async def execute_tools(sequences:torch.Tensor, tokenizer:transformers.PreTrainedTokenizer, 
-                        tool_handlers:dict, tool_tokens:tuple[int,int]) -> tuple[str, str|torch.Tensor]:
-    """Extract and execute (a single) tool call from output token sequence."""
-    start_tool_idx = sequences.squeeze().tolist().index(tool_tokens[0])
-    end_tool_idx = sequences.squeeze().tolist().index(tool_tokens[1])
+async def execute_tools(sequences:torch.Tensor, tokenizer:transformers.PreTrainedTokenizer,
+                        tool_handlers:dict, tool_tokens:tuple[int,int]) -> tuple[dict|None, str|torch.Tensor]:
+    """Extract and execute (a single) tool call from output token sequence. If start of tool call is not detected, result is 'terminate'."""
+    tokens = sequences.squeeze().tolist()
+    # No tool call emitted -> signal termination (test membership first; .index would raise)
+    if tool_tokens[0] not in tokens:
+        return None, "terminate"
+    start_tool_idx = tokens.index(tool_tokens[0])
+    end_tool_idx = tokens.index(tool_tokens[1])
 
     call = json.loads(tokenizer.decode(sequences.squeeze()[start_tool_idx+1:end_tool_idx], skip_special_tokens=False))
     if handler := tool_handlers.get(call["name"], False):
@@ -48,11 +52,11 @@ async def rollout(model:transformers.modeling_utils.PreTrainedModel, tokenizer:t
     tools.append(env.get_state)
     # Create initial input message
     messages = [{"role": "system", "content": 
-                """
+                "\
                 You are an agent, will be given a current state and a task description, and must interact with the provided (MCP) tools in order to accomplish the task. \
                 After concisely thinking about the long-term and short-term intent, immediately provide your tool call in JSON format. \
-                A special tool is `get_state`, in which case the overall task status will be provided between a start state token (i.e., <|state>) and an end state token (i.e., <state|>).
-                """},
+                A special tool is `get_state`, in which case the overall task status will be provided between a start state token (i.e., <|state>) and an end state token (i.e., <state|>).\
+                "},
                 {"role": "user", "content": []}
     ]
     if image is not None:
@@ -124,8 +128,9 @@ async def rollout(model:transformers.modeling_utils.PreTrainedModel, tokenizer:t
 
         # Special case if tool call was state query
         if inject_state:=(call["name"]==env.get_state.__name__):
-            result = "Task ongoing. Again, after concisely thinking about the long-term and short-term intent based \
-                on the provided state, immediately emit your tool call. <|state><state|>"
+            result = "Task is ongoing. Again, after concisely thinking about the long-term and short-term intent based \
+                on the provided state, immediately emit your tool call. If no tool call is provided, the task will be assumed done. \n\
+                <|state><state|>"
         # Append the generated tokens (already cached) + the next message instead of re-templating
         new_message = f"<turn|>\n<|turn>user\n{result}<turn|>\n<|turn>model\n"
         new_ids = tokenizer(new_message, add_special_tokens=False, return_tensors="pt")["input_ids"].to(model.device)
