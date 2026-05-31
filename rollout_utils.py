@@ -65,20 +65,20 @@ async def rollout(model:transformers.modeling_utils.PreTrainedModel, tokenizer:t
     state_token_id = tokenizer.encode("<|state>")[0]
     inject_state = False
     past_key_values = None
+    # Tokenize the prompt once, then grow input_ids by concatenation
+    inputs = tokenizer.apply_chat_template(
+        messages,
+        add_generation_prompt=True, tokenize=True,
+        return_tensors="pt", return_dict=True,
+        enable_thinking=True, tools=tools
+    ).to(model.device)
+    input_ids = inputs["input_ids"]
     for _ in range(max_steps):
-        # Tokenize full conversation every step, internally sliced when kv cache is passed
-        inputs = tokenizer.apply_chat_template(
-            messages,
-            add_generation_prompt=True, tokenize=True,
-            return_tensors="pt", return_dict=True,
-            enable_thinking=True, tools=tools
-        ).to(model.device)
-
         # Most models are decoder-only, so we can directly pass embeddings
-        embeds = embed_submodel(inputs["input_ids"])
+        embeds = embed_submodel(input_ids)
         # Inject state at last <|state> occurence if present
         if inject_state:
-            tmp = inputs["input_ids"][0].tolist()
+            tmp = input_ids[0].tolist()
             state_idx = len(tmp) - tmp[-1::-1].index(state_token_id)
             embeds = torch.cat([embeds[:,:state_idx], result, embeds[:,state_idx:]], dim=1)
 
@@ -101,7 +101,7 @@ async def rollout(model:transformers.modeling_utils.PreTrainedModel, tokenizer:t
         else: cached_idx = 0
         # Some models use per-layer-embeddings
         if ple_submodel:
-            ple = ple_submodel.get_per_layer_inputs(inputs["input_ids"], None)
+            ple = ple_submodel.get_per_layer_inputs(input_ids, None)
             kwargs["per_layer_inputs"] = ple[:, -cached_idx:]
         if mm:=inputs.get("mm_token_type_ids"):
             kwargs["mm_token_type_ids"] = mm[:, -cached_idx:]
@@ -125,10 +125,9 @@ async def rollout(model:transformers.modeling_utils.PreTrainedModel, tokenizer:t
         if inject_state:=(call["name"]==env.get_state.__name__):
             result = "Task ongoing. Again, after concisely thinking about the long-term and short-term intent based \
                 on the provided state, immediately emit your tool call. <|state><state|>"
-        # Accumulate conversation
-        messages += [
-            {"role": "assistant", "content": tokenizer.decode(generated_ids, skip_special_tokens=False)},
-            {"role": "tool", "content": result}
-        ]
+        # Append the generated tokens (already cached) + the next message instead of re-templating
+        new_message = f"<turn|>\n<|turn>user\n{result}<turn|>\n<|turn>model\n"
+        new_ids = tokenizer(new_message, add_special_tokens=False, return_tensors="pt")["input_ids"].to(model.device)
+        input_ids = torch.cat([input_ids, outputs.sequences, new_ids], dim=1)
 
     return trajectory
