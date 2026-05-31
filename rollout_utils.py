@@ -2,6 +2,7 @@ import asyncio, torch, transformers, json, inspect
 from PIL import Image
 from lmformatenforcer import JsonSchemaParser
 from lmformatenforcer.integrations.transformers import build_transformers_prefix_allowed_tokens_fn
+from collections.abc import Callable
 
 def _make_tool_call_prefix_fn(tokenizer:transformers.PreTrainedTokenizer, tool_tokens:tuple[int,int]):
     """Restrict generation to valid JSON tool call format while inside a tool call block."""
@@ -45,13 +46,7 @@ async def execute_tools(sequences:torch.Tensor, tokenizer:transformers.PreTraine
 
 async def rollout(model:transformers.modeling_utils.PreTrainedModel, tokenizer:transformers.PreTrainedTokenizer,
                   env, text:str, tool_tokens:tuple[int,int], image:str|Image.Image=None, tools=[],
-                  tool_handlers:dict={}, max_steps:int=10, max_new_tokens:int|None=4096, streamer=None) -> list:
-    if streamer is None:
-        streamer = transformers.AsyncTextIteratorStreamer(
-            tokenizer,
-            skip_prompt=True
-        )
-
+                  tool_handlers:dict={}, max_steps:int=10, max_new_tokens:int|None=4096, on_token:Callable=None) -> list:
     # Initialize trajectory and provide model with state-getter
     trajectory = []
     tools.append(env.get_state)
@@ -115,10 +110,14 @@ async def rollout(model:transformers.modeling_utils.PreTrainedModel, tokenizer:t
             kwargs["per_layer_inputs"] = ple[:, -cached_idx:]
         if mm:=inputs.get("mm_token_type_ids"):
             kwargs["mm_token_type_ids"] = mm[:, -cached_idx:]
-        # Generate: run_in_executor returns outputs while streamer yields text concurrently
+        # Generate using fresh streamer
+        streamer = transformers.AsyncTextIteratorStreamer(tokenizer, skip_prompt=True)
         loop = asyncio.get_event_loop()
+        async def _drain():
+            async for text in streamer:
+                if on_token: on_token(text)
         generate_task = loop.run_in_executor(None, lambda: model.generate(**kwargs, streamer=streamer))
-        outputs = await generate_task
+        outputs, _ = await asyncio.gather(generate_task, _drain())
         generated_ids = outputs.sequences[0]
         past_key_values = outputs.past_key_values
 
