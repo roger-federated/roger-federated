@@ -48,6 +48,7 @@ async def rollout(model:transformers.modeling_utils.PreTrainedModel, tokenizer:t
                   env, text:str, tool_tokens:tuple[int,int], image:str|Image.Image=None, tools=[],
                   tool_handlers:dict={}, max_steps:int=10, max_new_tokens:int|None=4096, on_token:Callable=None) -> list:
     # Probe once to find the tool-response opener token id (model-agnostic), which is usually the end of a tool call msg
+    # TODO: do this also instead of relying on `tool_tokens`?
     _probe = tokenizer.apply_chat_template(
         asst_msg:=[{"role": "assistant", "tool_calls": [{"id": "0", "type": "function", "function": {"name": "_", "arguments": {}}}]}],
         tokenize=True, add_generation_prompt=False
