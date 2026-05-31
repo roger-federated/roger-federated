@@ -47,6 +47,13 @@ async def execute_tools(sequences:torch.Tensor, tokenizer:transformers.PreTraine
 async def rollout(model:transformers.modeling_utils.PreTrainedModel, tokenizer:transformers.PreTrainedTokenizer,
                   env, text:str, tool_tokens:tuple[int,int], image:str|Image.Image=None, tools=[],
                   tool_handlers:dict={}, max_steps:int=10, max_new_tokens:int|None=4096, on_token:Callable=None) -> list:
+    # Probe once to find the tool-response opener token id (model-agnostic), which is usually the end of a tool call msg
+    _probe = tokenizer.apply_chat_template(
+        asst_msg:=[{"role": "assistant", "tool_calls": [{"id": "0", "type": "function", "function": {"name": "_", "arguments": {}}}]}],
+        tokenize=True, add_generation_prompt=False
+    )["input_ids"]
+    str_token_id = _probe[-1]
+    
     # Initialize trajectory and provide model with state-getter
     trajectory = []
     tools.append(env.get_state)
@@ -54,8 +61,8 @@ async def rollout(model:transformers.modeling_utils.PreTrainedModel, tokenizer:t
     messages = [{"role": "system", "content": 
                 "\
                 You are an agent, will be given a current state and a task description, and must interact with the provided (MCP) tools in order to accomplish the task. \
-                After concisely thinking about the long-term and short-term intent, immediately provide your tool call in JSON format. \
-                A special tool is `get_state`, in which case the overall task status will be provided between a start state token (i.e., <|state>) and an end state token (i.e., <state|>).\
+                After thinking very concisely about intent, provide your tool call in JSON format. A special tool is `get_state`, in which case \
+                the overall task status will be provided between a special start state token (i.e., <|state>) and an end state token (i.e., <state|>).\
                 "},
                 {"role": "user", "content": []}
     ]
@@ -134,12 +141,15 @@ async def rollout(model:transformers.modeling_utils.PreTrainedModel, tokenizer:t
 
         # Special case if tool call was state query
         if inject_state:=(call["name"]==env.get_state.__name__):
-            result = "Task is ongoing. Again, after concisely thinking about the long-term and short-term intent based \
+            result = "Task is ongoing. Again, after thinking very concisely about intent based \
                 on the provided state, immediately emit your tool call. If no tool call is provided, the task will be assumed done. \n\
                 <|state><state|>"
-        # Append the generated tokens (already cached) + the next message instead of re-templating
-        new_message = f"<turn|>\n<|turn>user\n{result}<turn|>\n<|turn>model\n"
-        new_ids = tokenizer(new_message, add_special_tokens=False, return_tensors="pt")["input_ids"].to(model.device)
-        input_ids = torch.cat([input_ids, outputs.sequences, new_ids], dim=1)
+        # Strip the trailing <eos> that prefix_fn forces after <tool_call|> — not part of the format
+        gen_ids = outputs.sequences[:, :-1] if outputs.sequences[0, -1] == tokenizer.eos_token_id else outputs.sequences
+        # Render tool response delta via template (model-agnostic). asst_msg is there only in case the tool_msg is otherwise ignored
+        tool_msg = {"role": "tool", "tool_call_id": "0", "content": str(result)}
+        delta_full = tokenizer.apply_chat_template(asst_msg + [tool_msg], tokenize=True, add_generation_prompt=True)["input_ids"]
+        new_ids = torch.tensor([delta_full[delta_full.index(str_token_id):]], device=model.device, dtype=torch.long)
+        input_ids = torch.cat([input_ids, gen_ids, new_ids], dim=1)
 
     return trajectory
