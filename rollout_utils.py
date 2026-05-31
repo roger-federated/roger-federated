@@ -1,5 +1,4 @@
-import torch, transformers, json, inspect
-from threading import Thread
+import asyncio, torch, transformers, json, inspect
 from PIL import Image
 from lmformatenforcer import JsonSchemaParser
 from lmformatenforcer.integrations.transformers import build_transformers_prefix_allowed_tokens_fn
@@ -46,7 +45,13 @@ async def execute_tools(sequences:torch.Tensor, tokenizer:transformers.PreTraine
 
 async def rollout(model:transformers.modeling_utils.PreTrainedModel, tokenizer:transformers.PreTrainedTokenizer,
                   env, text:str, tool_tokens:tuple[int,int], image:str|Image.Image=None, tools=[],
-                  tool_handlers:dict={}, max_steps:int=10, max_new_tokens:int|None=4096) -> list:
+                  tool_handlers:dict={}, max_steps:int=10, max_new_tokens:int|None=4096, streamer=None) -> list:
+    if streamer is None:
+        streamer = transformers.AsyncTextIteratorStreamer(
+            tokenizer,
+            skip_prompt=True
+        )
+
     # Initialize trajectory and provide model with state-getter
     trajectory = []
     tools.append(env.get_state)
@@ -110,8 +115,10 @@ async def rollout(model:transformers.modeling_utils.PreTrainedModel, tokenizer:t
             kwargs["per_layer_inputs"] = ple[:, -cached_idx:]
         if mm:=inputs.get("mm_token_type_ids"):
             kwargs["mm_token_type_ids"] = mm[:, -cached_idx:]
-        # Generate
-        outputs = model.generate(**kwargs, streamer=transformers.TextStreamer(tokenizer))
+        # Generate: run_in_executor returns outputs while streamer yields text concurrently
+        loop = asyncio.get_event_loop()
+        generate_task = loop.run_in_executor(None, lambda: model.generate(**kwargs, streamer=streamer))
+        outputs = await generate_task
         generated_ids = outputs.sequences[0]
         past_key_values = outputs.past_key_values
 
