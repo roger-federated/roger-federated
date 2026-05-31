@@ -1,4 +1,5 @@
 import torch, transformers, json, inspect
+from threading import Thread
 from PIL import Image
 from lmformatenforcer import JsonSchemaParser
 from lmformatenforcer.integrations.transformers import build_transformers_prefix_allowed_tokens_fn
@@ -106,7 +107,7 @@ async def rollout(model:transformers.modeling_utils.PreTrainedModel, tokenizer:t
         if mm:=inputs.get("mm_token_type_ids"):
             kwargs["mm_token_type_ids"] = mm[:, -cached_idx:]
         # Generate
-        outputs = model.generate(**kwargs)
+        outputs = model.generate(**kwargs, streamer=transformers.TextStreamer(tokenizer))
         generated_ids = outputs.sequences[0]
         past_key_values = outputs.past_key_values
 
