@@ -83,10 +83,10 @@ async def rollout(model:transformers.modeling_utils.PreTrainedModel, tokenizer:t
         messages,
         add_generation_prompt=True, tokenize=True,
         return_tensors="pt", return_dict=True,
-        enable_thinking=True, tools=tools
+        enable_thinking=True, tools=tools # TODO: should tools be provided when deemed necessary?
     ).to(model.device)
     input_ids = inputs["input_ids"]
-    for _ in range(max_steps):
+    for _ in range(max_steps): # TODO: prompt user to continue when max_steps is reached
         # Most models are decoder-only, so we can directly pass embeddings
         embeds = embed_submodel(input_ids)
         # Inject state at last <|state> occurence if present
