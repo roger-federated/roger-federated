@@ -10,7 +10,7 @@
 
 ### Features
 - **Souvereignty**: Inference and finetuning occurs entirely locally on the user's computer (unless otherwise set up), and data is never shared. Only undecipherable gradients are transmitted to selected other users.
-- **LoRA RL-based finetuning**: Local reinforcement learning finetuning is efficiently performed using LoRA and implicit, automatically detected rewards.
+- **LoRA finetuning using live reinforcement learning**: Local reinforcement learning finetuning is efficiently performed using LoRA with implicit, automatically detected rewards.
 - **Federated learning**: Differentially private gradient are shared with selected specialized federations of other users, without exposing raw training data.
 - **Towards omni-modal generality**: A foundation LLM of your choice is finetuned using your federations' gradients, which gradually gives the model inherent agency.
 - **Background autonomy**: Headless workers are spawned for asynchronous task completion within isolated, sandboxed virtual environments.
@@ -34,7 +34,9 @@ The product is still in development. Below is a non-exhaustive list of to-do ite
 - [x] Write code to handle and record agentic rollouts using HF models and vLLM inference.
 - [ ] ~Investigate how to programmatically interact with the OS.~
 - [x] Give the model agency, i.e., integrate tool use, reasoning, etc., with the LLM as foundation.
-- [ ] Set up MCP integration.
+- [ ] Enable connecting to MCP servers.
+- [ ] Set up a real environment including decorated standard tools (e.g., run_command, read_file, write_file, search_file, search_dir, prompt_user).
+- [ ] Create a state encoder.
 - [ ] ~Give the agent autonomy, i.e., ability to execute in a background VM/sandbox.~
 - [ ] Make it executable.
 - [ ] Congrats, you now have a semi-basic agent.
