@@ -4,6 +4,46 @@ from lmformatenforcer import JsonSchemaParser
 from lmformatenforcer.integrations.transformers import build_transformers_prefix_allowed_tokens_fn
 from collections.abc import Callable
 
+def make_tool_searcher(tools, model, tokenizer, k=3):
+    """Pre-compute tool embeddings; return a search_tools(query) closure for deferred loading."""
+    embed_layer = model.get_input_embeddings()
+    # Extract name/description from each tool (supports both dict-schema and callable formats)
+    tool_info = []
+    for t in tools:
+        if isinstance(t, dict):
+            f = t["function"]
+            name, desc = f["name"], f.get("description", "")
+        else:
+            name, desc = t.__name__, (t.__doc__ or "").split("\n")[0].strip()
+        tool_info.append((name, desc, t))
+    # Pre-compute avg-pooled token embeddings per tool description (embedding table lookup only)
+    tool_embs = {}
+    with torch.no_grad():
+        for name, desc, _ in tool_info:
+            ids = tokenizer.encode(f"{name}: {desc}", add_special_tokens=False, return_tensors="pt").to(embed_layer.weight.device)
+            tool_embs[name] = embed_layer(ids).mean(dim=1)
+
+    def tool_searcher(query: str) -> str:
+        """Search for a tool by describing the desired functionality.
+        Args:
+            query: what you want to accomplish (e.g. 'type text into a form field')
+        """
+        with torch.no_grad():
+            ids = tokenizer.encode(query, add_special_tokens=False, return_tensors="pt").to(embed_layer.weight.device)
+            q_emb = embed_layer(ids).mean(dim=1)
+        sims = {n: torch.cosine_similarity(q_emb, e).item() for n, e in tool_embs.items()}
+        top = sorted(sims, key=sims.get, reverse=True)[:k]
+        if sims[top[0]] < 0.5:
+            return "No matching tools found. Try rephrasing your query or cancelling the task by not emitting a new tool call."
+        from mcp_utils import _strip_schema
+        results = []
+        for name in top:
+            _, _, t = next(x for x in tool_info if x[0] == name)
+            results.append(_strip_schema(t) if isinstance(t, dict) else {"name": name, "description": (t.__doc__ or "").strip()})
+        return json.dumps(results, indent=2)
+
+    return tool_searcher
+
 def _make_tool_call_prefix_fn(tokenizer:transformers.PreTrainedTokenizer, tool_tokens:tuple[int,int]):
     """Restrict generation to valid JSON tool call format while inside a tool call block."""
     # Prepare JSON format
@@ -30,7 +70,7 @@ async def execute_tools(sequences:torch.Tensor, tokenizer:transformers.PreTraine
                         tool_handlers:dict, tool_tokens:tuple[int,int]) -> tuple[dict|None, str|torch.Tensor]:
     """Extract and execute (a single) tool call from output token sequence. If start of tool call is not detected, result is 'terminate'."""
     tokens = sequences.squeeze().tolist()
-    # No tool call emitted -> signal termination (test membership first; .index would raise)
+    # No tool call emitted -> signal termination
     if tool_tokens[0] not in tokens:
         return None, "terminate"
     start_tool_idx = tokens.index(tool_tokens[0])
@@ -57,7 +97,13 @@ async def rollout(model:transformers.modeling_utils.PreTrainedModel, tokenizer:t
     
     # Initialize trajectory and provide model with state-getter
     trajectory = []
-    tools.append(env.get_state)
+    # Defer tool loading if too many tools for the prompt
+    if len(tools) > 10:
+        tool_searcher = make_tool_searcher(tools, model, tokenizer)
+        tool_handlers["tool_searcher"] = tool_searcher
+        prompt_tools = [tool_searcher, env.get_state]
+    else:
+        prompt_tools = tools + [env.get_state]
     tool_handlers[env.get_state.__name__] = env.get_state
     # Create initial input message TODO: allow skills
     messages = [{"role": "system", "content": 
@@ -84,7 +130,7 @@ async def rollout(model:transformers.modeling_utils.PreTrainedModel, tokenizer:t
         messages,
         add_generation_prompt=True, tokenize=True,
         return_tensors="pt", return_dict=True,
-        enable_thinking=True, tools=tools # TODO: should tools be provided when deemed necessary?
+        enable_thinking=True, tools=prompt_tools
     ).to(model.device)
     input_ids = inputs["input_ids"]
     for _ in range(max_steps): # TODO: prompt user to continue when max_steps is reached
