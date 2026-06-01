@@ -94,7 +94,7 @@ async def rollout(model:transformers.modeling_utils.PreTrainedModel, tokenizer:t
         if inject_state:
             tmp = input_ids[0].tolist()
             state_idx = len(tmp) - tmp[-1::-1].index(state_token_id)
-            embeds = torch.cat([embeds[:,:state_idx], result, embeds[:,state_idx:]], dim=1)
+            embeds = torch.cat([embeds[:,:state_idx], state_embeds, embeds[:,state_idx:]], dim=1)
 
         # Attention mask covers the full sequence (cached prefix accounted for by past_key_values)
         attn_mask = torch.ones(1, embeds.shape[1], device=model.device, dtype=torch.long)
@@ -143,6 +143,7 @@ async def rollout(model:transformers.modeling_utils.PreTrainedModel, tokenizer:t
 
         # Special case if tool call was state query
         if inject_state:=(call["name"]==env.get_state.__name__):
+            state_embeds = result
             result = "Task is ongoing. Again, after thinking very concisely about intent based \
                 on the provided state, immediately emit your tool call. If no tool call is provided, the task will be assumed done. \n\
                 <|state><state|>"
