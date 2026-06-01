@@ -58,7 +58,8 @@ async def rollout(model:transformers.modeling_utils.PreTrainedModel, tokenizer:t
     # Initialize trajectory and provide model with state-getter
     trajectory = []
     tools.append(env.get_state)
-    # Create initial input message
+    tool_handlers[env.get_state.__name__] = env.get_state
+    # Create initial input message TODO: allow skills
     messages = [{"role": "system", "content": 
                 "\
                 You are an agent, will be given a current state and a task description, and must interact with the provided (MCP) tools in order to accomplish the task. \
