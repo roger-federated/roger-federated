@@ -14,8 +14,6 @@ The codebase should eventually be split into several folders:
 - `training/` -- GRPO trainer, LoRA config, reward functions
 - `federated` -- gradient aggregation, differential privacy, strategies
 
-The `readme.md` contains some potentially unrealistic promises, some of which are not entirely relevant anymore.
-
 During code generation, be concise and efficient. I.e., implement the minimum changes necessary. Write plentiful information-dense comments.
 
 Also, account for `.gitignore` in your context.

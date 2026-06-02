@@ -1,10 +1,14 @@
-# <div style="text-align: center;">Project name pending</div>
-
-### <div style="text-align: center;"> An OS-level agent that uses real-time reinforcement learning to learn from you and the rest of the community. </div>
+<div align="center">
+    <h1>Project name pending</h1>
+    <p><strong>Building the world's first <i>true</i> agent together with the community, using <font color="#818cf8">federated</font> <font color="#4ade80">local</font> <font color="#fb923c">reinforcement learning</font></strong></p>
+</div>
 
 ---
+
 ### Overview
-**Under the reign of big tech companies, your decisional capacity is going to be put in the hands of models you cannot inspect nor steer.** But fear not; you and the community can now contribute to the next generation of AI. Not just an LLM with tools, but a purpose-trained agent that is inherently omni-modal. How? By *locally* finetuning a selected open-source foundation model on *OS-level data* generated during your computer usage, and *sharing* the resulting encrypted model updates (not the data itself) securely with your selected *federations*.
+The limitations of the AI transition are coming to light by [far-fetched financial suppositions](https://open.spotify.com/clip/5HzODEnWAegI2Z3NGmu7UV?si=wz0K4G-NSIyTcnPK_1lbBw), [closed models we cannot inspect or steer](https://blog.mozilla.org/en/mozilla/mozilla-open-source-ai-strategy/), generic promises that remain unattained. _Luckily, we are at a point where there's no reason [consumers can't do better with your own hardware, software, and tiny models](https://newsletter.semianalysis.com/p/google-we-have-no-moat-and-neither)._
+
+You and the community can now contribute to the next generation of AI. Not just an LLM with tools, but a purpose-trained agent that is inherently omni-modal. How? By *locally* finetuning a selected *open-source* foundation model on *agentic rollout data*, and subsequently *aggregating* the resulting encrypted model updates (not the data itself) securely with your selected *federations*.
 
 ---
 
@@ -14,17 +18,19 @@
 - **Federated learning**: Differentially private gradient are shared with selected specialized federations of other users, without exposing raw training data.
 - **Towards omni-modal generality**: A foundation LLM of your choice is finetuned using your federations' gradients, which gradually gives the model inherent agency.
 - **Background autonomy**: Headless workers are spawned for asynchronous task completion within isolated, sandboxed virtual environments.
-- **Verifiable security**: A cryptographic ledger of proof of contribution ensures the integrity and quality of model updates.
 
 ---
 
 ### Use cases
+<details>
+<summary>Connect a desktop interaction MCP for autonomous background tasks</summary>
 ...
+</details>
 
 ---
 
 ### Progress & contributing
-The product is still in development. Below is a non-exhaustive list of to-do items. Of course we are an open-source community, so **feel free to open an issue or pull request!**
+This software is still in development. Below is a non-exhaustive list of to-do items. Of course we are an open-source community, so **feel free to open an issue or pull request!**
 
 - [x] Open a git repository and describe the project details in an md file.
 - [x] ~~Investigate universal model formats (e.g., ONNX) and open-source model implementations (e.g., Gemma-4), and whether the parameters are mutable for finetuning purposes.~~
@@ -44,4 +50,4 @@ The product is still in development. Below is a non-exhaustive list of to-do ite
 - [ ] Implement automatic RL execution.
 - [ ] Implement federated learning-style hives.
 - [ ] Integrate product into an (CLI) application in which an account is set up, hives are selected, finetuning is scheduled, gradient sharing settings are applied, as well as (background/execution) autonomy settings, and (file) permission settings.
-- [ ] Congrats, you now have a product.
+- [ ] Congrats, you now have a shippable.
