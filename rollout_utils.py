@@ -3,6 +3,7 @@ from PIL import Image
 from lmformatenforcer import JsonSchemaParser
 from lmformatenforcer.integrations.transformers import build_transformers_prefix_allowed_tokens_fn
 from collections.abc import Callable
+from tools import get_standard_tools, prompt_user
 
 def make_tool_searcher(tools, model, tokenizer, k=3):
     """Pre-compute tool embeddings; return a search_tools(query) closure for deferred loading."""
@@ -119,6 +120,7 @@ async def rollout(model:transformers.modeling_utils.PreTrainedModel, tokenizer:t
     messages[1]["content"] += [{"type": "text", "text": text}]
 
     # Init and loop conversation
+    i = 0
     embed_submodel = model.get_input_embeddings()
     prefix_fn = _make_tool_call_prefix_fn(tokenizer, tool_tokens)
     ple_submodel = next((m for m in model.modules() if hasattr(m, "get_per_layer_inputs")), False)
@@ -133,7 +135,7 @@ async def rollout(model:transformers.modeling_utils.PreTrainedModel, tokenizer:t
         enable_thinking=True, tools=prompt_tools
     ).to(model.device)
     input_ids = inputs["input_ids"]
-    for _ in range(max_steps): # TODO: prompt user to continue when max_steps is reached
+    while True:
         # Most models are decoder-only, so we can directly pass embeddings
         embeds = embed_submodel(input_ids)
         # Inject state at last <|state> occurence if present
@@ -200,5 +202,12 @@ async def rollout(model:transformers.modeling_utils.PreTrainedModel, tokenizer:t
         delta_full = tokenizer.apply_chat_template(asst_msg + [tool_msg], tokenize=True, add_generation_prompt=True)["input_ids"]
         new_ids = torch.tensor([delta_full[delta_full.index(str_token_id):]], device=model.device, dtype=torch.long)
         input_ids = torch.cat([input_ids, gen_ids, new_ids], dim=1)
+
+        # Check whether we have exceeded max steps
+        i += 1
+        if i >= max_steps:
+            response = prompt_user("Max steps reached. Continue iterating? [y/n]")
+            if response.lower() not in ["", "y", "yes"]:
+                break
 
     return trajectory
