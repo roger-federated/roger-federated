@@ -32,22 +32,17 @@ You and the community can now contribute to the next generation of AI. Not just 
 ### Progress & contributing
 This software is still in development. Below is a non-exhaustive list of to-do items. Of course we are an open-source community, so **feel free to open an issue or pull request!**
 
-- [x] Open a git repository and describe the project details in an md file.
-- [x] ~~Investigate universal model formats (e.g., ONNX) and open-source model implementations (e.g., Gemma-4), and whether the parameters are mutable for finetuning purposes.~~
-- [ ] ~~Lay out a finetuning framework.~~
-- [ ] ~~Make the finetuning framework compatible with LoRA.~~
-- [x] Set up automatic model loading
+- [x] Investigate framework and open-source models.
+- [x] Set up automatic model loading.
 - [x] Write code to handle and record agentic rollouts using HF models and vLLM inference.
-- [ ] ~Investigate how to programmatically interact with the OS.~
 - [x] Give the model agency, i.e., integrate tool use, reasoning, etc., with the LLM as foundation.
 - [x] Enable connecting to MCP servers.
 - [x] Implement standard tools (e.g., run_command, read_file, write_file, search_file, search_dir, prompt_user).
 - [ ] Create a state encoder.
-- [ ] ~Give the agent autonomy, i.e., ability to execute in a background VM/sandbox.~
 - [ ] Make it executable.
-- [ ] Congrats, you now have a semi-basic agent.
+- [ ] *Congrats, you now have a semi-basic agent.*
 - [ ] Implement what the finetuning framework considers as rewards.
-- [ ] Implement automatic RL execution.
+- [ ] Implement automatic LoRA RL execution.
 - [ ] Implement federated learning-style hives.
 - [ ] Integrate product into an (CLI) application in which an account is set up, hives are selected, finetuning is scheduled, gradient sharing settings are applied, as well as (background/execution) autonomy settings, and (file) permission settings.
-- [ ] Congrats, you now have a shippable.
+- [ ] *Congrats, you now have a shippable.*

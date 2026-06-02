@@ -202,7 +202,7 @@ async def rollout(model:transformers.modeling_utils.PreTrainedModel, tokenizer:t
         # Strip the trailing <eos> that prefix_fn forces after <tool_call|> — not part of the format
         gen_ids = outputs.sequences[:, :-1] if outputs.sequences[0, -1] == tokenizer.eos_token_id else outputs.sequences
         # Render tool response delta via template (model-agnostic). asst_msg is there only in case the tool_msg is otherwise ignored
-        tool_msg = {"role": "tool", "tool_call_id": "0", "content": str(result)}
+        tool_msg = {"role": "tool", "tool_call_id": "0", "content": str(result)} # TODO: does not support visual results
         delta_full = tokenizer.apply_chat_template(asst_msg + [tool_msg], tokenize=True, add_generation_prompt=True)["input_ids"]
         new_ids = torch.tensor([delta_full[delta_full.index(str_token_id):]], device=model.device, dtype=torch.long)
         input_ids = torch.cat([input_ids, gen_ids, new_ids], dim=1)
@@ -215,6 +215,6 @@ async def rollout(model:transformers.modeling_utils.PreTrainedModel, tokenizer:t
                 break
 
     # Prompt user to revert any files the agent overwrote during the rollout
-    offer_revert(tool_handlers.get("prompt_user"))
+    offer_revert(prompt_user)
 
     return trajectory
