@@ -228,6 +228,7 @@ def search_dir(path: str, pattern: str, max_results: int = 100) -> str:
     Args:
         path: Root directory to search from.
         pattern: Glob pattern to match (e.g. '*.py', '**/*.json').
+        max_results: Maximum number of matching paths to return.
     """
     root = pathlib.Path(path)
     if not root.is_dir():

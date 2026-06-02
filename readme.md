@@ -34,8 +34,8 @@ The product is still in development. Below is a non-exhaustive list of to-do ite
 - [x] Write code to handle and record agentic rollouts using HF models and vLLM inference.
 - [ ] ~Investigate how to programmatically interact with the OS.~
 - [x] Give the model agency, i.e., integrate tool use, reasoning, etc., with the LLM as foundation.
-- [ ] Enable connecting to MCP servers.
-- [ ] Set up a real environment including decorated standard tools (e.g., run_command, read_file, write_file, search_file, search_dir, prompt_user).
+- [x] Enable connecting to MCP servers.
+- [x] Implement standard tools (e.g., run_command, read_file, write_file, search_file, search_dir, prompt_user).
 - [ ] Create a state encoder.
 - [ ] ~Give the agent autonomy, i.e., ability to execute in a background VM/sandbox.~
 - [ ] Make it executable.
