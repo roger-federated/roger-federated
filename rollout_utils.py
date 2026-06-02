@@ -3,7 +3,7 @@ from PIL import Image
 from lmformatenforcer import JsonSchemaParser
 from lmformatenforcer.integrations.transformers import build_transformers_prefix_allowed_tokens_fn
 from collections.abc import Callable
-from tools import get_standard_tools, prompt_user
+from std_tools import get_standard_tools, prompt_user, offer_revert
 
 def make_tool_searcher(tools, model, tokenizer, k=3):
     """Pre-compute tool embeddings; return a search_tools(query) closure for deferred loading."""
@@ -102,9 +102,13 @@ async def rollout(model:transformers.modeling_utils.PreTrainedModel, tokenizer:t
     if len(tools) > 10:
         tool_searcher = make_tool_searcher(tools, model, tokenizer)
         tool_handlers["tool_searcher"] = tool_searcher
-        prompt_tools = [tool_searcher, env.get_state]
+        prompt_tools = [tool_searcher]
     else:
-        prompt_tools = tools + [env.get_state]
+        prompt_tools = tools
+    # Add standard tools
+    std_tools, std_handlers = get_standard_tools()
+    prompt_tools += std_tools + [env.get_state]
+    tool_handlers = tool_handlers | std_handlers
     tool_handlers[env.get_state.__name__] = env.get_state
     # Create initial input message TODO: allow skills
     messages = [{"role": "system", "content": 
@@ -209,5 +213,8 @@ async def rollout(model:transformers.modeling_utils.PreTrainedModel, tokenizer:t
             response = prompt_user("Max steps reached. Continue iterating? [y/n]")
             if response.lower() not in ["", "y", "yes"]:
                 break
+
+    # Prompt user to revert any files the agent overwrote during the rollout
+    offer_revert(tool_handlers.get("prompt_user"))
 
     return trajectory

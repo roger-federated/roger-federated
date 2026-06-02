@@ -1,0 +1,18 @@
+# Commands the agent must NEVER run.
+[blocked]
+rm -rf /
+sudo
+shutdown
+reboot
+mkfs
+dd if=
+format
+
+# Commands that require user approval before running.
+[confirm]
+rm
+pip install
+git push
+git reset
+chmod
+chown
