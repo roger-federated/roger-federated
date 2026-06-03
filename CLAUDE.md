@@ -16,4 +16,6 @@ The codebase should eventually be split into several folders:
 
 During code generation, be concise and efficient. I.e., implement the minimum changes necessary. Write plentiful information-dense comments.
 
+This code is primarily functional instead of object oriented. There must be a valid reason for statefulness if a class were to be implemented.
+
 Also, account for `.gitignore` in your context.
