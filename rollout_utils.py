@@ -45,13 +45,13 @@ def make_tool_searcher(tools, model, tokenizer, k=3):
 
     return tool_searcher
 
-def _make_tool_call_prefix_fn(tokenizer:transformers.PreTrainedTokenizer, tool_tokens:tuple[int,int]):
+def _make_tool_call_prefix_fn(tokenizer:transformers.PreTrainedTokenizer, tool_tokens:tuple[int,int], new_idx:int=0) -> Callable:
     """Restrict generation to valid JSON tool call format while inside a tool call block."""
     # Prepare JSON format
     schema = {"type": "object", "properties": {"name": {"type": "string"}, "arguments": {"type": "object"}}, "required": ["name", "arguments"]}
     inner = build_transformers_prefix_allowed_tokens_fn(tokenizer, JsonSchemaParser(schema))
     def prefix_fn(batch_id, sent_tokens: torch.Tensor):
-        tokens = sent_tokens.tolist()
+        tokens = sent_tokens.squeeze()[new_idx:].tolist()
         # Parse start of tool call
         if tool_tokens[0] in tokens and tool_tokens[1] not in tokens:
             idx_start = tokens.index(tool_tokens[0])
@@ -61,8 +61,7 @@ def _make_tool_call_prefix_fn(tokenizer:transformers.PreTrainedTokenizer, tool_t
                 allowed.remove(tokenizer.eos_token_id)
                 allowed.append(tool_tokens[1])
             return allowed
-        # Force immediate end afterwards
-        if tool_tokens[1] in tokens:
+        elif tool_tokens[1] in tokens:
             return [tokenizer.eos_token_id]
         return list(range(tokenizer.vocab_size))
     return prefix_fn
@@ -123,7 +122,6 @@ async def rollout(model:transformers.modeling_utils.PreTrainedModel, tokenizer:t
 
     # Init and loop conversation
     i = 0
-    prefix_fn = _make_tool_call_prefix_fn(tokenizer, tool_tokens)
     past_key_values = None
     # Tokenize the prompt once, then grow input_ids by concatenation
     inputs = tokenizer.apply_chat_template(
@@ -132,8 +130,10 @@ async def rollout(model:transformers.modeling_utils.PreTrainedModel, tokenizer:t
         return_tensors="pt", return_dict=True,
         enable_thinking=True, tools=prompt_tools
     ).to(model.device)
-    input_ids = inputs.pop("input_ids")
+    input_ids = inputs["input_ids"]
+    new_idx = input_ids.shape[1]
     while True:
+        print(i) # DEBUG
         # Attention mask covers the full sequence (cached prefix accounted for by past_key_values)
         attn_mask = torch.ones(1, input_ids.shape[1], device=model.device, dtype=torch.long)
 
@@ -145,7 +145,7 @@ async def rollout(model:transformers.modeling_utils.PreTrainedModel, tokenizer:t
             "use_cache": True,
             "output_logits": True,
             "return_dict_in_generate": True,
-            "prefix_allowed_tokens_fn": prefix_fn, # TODO: this overwrites logits instead of ignoring them, obstructing downstream RL
+            "prefix_allowed_tokens_fn": _make_tool_call_prefix_fn(tokenizer, tool_tokens, new_idx), # TODO: this overwrites logits instead of ignoring them, obstructing downstream RL
             "max_new_tokens": max_new_tokens
         }
         # Generate using fresh streamer
@@ -156,27 +156,25 @@ async def rollout(model:transformers.modeling_utils.PreTrainedModel, tokenizer:t
                 if on_token: on_token(text)
         generate_task = loop.run_in_executor(None, lambda: model.generate(**kwargs, streamer=streamer))
         outputs, _ = await asyncio.gather(generate_task, _drain())
-        generated_ids = outputs.sequences[0]
+        gen_ids = outputs.sequences[:, :-1] if outputs.sequences[0, -1] == tokenizer.eos_token_id else outputs.sequences
         past_key_values = outputs.past_key_values
 
         # Parse and execute tool calls from the newly generated tokens only
-        result = await execute_tools(generated_ids, tokenizer, tool_handlers, tool_tokens)
+        result = await execute_tools(gen_ids.squeeze()[new_idx:], tokenizer, tool_handlers, tool_tokens)
 
         # Save trajectory
-        # trajectory.append({"input_ids": input_ids, "logits": torch.stack(outputs.logits), "reward": reward_fn(...)})
+        # trajectory.append({"input_ids": input_ids, "logits": torch.stack(outputs.logits), "reward": reward_fn(...)}) # DEBUG
 
         # Check for terminal state
         if result == "terminate":
             break
 
-        # Strip the trailing <eos> which is forced after <tool_call|>
-        gen_ids = outputs.sequences[:, :-1] if outputs.sequences[0, -1] == tokenizer.eos_token_id else outputs.sequences
         # Render tool response delta via template (model-agnostic). asst_msg is there only in case the tool_msg is otherwise ignored
         tool_msg = {"role": "tool", "tool_call_id": "0", "content": str(result)} # TODO: does not support visual results
-        inputs = tokenizer.apply_chat_template(asst_msg + [tool_msg], tokenize=True, add_generation_prompt=True)
-        new_ids = torch.tensor(inputs.pop("input_ids"), device=model.device, dtype=torch.long)
-        new_ids = new_ids[new_ids.index(str_token_id):]
-        input_ids = torch.cat([input_ids, gen_ids, new_ids], dim=1)
+        tool_ids = tokenizer.apply_chat_template(asst_msg + [tool_msg], tokenize=True, add_generation_prompt=True)["input_ids"]
+        tool_ids = torch.tensor([tool_ids[tool_ids.index(str_token_id):]], device=model.device, dtype=torch.long)
+        input_ids = torch.cat([gen_ids, tool_ids], dim=1)
+        new_idx = input_ids.shape[1]
 
         # Check whether we have exceeded max steps
         i += 1
