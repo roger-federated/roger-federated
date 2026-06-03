@@ -10,7 +10,36 @@ Usage:
     await rollout(..., tools=tools, tool_handlers=handlers)
 """
 
-import subprocess, os, re, pathlib, shutil, time
+import subprocess, os, re, pathlib, shutil, time, ast, math
+
+
+# ---------------------------------------------------------------------------
+# Calculator internals
+# ---------------------------------------------------------------------------
+
+# Expose all public math symbols plus a few builtins
+_MATH_NS: dict = {k: v for k, v in vars(math).items() if not k.startswith("_")}
+_MATH_NS.update({"abs": abs, "round": round, "min": min, "max": max, "sum": sum})
+
+# AST node whitelist — anything not in here is rejected before eval
+_SAFE_NODES = {
+    ast.Expression, ast.BinOp, ast.UnaryOp, ast.Constant,
+    ast.Name, ast.Call, ast.Load, ast.Tuple, ast.List,
+    ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Pow, ast.Mod, ast.FloorDiv,
+    ast.USub, ast.UAdd,
+    ast.Compare, ast.Eq, ast.NotEq, ast.Lt, ast.Gt, ast.LtE, ast.GtE,
+}
+
+def _ast_safe(node: ast.AST) -> None:
+    """Raise ValueError if the AST contains anything outside the math whitelist."""
+    if type(node) not in _SAFE_NODES:
+        raise ValueError(f"disallowed node: {type(node).__name__}")
+    if isinstance(node, ast.Name) and node.id not in _MATH_NS:
+        raise ValueError(f"unknown name: '{node.id}'")
+    if isinstance(node, ast.Call) and not isinstance(node.func, ast.Name):
+        raise ValueError("only bare function calls allowed (e.g. sin(x), not obj.method())")
+    for child in ast.iter_child_nodes(node):
+        _ast_safe(child)
 
 
 # ---------------------------------------------------------------------------
@@ -260,6 +289,52 @@ def search_dir(path: str, pattern: str, max_results: int = 100) -> str:
     return "\n".join(results)
 
 
+def calculate(expression: str) -> str:
+    """Evaluate a mathematical expression and return the result.
+    Args:
+        expression: A math expression. Python operator syntax is used; additionally
+            '^' means exponentiation, '×'/'÷' mean multiply/divide, '−' is a Unicode
+            minus, and '²'/'³' expand to '**2'/'**3'. Scientific notation like 1.5e-3
+            is natively supported. All math module functions and constants are available:
+            sin, cos, tan, asin, acos, atan, atan2, sinh, cosh, tanh,
+            sqrt, cbrt, exp, expm1, log, log2, log10, log1p,
+            floor, ceil, trunc, factorial, gcd, lcm, comb, perm,
+            hypot, degrees, radians, isnan, isinf,
+            pi, e, tau, inf, nan.
+            Examples: "2^10", "sqrt(2)*pi", "log(1000, 10)", "sin(pi/6)", "3.0e8 / 1e6"
+    """
+    # Normalize alternative notations to Python syntax
+    expr = (expression
+        .replace("^", "**")
+        .replace("×", "*")
+        .replace("÷", "/")
+        .replace("−", "-")   # Unicode minus −
+        .replace("²", "**2") # superscript ²
+        .replace("³", "**3") # superscript ³
+        .strip()
+    )
+    try:
+        tree = ast.parse(expr, mode="eval")
+    except SyntaxError as e:
+        return f"Syntax error: {e}"
+    try:
+        _ast_safe(tree)
+    except ValueError as e:
+        return f"Unsafe expression — {e}"
+    try:
+        result = eval(compile(tree, "<calc>", "eval"), {"__builtins__": {}}, _MATH_NS)
+        # Clean up floats that are exact integers (e.g. sqrt(4) → 2 not 2.0)
+        if isinstance(result, float) and result == int(result) and abs(result) < 1e15:
+            return str(int(result))
+        if isinstance(result, float):
+            return f"{result:.10g}"
+        return str(result)
+    except ZeroDivisionError:
+        return "Error: division by zero"
+    except Exception as e:
+        return f"Error: {e}"
+
+
 def prompt_user(question: str) -> str:
     """Ask the user a question and return their response.
     Args:
@@ -323,6 +398,6 @@ def get_standard_tools(prompt_backend=None, policy_file="command_policy.txt") ->
         _prompt_backend = prompt_backend
     _policy_file = policy_file
 
-    tools = [run_command, read_file, write_file, search_file, search_dir, prompt_user]
+    tools = [run_command, read_file, write_file, search_file, search_dir, calculate, prompt_user]
     handlers = {fn.__name__: fn for fn in tools}
     return tools, handlers
