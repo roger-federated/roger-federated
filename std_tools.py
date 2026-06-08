@@ -10,7 +10,7 @@ Usage:
     await rollout(..., tools=tools, tool_handlers=handlers)
 """
 
-import subprocess, os, re, pathlib, shutil, time, ast, math
+import subprocess, os, re, pathlib, shutil, time, ast, math, asyncio
 
 
 # ---------------------------------------------------------------------------
@@ -64,6 +64,15 @@ _policy_file: str = "command_policy.txt"
 
 # Write backups — list of (original_path, backup_path) for end-of-rollout revert
 _backups: list[tuple[str, str]] = []
+
+# Timer registry — id ("t1", "t2", ...) -> {"fires_at": float, "label": str}
+# fires_at = time.monotonic() + seconds; pure timestamp math, no background tasks.
+_timers: dict[str, dict] = {}
+_timer_seq: int = 0
+
+# Stopwatch registry — id ("w1", "w2", ...) -> {"start_at": float, "stopped_at": float|None, "label": str}
+_stopwatches: dict[str, dict] = {}
+_stopwatch_seq: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -343,6 +352,101 @@ def prompt_user(question: str) -> str:
     return _prompt_backend(question)
 
 
+def set_timer(seconds: float, label: str = "") -> str:
+    """Set a countdown timer and return immediately with its id for later polling.
+    Args:
+        seconds: Duration in seconds before the timer fires.
+        label: Optional description surfaced when the timer fires.
+    """
+    global _timer_seq
+    _timer_seq += 1
+    tid = f"t{_timer_seq}"
+    _timers[tid] = {"fires_at": time.monotonic() + seconds, "label": label}
+    return f"timer {tid} set for {seconds:g}s{f' ({label})' if label else ''}"
+
+
+async def check_timer(timer_id: str = "", wait: bool = False) -> str:
+    """Check the status of a timer, or list all timers.
+    Args:
+        timer_id: Id returned by set_timer (e.g. 't1'). Empty string lists all timers.
+        wait: If true and the timer is still pending, suspend until it fires then return.
+    """
+    if not timer_id:
+        if not _timers:
+            return "no timers set"
+        lines = []
+        now = time.monotonic()
+        for tid, t in _timers.items():
+            rem = t["fires_at"] - now
+            sfx = f" ({t['label']})" if t["label"] else ""
+            if rem > 0:
+                lines.append(f"{tid} pending, {rem:.1f}s remaining{sfx}")
+            else:
+                lines.append(f"{tid} fired {-rem:.1f}s ago{sfx}")
+        return "\n".join(lines)
+
+    if timer_id not in _timers:
+        return f"unknown timer id: {timer_id}"
+
+    t = _timers[timer_id]
+    sfx = f" ({t['label']})" if t["label"] else ""
+    rem = t["fires_at"] - time.monotonic()
+    if rem > 0:
+        if wait:
+            await asyncio.sleep(rem)  # yields the event loop; non-blocking
+        else:
+            return f"{timer_id} pending, {rem:.1f}s remaining{sfx}"
+    # Re-check elapsed after optional sleep
+    ago = time.monotonic() - t["fires_at"]
+    return f"{timer_id} fired {ago:.1f}s ago{sfx}"
+
+
+def start_stopwatch(label: str = "") -> str:
+    """Start a stopwatch and return its id for later reading.
+    Args:
+        label: Optional description surfaced when the stopwatch is read.
+    """
+    global _stopwatch_seq
+    _stopwatch_seq += 1
+    wid = f"w{_stopwatch_seq}"
+    _stopwatches[wid] = {"start_at": time.monotonic(), "stopped_at": None, "label": label}
+    return f"stopwatch {wid} started{f' ({label})' if label else ''}"
+
+
+def read_stopwatch(stopwatch_id: str = "", stop: bool = False) -> str:
+    """Read the elapsed time of a stopwatch, or list all stopwatches.
+    Args:
+        stopwatch_id: Id returned by start_stopwatch (e.g. 'w1'). Empty string lists all.
+        stop: If true, freeze the stopwatch at the current elapsed time.
+    """
+    if not stopwatch_id:
+        if not _stopwatches:
+            return "no stopwatches started"
+        lines = []
+        now = time.monotonic()
+        for wid, w in _stopwatches.items():
+            elapsed = (w["stopped_at"] if w["stopped_at"] is not None else now) - w["start_at"]
+            sfx = f" ({w['label']})" if w["label"] else ""
+            if w["stopped_at"] is not None:
+                lines.append(f"{wid} stopped at {elapsed:.2f}s{sfx}")
+            else:
+                lines.append(f"{wid} running, {elapsed:.2f}s elapsed{sfx}")
+        return "\n".join(lines)
+
+    if stopwatch_id not in _stopwatches:
+        return f"unknown stopwatch id: {stopwatch_id}"
+
+    w = _stopwatches[stopwatch_id]
+    sfx = f" ({w['label']})" if w["label"] else ""
+    now = time.monotonic()
+    if stop and w["stopped_at"] is None:
+        w["stopped_at"] = now
+    elapsed = (w["stopped_at"] if w["stopped_at"] is not None else now) - w["start_at"]
+    if w["stopped_at"] is not None:
+        return f"{stopwatch_id} stopped at {elapsed:.2f}s{sfx}"
+    return f"{stopwatch_id} running, {elapsed:.2f}s elapsed{sfx}"
+
+
 # ---------------------------------------------------------------------------
 # End-of-rollout revert
 # ---------------------------------------------------------------------------
@@ -424,11 +528,15 @@ def get_standard_tools(prompt_backend=None, policy_file="command_policy.txt") ->
         prompt_backend: Optional callable(question: str) -> str replacing input().
         policy_file: Path to the command policy file for run_command.
     """
-    global _prompt_backend, _policy_file
+    global _prompt_backend, _policy_file, _timer_seq, _stopwatch_seq
     if prompt_backend is not None:
         _prompt_backend = prompt_backend
     _policy_file = policy_file
+    # Reset per-rollout state so timers/stopwatches don't leak across episodes
+    _timers.clear(); _timer_seq = 0
+    _stopwatches.clear(); _stopwatch_seq = 0
 
-    tools = [run_command, read_file, write_file, search_file, search_dir, calculate, prompt_user]
+    tools = [run_command, read_file, write_file, search_file, search_dir, calculate, prompt_user,
+             set_timer, check_timer, start_stopwatch, read_stopwatch]
     handlers = {fn.__name__: fn for fn in tools}
     return tools, handlers
