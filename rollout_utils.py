@@ -1,9 +1,9 @@
-import asyncio, torch, transformers, json, inspect
+import asyncio, torch, transformers, json, inspect, reward_utils
 from PIL import Image
 from lmformatenforcer import JsonSchemaParser
 from lmformatenforcer.integrations.transformers import build_transformers_prefix_allowed_tokens_fn
 from collections.abc import Callable
-from std_tools import get_standard_tools, prompt_user, offer_revert
+from std_tools import get_standard_tools, prompt_user, offer_revert, maxsteps_checkin
 
 def make_tool_searcher(tools, model, tokenizer, k=3):
     """Pre-compute tool embeddings; return a search_tools(query) closure for deferred loading."""
@@ -57,7 +57,7 @@ def _make_tool_call_prefix_fn(tokenizer:transformers.PreTrainedTokenizer, tool_t
             idx_start = tokens.index(tool_tokens[0])
             allowed = inner(batch_id, sent_tokens[idx_start + 1:])
             # Tool needs to be closed
-            if tokenizer.eos_token_id in allowed: 
+            if tokenizer.eos_token_id in allowed:
                 allowed.remove(tokenizer.eos_token_id)
                 allowed.append(tool_tokens[1])
             return allowed
@@ -87,15 +87,14 @@ async def execute_tools(sequences:torch.Tensor, tokenizer:transformers.PreTraine
 async def rollout(model:transformers.modeling_utils.PreTrainedModel, tokenizer:transformers.PreTrainedTokenizer,
                   text:str, tool_tokens:tuple[int,int], image:str|Image.Image=None, tools=[],
                   tool_handlers:dict={}, max_steps:int=10, max_new_tokens:int|None=4096, on_token:Callable=None) -> list:
-    # Probe once to find the tool-response opener token id (model-agnostic), which is usually the end of a tool call msg
-    # TODO: do this also instead of relying on `tool_tokens`?
+    # Probe once to find the tool-response opener token id (model-agnostic)
     _probe = tokenizer.apply_chat_template(
         asst_msg:=[{"role": "assistant", "tool_calls": [{"id": "0", "type": "function", "function": {"name": "_", "arguments": {}}}]}],
         tokenize=True, add_generation_prompt=False
     )["input_ids"]
-    str_token_id = _probe[-1]
-    
-    # Initialize trajectory and provide model with state-getter
+    str_token_id = _probe[-1]  # last token of the assistant turn; marks the delta boundary
+
+    # Initialize trajectory
     trajectory = []
     # Defer tool loading if too many tools for the prompt
     if len(tools) > 10:
@@ -104,12 +103,11 @@ async def rollout(model:transformers.modeling_utils.PreTrainedModel, tokenizer:t
         prompt_tools = [tool_searcher]
     else:
         prompt_tools = tools
-    # Add standard tools
     std_tools, std_handlers = get_standard_tools()
     prompt_tools += std_tools
     tool_handlers = tool_handlers | std_handlers
     # Create initial input message TODO: allow skills
-    messages = [{"role": "system", "content": 
+    messages = [{"role": "system", "content":
                 "\
                 You are an agent, will be given a current state and a task description, and must interact with the provided (MCP) tools in order to accomplish the task. \
                 After thinking very concisely about intent, provide your tool call in JSON format.\
@@ -133,7 +131,6 @@ async def rollout(model:transformers.modeling_utils.PreTrainedModel, tokenizer:t
     input_ids = inputs["input_ids"]
     new_idx = input_ids.shape[1]
     while True:
-        print(i) # DEBUG
         # Attention mask covers the full sequence (cached prefix accounted for by past_key_values)
         attn_mask = torch.ones(1, input_ids.shape[1], device=model.device, dtype=torch.long)
 
@@ -162,8 +159,11 @@ async def rollout(model:transformers.modeling_utils.PreTrainedModel, tokenizer:t
         # Parse and execute tool calls from the newly generated tokens only
         result = await execute_tools(gen_ids.squeeze()[new_idx:], tokenizer, tool_handlers, tool_tokens)
 
-        # Save trajectory
-        # trajectory.append({"input_ids": input_ids, "logits": torch.stack(outputs.logits), "reward": reward_fn(...)}) # DEBUG
+        trajectory.append({
+            "gen_token_ids": gen_ids.squeeze()[new_idx:].detach(),
+            "logits": torch.stack(outputs.logits).detach(),
+            "reward": reward_utils.auto_signal(result),
+        })
 
         # Check for terminal state
         if result == "terminate":
@@ -179,11 +179,30 @@ async def rollout(model:transformers.modeling_utils.PreTrainedModel, tokenizer:t
         # Check whether we have exceeded max steps
         i += 1
         if i >= max_steps:
-            response = prompt_user("Max steps reached. Continue iterating? [y/n]")
-            if response.lower() not in ["", "y", "yes"]:
+            action, feedback_text = maxsteps_checkin()
+            if action == "abort":
+                trajectory[-1]["reward"] -= reward_utils.W_ABORT
                 break
+            elif action == "feedback":
+                trajectory[-1]["reward"] -= reward_utils.W_FEEDBACK
+                fb_ids = tokenizer.apply_chat_template(
+                    asst_msg + [{"role": "user", "content": feedback_text}],
+                    tokenize=True, add_generation_prompt=True
+                )["input_ids"]
+                fb_delta = torch.tensor([fb_ids[fb_ids.index(str_token_id):]], device=model.device, dtype=torch.long)
+                input_ids = torch.cat([input_ids, fb_delta], dim=1)
+                new_idx = input_ids.shape[1]
+            else:  # "continue"
+                trajectory[-1]["reward"] += reward_utils.W_CONTINUE
 
-    # Prompt user to revert any files the agent overwrote during the rollout
-    offer_revert(prompt_user)
+    # Broadcast terminal reward (revert penalty or explicit outcome grade) to all steps
+    revert_prompted, n_reverted = offer_revert(prompt_user)
+    if not revert_prompted:
+        answer = prompt_user("Was the outcome good? [y/n]").strip().lower()
+        terminal_r = reward_utils.W_TERMINAL if answer in ("y", "yes") else -reward_utils.W_TERMINAL
+    else:
+        terminal_r = -n_reverted * reward_utils.W_REVERT
+    for entry in trajectory:
+        entry["reward"] += terminal_r
 
     return trajectory

@@ -347,11 +347,12 @@ def prompt_user(question: str) -> str:
 # End-of-rollout revert
 # ---------------------------------------------------------------------------
 
-def offer_revert(prompt_fn=None) -> None:
+def offer_revert(prompt_fn=None) -> tuple[bool, int]:
     """Prompt the user to revert files overwritten during the rollout.
-    Called at the end of rollout(). No-op if no backups were made."""
+    Returns (was_prompted, n_reverted): was_prompted is False when no backups
+    existed (caller should then ask for an explicit outcome grade instead)."""
     if not _backups:
-        return
+        return False, 0
     fn = prompt_fn or _prompt_backend
 
     listing = "\n".join(f"  {i+1}. {orig}" for i, (orig, _bak) in enumerate(_backups))
@@ -360,27 +361,57 @@ def offer_revert(prompt_fn=None) -> None:
 
     if answer == "none" or not answer:
         _backups.clear()
-        return
+        return True, 0
 
-    # Determine which indices to revert
     if answer == "all":
         indices = list(range(len(_backups)))
     else:
-        # Parse comma-separated numbers (1-indexed)
         try:
             indices = [int(x.strip()) - 1 for x in answer.split(",")]
         except ValueError:
             _backups.clear()
-            return
+            return True, 0
 
+    n_reverted = 0
     for idx in indices:
         if 0 <= idx < len(_backups):
             orig, bak = _backups[idx]
             try:
                 shutil.copy2(bak, orig)
+                n_reverted += 1
             except OSError:
                 pass
     _backups.clear()
+    return True, n_reverted
+
+
+# ---------------------------------------------------------------------------
+# Max-steps check-in (not exposed as an agent tool; called directly by rollout)
+# ---------------------------------------------------------------------------
+
+def maxsteps_checkin(prompt_fn=None) -> tuple[str, str]:
+    """Present the three-option max-steps check-in to the user.
+    Returns (action, feedback_text) where action is one of:
+        'continue'  — user is happy, loop continues          (small positive signal)
+        'abort'     — user stops the rollout                 (large negative signal)
+        'feedback'  — user continues but provides guidance   (small negative signal)
+    feedback_text is non-empty only for the 'feedback' action.
+    """
+    fn = prompt_fn or _prompt_backend
+    answer = fn(
+        "Max steps reached.\n"
+        "  [1] Continue iterating\n"
+        "  [2] Abort\n"
+        "  [3] Continue with feedback\n"
+        "Choice [1/2/3]:"
+    ).strip()
+    if answer in ("2", "abort"):
+        return "abort", ""
+    if answer in ("3", "feedback", "3 continue with feedback"):
+        text = fn("Feedback:").strip()
+        return "feedback", text
+    # Default (empty / 1 / anything else) → continue
+    return "continue", ""
 
 
 # ---------------------------------------------------------------------------
