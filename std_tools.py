@@ -131,6 +131,15 @@ def _check_policy(command: str, policy: dict[str, list[str]]) -> str:
 # Tools
 # ---------------------------------------------------------------------------
 
+def _popen(command: str, **kw) -> subprocess.Popen:
+    """Spawn `command` through the platform's shell: PowerShell on Windows, /bin/sh elsewhere."""
+    if os.name == "nt":
+        # shell=True on Windows would use cmd.exe; invoke PowerShell explicitly instead.
+        return subprocess.Popen(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command],
+                                text=True, **kw)
+    return subprocess.Popen(command, shell=True, text=True, **kw)
+
+
 def run_command(command: str, timeout: int = 30, background: bool = False) -> str:
     """Execute a shell command and return its output.
     Args:
@@ -156,16 +165,14 @@ def run_command(command: str, timeout: int = 30, background: bool = False) -> st
         # Spawn now (instant) so stop_command has a handle; tee output to a temp file so
         # check_command can read partial output, and just wait on the process in a worker thread.
         path = tempfile.NamedTemporaryFile(delete=False, suffix=".out").name
-        proc = subprocess.Popen(command, shell=True, stdout=open(path, "w", encoding="utf-8"),
-                                stderr=subprocess.STDOUT, text=True)
+        proc = _popen(command, stdout=open(path, "w", encoding="utf-8"), stderr=subprocess.STDOUT)
         fut = asyncio.get_running_loop().run_in_executor(None, _await_bg, proc, timeout, path)
         _job_seq += 1
         _jobs[f"c{_job_seq}"] = {"proc": proc, "future": fut, "command": command, "reported": False, "outfile": path}
         return f"command c{_job_seq} started in background (timeout {timeout}s)"
 
     try:
-        return _await_proc(subprocess.Popen(command, shell=True, stdout=subprocess.PIPE,
-                                            stderr=subprocess.PIPE, text=True), timeout)
+        return _await_proc(_popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE), timeout)
     except Exception as e:
         return f"Error: {e}"
 
