@@ -1,5 +1,5 @@
 <div align="center">
-    <h1>Project name pending</h1>
+    <h1>Roger Federated</h1>
     <p><strong>Building the world's first <i>true</i> agent together with the community, using <font color="#818cf8">federated</font> <font color="#4ade80">local</font> <font color="#fb923c">reinforcement learning</font></strong></p>
 </div>
 
