@@ -131,7 +131,8 @@ async def rollout(model:transformers.modeling_utils.PreTrainedModel, tokenizer:t
     ).to(model.device)
     input_ids = inputs["input_ids"]
     new_idx = input_ids.shape[1]
-    # Finished background commands, rendered as user turns so they surface without polling
+    # Finished background commands, surfacing without polling
+    # asst_msg prefixes the delta so the template renders it; sliced off via str_token_id.
     def result_to_ids(tool_result):
         tool_msg = [{"role": "user", "content": tool_result}]
         tool_ids = tokenizer.apply_chat_template(asst_msg + tool_msg, tokenize=True, add_generation_prompt=True)["input_ids"]
@@ -182,10 +183,10 @@ async def rollout(model:transformers.modeling_utils.PreTrainedModel, tokenizer:t
                 await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
             else:
                 break
-        # Model does not want to stop: get tool result and potentially finished background commands
+        # Model does not want to stop: get tool result
         else:
             tool_ids = result_to_ids(str(result)) # TODO: does not support visual results
-        # Concat with original input
+        # Concat with original input and potentially finished background commands
         input_ids = torch.cat([gen_ids, tool_ids, bg_msgs()], dim=1)
         new_idx = input_ids.shape[1]
 
