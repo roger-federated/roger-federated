@@ -3,7 +3,8 @@ from PIL import Image
 from lmformatenforcer import JsonSchemaParser
 from lmformatenforcer.integrations.transformers import build_transformers_prefix_allowed_tokens_fn
 from collections.abc import Callable
-from std_tools import get_standard_tools, prompt_user, offer_revert, maxsteps_checkin
+from std_tools import (get_standard_tools, prompt_user, offer_revert, maxsteps_checkin,
+                       drain_finished_jobs, pending_jobs, terminate_jobs)
 
 def make_tool_searcher(tools, model, tokenizer, k=3):
     """Pre-compute tool embeddings; return a search_tools(query) closure for deferred loading."""
@@ -130,6 +131,9 @@ async def rollout(model:transformers.modeling_utils.PreTrainedModel, tokenizer:t
     ).to(model.device)
     input_ids = inputs["input_ids"]
     new_idx = input_ids.shape[1]
+    # Finished background commands, rendered as user turns so they surface without polling
+    bg_msgs = lambda: [{"role": "user", "content": f"[background] {jid} finished:\n{out}"}
+                       for jid, out in drain_finished_jobs()]
     while True:
         # Attention mask covers the full sequence (cached prefix accounted for by past_key_values)
         attn_mask = torch.ones(1, input_ids.shape[1], device=model.device, dtype=torch.long)
@@ -165,15 +169,22 @@ async def rollout(model:transformers.modeling_utils.PreTrainedModel, tokenizer:t
             "reward": reward_utils.auto_signal(result),
         })
 
-        # Check for terminal state
-        if result == "terminate":
-            break
+        # Next-turn context: this step's tool result + any finished background commands.
+        # asst_msg prefixes the delta so the template renders it; sliced off via str_token_id.
+        extra = [] if result == "terminate" else [{"role": "tool", "tool_call_id": "0", "content": str(result)}] # TODO: does not support visual results
+        extra += bg_msgs()  
 
-        # Render tool response delta via template (model-agnostic). asst_msg is there only in case the tool_msg is otherwise ignored
-        tool_msg = {"role": "tool", "tool_call_id": "0", "content": str(result)} # TODO: does not support visual results
-        tool_ids = tokenizer.apply_chat_template(asst_msg + [tool_msg], tokenize=True, add_generation_prompt=True)["input_ids"]
-        tool_ids = torch.tensor([tool_ids[tool_ids.index(str_token_id):]], device=model.device, dtype=torch.long)
-        input_ids = torch.cat([gen_ids, tool_ids], dim=1)
+        # Model wants to stop: wait for a still-running command, deliver it, give another turn.
+        if result == "terminate" and not extra:
+            if pending := pending_jobs():
+                await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+                extra += bg_msgs()
+            if not extra:
+                break  # nothing left to deliver -> real terminate
+
+        delta_ids = tokenizer.apply_chat_template(asst_msg + extra, tokenize=True, add_generation_prompt=True)["input_ids"]
+        delta = torch.tensor([delta_ids[delta_ids.index(str_token_id):]], device=model.device, dtype=torch.long)
+        input_ids = torch.cat([gen_ids, delta], dim=1)
         new_idx = input_ids.shape[1]
 
         # Check whether we have exceeded max steps
@@ -194,6 +205,8 @@ async def rollout(model:transformers.modeling_utils.PreTrainedModel, tokenizer:t
                 new_idx = input_ids.shape[1]
             else:  # "continue"
                 trajectory[-1]["reward"] += reward_utils.W_CONTINUE
+
+    terminate_jobs()  # for safety, kill any background commands still running at episode end
 
     # Broadcast terminal reward (revert penalty or explicit outcome grade) to all steps
     revert_prompted, n_reverted = offer_revert(prompt_user)

@@ -74,6 +74,11 @@ _timer_seq: int = 0
 _stopwatches: dict[str, dict] = {}
 _stopwatch_seq: int = 0
 
+# Background command jobs — id ("c1", ...) -> {"proc": Popen, "future": Future, "command": str, "reported": bool}
+# Process is created eagerly (so stop_command gets a handle); only the blocking wait runs in a worker thread.
+_jobs: dict[str, dict] = {}
+_job_seq: int = 0
+
 
 # ---------------------------------------------------------------------------
 # Command policy internals
@@ -125,13 +130,16 @@ def _check_policy(command: str, policy: dict[str, list[str]]) -> str:
 # Tools
 # ---------------------------------------------------------------------------
 
-def run_command(command: str, timeout: int = 30) -> str:
+def run_command(command: str, timeout: int = 30, background: bool = False) -> str:
     """Execute a shell command and return its output.
     Args:
         command: The shell command to execute (supports pipes, redirects, chaining).
-        timeout: Maximum seconds to wait before killing the process.
+        timeout: Max seconds before the process is killed; 0 means no limit.
+        background: If true, run the command in the background and return a job id
+            immediately; its output is delivered automatically once it finishes.
+            Use check_command to poll and stop_command to kill it.
     """
-    global _policy
+    global _policy, _job_seq
     # Lazy-load policy on first call, re-read each time to pick up user edits
     _policy = _load_policy(_policy_file)
 
@@ -143,17 +151,29 @@ def run_command(command: str, timeout: int = 30) -> str:
         if answer.strip().lower() not in ("y", "yes"):
             return f"Command rejected by user: {command}"
 
+    if background:
+        # Spawn now (instant) so stop_command has a handle; wait in a worker thread.
+        proc = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        fut = asyncio.get_running_loop().run_in_executor(None, _await_proc, proc, timeout)
+        _job_seq += 1
+        _jobs[f"c{_job_seq}"] = {"proc": proc, "future": fut, "command": command, "reported": False}
+        return f"command c{_job_seq} started in background (timeout {timeout}s)"
+
     try:
-        r = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=timeout)
-        # Combine stdout/stderr with exit code so the agent sees the full picture
-        out = f"exit {r.returncode}\n"
-        if r.stdout: out += r.stdout
-        if r.stderr: out += r.stderr
-        return out.rstrip()
-    except subprocess.TimeoutExpired:
-        return f"Command timed out after {timeout}s"
+        return _await_proc(subprocess.Popen(command, shell=True, stdout=subprocess.PIPE,
+                                            stderr=subprocess.PIPE, text=True), timeout)
     except Exception as e:
         return f"Error: {e}"
+
+
+def _await_proc(proc: subprocess.Popen, timeout: int) -> str:
+    """Block until proc finishes (or timeout), returning exit code + combined output."""
+    try:
+        out, err = proc.communicate(timeout=timeout or None)
+        return (f"exit {proc.returncode}\n" + (out or "") + (err or "")).rstrip()
+    except subprocess.TimeoutExpired:
+        proc.kill(); proc.communicate()
+        return f"Command timed out after {timeout}s"
 
 
 def read_file(path: str, start_line: int = 0, end_line: int = 0) -> str:
@@ -447,6 +467,65 @@ def read_stopwatch(stopwatch_id: str = "", stop: bool = False) -> str:
     return f"{stopwatch_id} running, {elapsed:.2f}s elapsed{sfx}"
 
 
+def stop_command(job_id: str) -> str:
+    """Force-stop a background command started by run_command.
+    Args:
+        job_id: Id returned by run_command(background=True), e.g. 'c1'.
+    """
+    job = _jobs.get(job_id)
+    if not job:
+        return f"unknown command id: {job_id}"
+    if job["future"].done():
+        return f"{job_id} already finished"
+    job["proc"].kill()  # worker's communicate() returns, completing the future
+    return f"{job_id} stopped"
+
+
+def check_command(job_id: str = "") -> str:
+    """Check a background command's status/output, or list all background commands.
+    Args:
+        job_id: Id from run_command(background=True). Empty string lists all jobs.
+    """
+    if not job_id:
+        if not _jobs:
+            return "no background commands"
+        return "\n".join(f"{jid} {'finished' if j['future'].done() else 'running'}: {j['command']}"
+                         for jid, j in _jobs.items())
+    job = _jobs.get(job_id)
+    if not job:
+        return f"unknown command id: {job_id}"
+    if not job["future"].done():
+        return f"{job_id} still running" # TODO: should include output thus far
+    return f"{job_id} finished:\n{job['future'].result()}"
+
+
+# ---------------------------------------------------------------------------
+# Background-job helpers (not agent tools; called directly by the rollout)
+# ---------------------------------------------------------------------------
+
+def drain_finished_jobs() -> list[tuple[str, str]]:
+    """Return (id, output) for jobs that finished since the last drain, marking them reported."""
+    out = []
+    for jid, job in _jobs.items():
+        if job["future"].done() and not job["reported"]:
+            job["reported"] = True
+            out.append((jid, job["future"].result()))
+    return out
+
+
+def pending_jobs() -> list:
+    """Futures of background commands still running (for the rollout to await)."""
+    return [j["future"] for j in _jobs.values() if not j["future"].done()]
+
+
+def terminate_jobs() -> None:
+    """Kill any still-running background commands and clear the registry (rollout cleanup)."""
+    for job in _jobs.values():
+        if not job["future"].done():
+            job["proc"].kill()
+    _jobs.clear()
+
+
 # ---------------------------------------------------------------------------
 # End-of-rollout revert
 # ---------------------------------------------------------------------------
@@ -528,15 +607,16 @@ def get_standard_tools(prompt_backend=None, policy_file="command_policy.txt") ->
         prompt_backend: Optional callable(question: str) -> str replacing input().
         policy_file: Path to the command policy file for run_command.
     """
-    global _prompt_backend, _policy_file, _timer_seq, _stopwatch_seq
+    global _prompt_backend, _policy_file, _timer_seq, _stopwatch_seq, _job_seq
     if prompt_backend is not None:
         _prompt_backend = prompt_backend
     _policy_file = policy_file
-    # Reset per-rollout state so timers/stopwatches don't leak across episodes
+    # Reset per-rollout state so timers/stopwatches/jobs don't leak across episodes
     _timers.clear(); _timer_seq = 0
     _stopwatches.clear(); _stopwatch_seq = 0
+    _jobs.clear(); _job_seq = 0
 
     tools = [run_command, read_file, write_file, search_file, search_dir, calculate, prompt_user,
-             set_timer, check_timer, start_stopwatch, read_stopwatch]
+             set_timer, check_timer, start_stopwatch, read_stopwatch, stop_command, check_command]
     handlers = {fn.__name__: fn for fn in tools}
     return tools, handlers
