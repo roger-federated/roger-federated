@@ -107,15 +107,30 @@ def _load_policy(path: str) -> dict[str, list[str]]:
     return policy
 
 
+# Hardcoded evasion patterns — not in command_policy.txt so they can't be trivially removed.
+# NOTE: `-e` (short PS alias for -EncodedCommand) omitted to avoid false positives (e.g. sed -e).
+_EVASION: list[tuple[re.Pattern, str]] = [
+    (re.compile(r"-enc(odedcommand)?\b", re.I), "confirm"),        # encoded PS payloads
+    (re.compile(r"\biex\b|invoke-expression\b", re.I), "confirm"), # in-shell eval
+]
+
+
+def _worst(a: str, b: str) -> str:
+    """Return the stricter of two policy verdicts: blocked > confirm > allowed."""
+    _rank = {"blocked": 2, "confirm": 1, "allowed": 0}
+    return a if _rank.get(a, 0) >= _rank.get(b, 0) else b
+
+
 def _check_policy(command: str, policy: dict[str, list[str]]) -> str:
-    """Check a command against the policy. Splits on shell operators to catch
-    chained dangerous commands (e.g. 'echo x | sudo rm'). Returns
-    "blocked", "confirm", or "allowed"."""
-    # Split on pipe, &&, ||, ; to get individual segments
-    segments = re.split(r"\|{1,2}|&&|;", command)
+    """Check a command against the policy. Splits on shell operators AND newlines to catch
+    chained/compounded dangerous commands (pipes, PS multi-statement ;, bash &&, newlines).
+    Returns "blocked", "confirm", or "allowed"."""
+    segments = re.split(r"\|{1,2}|&&|;|\n", command)
     verdict = "allowed"
     for seg in segments:
         seg = seg.strip()
+        if not seg:
+            continue
         # Blocked rules take priority — check first
         for rule in policy.get("blocked", []):
             if seg.startswith(rule) or seg == rule:
@@ -124,6 +139,37 @@ def _check_policy(command: str, policy: dict[str, list[str]]) -> str:
         for rule in policy.get("confirm", []):
             if seg.startswith(rule) or seg == rule:
                 verdict = "confirm"
+        # Evasion patterns (substring match — prefix matching misses mid-command tokens)
+        for pat, pv in _EVASION:
+            if pat.search(seg):
+                verdict = _worst(verdict, pv)
+    return verdict
+
+
+def _scan_scripts(command: str, policy: dict) -> str:
+    """Scan any script files referenced in command through _check_policy line-by-line.
+    Returns 'blocked'/'confirm' for policy violations, 'confirm' for unreadable/oversized
+    scripts (can't verify → ask user), and 'allowed' for clean or non-existent path tokens."""
+    _MAX_BYTES = 64 * 1024  # 64 KB — larger scripts get confirm rather than stall the rollout
+    _SCRIPT_RE = re.compile(r"""[^\s'";&|]+\.(?:bat|cmd|ps1|sh|vbs|py)\b""", re.I)
+    verdict = "allowed"
+    for m in _SCRIPT_RE.finditer(command):
+        path = m.group(0).strip("'\"")
+        try:
+            if os.path.getsize(path) > _MAX_BYTES:
+                verdict = _worst(verdict, "confirm"); continue
+            with open(path, encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith(("#", "::")):
+                        continue  # skip comments / batch rem-style lines
+                    verdict = _worst(verdict, _check_policy(line, policy))
+                    if verdict == "blocked":
+                        return "blocked"  # short-circuit
+        except FileNotFoundError:
+            pass  # path token is a flag value or future file — not a real script ref
+        except OSError:
+            verdict = _worst(verdict, "confirm")  # exists but unreadable — can't verify
     return verdict
 
 
@@ -141,7 +187,7 @@ def _popen(command: str, **kw) -> subprocess.Popen:
 
 
 def run_command(command: str, timeout: int = 30, background: bool = False) -> str:
-    """Execute a shell command and return its output.
+    """Execute a shell command and return its output. Uses Powershell on Windows, /bin/sh elsewhere.
     Args:
         command: The shell command to execute (supports pipes, redirects, chaining).
         timeout: Max seconds before the process is killed; 0 means no limit.
@@ -154,6 +200,7 @@ def run_command(command: str, timeout: int = 30, background: bool = False) -> st
     _policy = _load_policy(_policy_file)
 
     status = _check_policy(command, _policy)
+    status = _worst(status, _scan_scripts(command, _policy))
     if status == "blocked":
         return f"Blocked by policy: '{command}' matches a blocked command pattern in {_policy_file}"
     if status == "confirm":
