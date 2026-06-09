@@ -89,8 +89,16 @@ def parse_result(result):
     """Convert a tool result to an HF content list (list of typed dicts)."""
     if isinstance(result, Image.Image):
         return [{"type": "image", "image": result}]
-    if isinstance(result, (torch.Tensor, np.ndarray)):
+    if isinstance(result, (torch.Tensor, np.ndarray)):  # torchaudio / librosa
         return [{"type": "audio", "audio": result}]
+    try:
+        from pydub import AudioSegment
+        if isinstance(result, AudioSegment):
+            arr = np.array(result.get_array_of_samples(), dtype=np.float32)
+            arr /= float(2 ** (result.sample_width * 8 - 1))  # normalise to [-1, 1]
+            return [{"type": "audio", "audio": arr}]
+    except ImportError:
+        pass
     return [{"type": "text", "text": str(result)}]
 
 async def rollout(model:transformers.modeling_utils.PreTrainedModel, tokenizer:transformers.PreTrainedTokenizer,
@@ -139,12 +147,12 @@ async def rollout(model:transformers.modeling_utils.PreTrainedModel, tokenizer:t
     ).to(model.device)
     input_ids = inputs["input_ids"]
     new_idx = input_ids.shape[1]
-    # Finished background commands, surfacing without polling
-    # asst_msg prefixes the delta so the template renders it; sliced off via str_token_id.
+    # Get tool result token ids (asst_msg prefixes the delta so the template renders it; sliced off via str_token_id)
     def result_to_ids(tool_result):
         tool_msg = [{"role": "tool", "content": tool_result}]
         tool_ids = tokenizer.apply_chat_template(asst_msg + tool_msg, tokenize=True, add_generation_prompt=True)["input_ids"]
         return torch.tensor([tool_ids[tool_ids.index(str_token_id):]], device=model.device, dtype=torch.long)
+    # Finished background commands, surfacing without polling
     bg_msgs = lambda: torch.cat(
         [result_to_ids(f"[background] {jid} finished: {str(out)}") for jid, out in finished_jobs], dim=1
     ) if (finished_jobs:=drain_finished_jobs()) else []
@@ -191,10 +199,13 @@ async def rollout(model:transformers.modeling_utils.PreTrainedModel, tokenizer:t
                 await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
             else:
                 break
-            input_ids = torch.cat([gen_ids, bg_msgs()], dim=1)
+            bg = bg_msgs()
+            input_ids = torch.cat([gen_ids, bg], dim=1) if isinstance(bg, torch.Tensor) else gen_ids
         else:
             tool_ids = result_to_ids(parse_result(result))
-            input_ids = torch.cat([gen_ids, tool_ids, bg_msgs()], dim=1)
+            bg = bg_msgs()
+            parts = [gen_ids, tool_ids] + ([bg] if isinstance(bg, torch.Tensor) else [])
+            input_ids = torch.cat(parts, dim=1)
         new_idx = input_ids.shape[1]
 
         # Check whether we have exceeded max steps

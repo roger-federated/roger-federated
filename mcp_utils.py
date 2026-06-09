@@ -14,9 +14,10 @@ For multiple servers, use connect_servers() which merges tools/handlers from all
     await stack.aclose()
 """
 
-import contextlib, subprocess
+import contextlib, subprocess, base64, io
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
+from PIL import Image
 
 
 def _strip_schema(schema: dict) -> dict:
@@ -86,7 +87,10 @@ class MCPConnection:
         """Wrap a single MCP tool as an async callable that forwards kwargs to the server."""
         async def handler(**kwargs):
             result = await self._session.call_tool(name, kwargs)
-            # Extract text from content blocks; fall back to str repr for non-text (images etc.)
+            # Single image block → PIL.Image (e.g. Playwright screenshot); multi/text → joined str
+            if len(result.content) == 1 and hasattr(result.content[0], "data"):
+                c = result.content[0]
+                return Image.open(io.BytesIO(base64.b64decode(c.data)))
             texts = [c.text for c in result.content if hasattr(c, "text")]
             return "\n".join(texts) if texts else str(result.content)
         handler.__name__ = name
