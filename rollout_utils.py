@@ -1,4 +1,4 @@
-import asyncio, torch, transformers, json, inspect, reward_utils
+import asyncio, torch, transformers, json, inspect, numpy as np, reward_utils
 from PIL import Image
 from lmformatenforcer import JsonSchemaParser
 from lmformatenforcer.integrations.transformers import build_transformers_prefix_allowed_tokens_fn
@@ -85,6 +85,14 @@ async def execute_tools(sequences:torch.Tensor, tokenizer:transformers.PreTraine
 
     return result
 
+def parse_result(result):
+    """Convert a tool result to an HF content list (list of typed dicts)."""
+    if isinstance(result, Image.Image):
+        return [{"type": "image", "image": result}]
+    if isinstance(result, (torch.Tensor, np.ndarray)):
+        return [{"type": "audio", "audio": result}]
+    return [{"type": "text", "text": str(result)}]
+
 async def rollout(model:transformers.modeling_utils.PreTrainedModel, tokenizer:transformers.PreTrainedTokenizer,
                   text:str, tool_tokens:tuple[int,int], image:str|Image.Image=None, tools=[],
                   tool_handlers:dict={}, max_steps:int=10, max_new_tokens:int|None=4096, on_token:Callable=None) -> list:
@@ -134,7 +142,7 @@ async def rollout(model:transformers.modeling_utils.PreTrainedModel, tokenizer:t
     # Finished background commands, surfacing without polling
     # asst_msg prefixes the delta so the template renders it; sliced off via str_token_id.
     def result_to_ids(tool_result):
-        tool_msg = [{"role": "user", "content": tool_result}]
+        tool_msg = [{"role": "tool", "content": tool_result}]
         tool_ids = tokenizer.apply_chat_template(asst_msg + tool_msg, tokenize=True, add_generation_prompt=True)["input_ids"]
         return torch.tensor([tool_ids[tool_ids.index(str_token_id):]], device=model.device, dtype=torch.long)
     bg_msgs = lambda: torch.cat(
@@ -183,11 +191,10 @@ async def rollout(model:transformers.modeling_utils.PreTrainedModel, tokenizer:t
                 await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
             else:
                 break
-        # Model does not want to stop: get tool result
+            input_ids = torch.cat([gen_ids, bg_msgs()], dim=1)
         else:
-            tool_ids = result_to_ids(str(result)) # TODO: does not support visual results
-        # Concat with original input and potentially finished background commands
-        input_ids = torch.cat([gen_ids, tool_ids, bg_msgs()], dim=1)
+            tool_ids = result_to_ids(parse_result(result))
+            input_ids = torch.cat([gen_ids, tool_ids, bg_msgs()], dim=1)
         new_idx = input_ids.shape[1]
 
         # Check whether we have exceeded max steps
