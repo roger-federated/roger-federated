@@ -132,8 +132,14 @@ async def rollout(model:transformers.modeling_utils.PreTrainedModel, tokenizer:t
     input_ids = inputs["input_ids"]
     new_idx = input_ids.shape[1]
     # Finished background commands, rendered as user turns so they surface without polling
-    bg_msgs = lambda: [{"role": "user", "content": f"[background] {jid} finished:\n{out}"}
-                       for jid, out in drain_finished_jobs()]
+    def result_to_ids(tool_result):
+        tool_msg = [{"role": "user", "content": tool_result}]
+        tool_ids = tokenizer.apply_chat_template(asst_msg + tool_msg, tokenize=True, add_generation_prompt=True)["input_ids"]
+        return torch.tensor([tool_ids[tool_ids.index(str_token_id):]], device=model.device, dtype=torch.long)
+    bg_msgs = lambda: torch.cat(
+        [result_to_ids(f"[background] {jid} finished: {str(out)}") for jid, out in finished_jobs], dim=1
+    ) if (finished_jobs:=drain_finished_jobs()) else []
+
     while True:
         # Attention mask covers the full sequence (cached prefix accounted for by past_key_values)
         attn_mask = torch.ones(1, input_ids.shape[1], device=model.device, dtype=torch.long)
@@ -158,33 +164,29 @@ async def rollout(model:transformers.modeling_utils.PreTrainedModel, tokenizer:t
         generate_task = loop.run_in_executor(None, lambda: model.generate(**kwargs, streamer=streamer))
         outputs, _ = await asyncio.gather(generate_task, _drain())
         gen_ids = outputs.sequences[:, :-1] if outputs.sequences[0, -1] == tokenizer.eos_token_id else outputs.sequences
+        new_ids = gen_ids.squeeze()[:, new_idx:].detach()
         past_key_values = outputs.past_key_values
 
         # Parse and execute tool calls from the newly generated tokens only
-        result = await execute_tools(gen_ids.squeeze()[new_idx:], tokenizer, tool_handlers, tool_tokens)
+        result = await execute_tools(new_ids, tokenizer, tool_handlers, tool_tokens)
 
         trajectory.append({
-            "gen_token_ids": gen_ids.squeeze()[new_idx:].detach(),
+            "gen_token_ids": new_ids,
             "logits": torch.stack(outputs.logits).detach(),
             "reward": reward_utils.auto_signal(result),
         })
 
-        # Next-turn context: this step's tool result + any finished background commands.
-        # asst_msg prefixes the delta so the template renders it; sliced off via str_token_id.
-        extra = [] if result == "terminate" else [{"role": "tool", "tool_call_id": "0", "content": str(result)}] # TODO: does not support visual results
-        extra += bg_msgs()  
-
-        # Model wants to stop: wait for a still-running command, deliver it, give another turn.
-        if result == "terminate" and not extra:
+        # Model wants to stop: wait for a still-running command, give another turn
+        if result == "terminate":
             if pending := pending_jobs():
                 await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
-                extra += bg_msgs()
-            if not extra:
-                break  # nothing left to deliver -> real terminate
-
-        delta_ids = tokenizer.apply_chat_template(asst_msg + extra, tokenize=True, add_generation_prompt=True)["input_ids"]
-        delta = torch.tensor([delta_ids[delta_ids.index(str_token_id):]], device=model.device, dtype=torch.long)
-        input_ids = torch.cat([gen_ids, delta], dim=1)
+            else:
+                break
+        # Model does not want to stop: get tool result and potentially finished background commands
+        else:
+            tool_ids = result_to_ids(str(result)) # TODO: does not support visual results
+        # Concat with original input
+        input_ids = torch.cat([gen_ids, tool_ids, bg_msgs()], dim=1)
         new_idx = input_ids.shape[1]
 
         # Check whether we have exceeded max steps
@@ -194,7 +196,7 @@ async def rollout(model:transformers.modeling_utils.PreTrainedModel, tokenizer:t
             if action == "abort":
                 trajectory[-1]["reward"] -= reward_utils.W_ABORT
                 break
-            max_steps += 10
+            max_steps += max_steps
             if action == "feedback":
                 trajectory[-1]["reward"] -= reward_utils.W_FEEDBACK
                 fb_ids = tokenizer.apply_chat_template(
