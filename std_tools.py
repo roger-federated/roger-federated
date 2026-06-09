@@ -10,7 +10,7 @@ Usage:
     await rollout(..., tools=tools, tool_handlers=handlers)
 """
 
-import subprocess, os, re, pathlib, shutil, time, ast, math, asyncio
+import subprocess, os, re, pathlib, shutil, time, ast, math, asyncio, tempfile
 
 
 # ---------------------------------------------------------------------------
@@ -74,8 +74,9 @@ _timer_seq: int = 0
 _stopwatches: dict[str, dict] = {}
 _stopwatch_seq: int = 0
 
-# Background command jobs — id ("c1", ...) -> {"proc": Popen, "future": Future, "command": str, "reported": bool}
-# Process is created eagerly (so stop_command gets a handle); only the blocking wait runs in a worker thread.
+# Background command jobs — id ("c1", ...) -> {"proc": Popen, "future": Future, "command": str,
+# "reported": bool, "outfile": str}. Process is created eagerly (so stop_command gets a handle);
+# output is tee'd to a temp file so check_command can read partial output while it runs.
 _jobs: dict[str, dict] = {}
 _job_seq: int = 0
 
@@ -152,11 +153,14 @@ def run_command(command: str, timeout: int = 30, background: bool = False) -> st
             return f"Command rejected by user: {command}"
 
     if background:
-        # Spawn now (instant) so stop_command has a handle; wait in a worker thread.
-        proc = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        fut = asyncio.get_running_loop().run_in_executor(None, _await_proc, proc, timeout)
+        # Spawn now (instant) so stop_command has a handle; tee output to a temp file so
+        # check_command can read partial output, and just wait on the process in a worker thread.
+        path = tempfile.NamedTemporaryFile(delete=False, suffix=".out").name
+        proc = subprocess.Popen(command, shell=True, stdout=open(path, "w", encoding="utf-8"),
+                                stderr=subprocess.STDOUT, text=True)
+        fut = asyncio.get_running_loop().run_in_executor(None, _await_bg, proc, timeout, path)
         _job_seq += 1
-        _jobs[f"c{_job_seq}"] = {"proc": proc, "future": fut, "command": command, "reported": False}
+        _jobs[f"c{_job_seq}"] = {"proc": proc, "future": fut, "command": command, "reported": False, "outfile": path}
         return f"command c{_job_seq} started in background (timeout {timeout}s)"
 
     try:
@@ -167,13 +171,32 @@ def run_command(command: str, timeout: int = 30, background: bool = False) -> st
 
 
 def _await_proc(proc: subprocess.Popen, timeout: int) -> str:
-    """Block until proc finishes (or timeout), returning exit code + combined output."""
+    """Block until proc finishes (or timeout), returning exit code + combined output (foreground)."""
     try:
         out, err = proc.communicate(timeout=timeout or None)
         return (f"exit {proc.returncode}\n" + (out or "") + (err or "")).rstrip()
     except subprocess.TimeoutExpired:
         proc.kill(); proc.communicate()
         return f"Command timed out after {timeout}s"
+
+
+def _read_outfile(path: str) -> str:
+    """Current contents of a background job's tee file ('' if unreadable)."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            return f.read()
+    except OSError:
+        return ""
+
+
+def _await_bg(proc: subprocess.Popen, timeout: int, path: str) -> str:
+    """Wait on a background proc (output already tee'd to path), returning exit code + output."""
+    try:
+        proc.wait(timeout=timeout or None)
+        return (f"exit {proc.returncode}\n" + _read_outfile(path)).rstrip()
+    except subprocess.TimeoutExpired:
+        proc.kill(); proc.wait()
+        return (f"Command timed out after {timeout}s\n" + _read_outfile(path)).rstrip()
 
 
 def read_file(path: str, start_line: int = 0, end_line: int = 0) -> str:
@@ -495,7 +518,8 @@ def check_command(job_id: str = "") -> str:
     if not job:
         return f"unknown command id: {job_id}"
     if not job["future"].done():
-        return f"{job_id} still running" # TODO: should include output thus far
+        partial = _read_outfile(job["outfile"])
+        return f"{job_id} still running" + (f", output so far:\n{partial}" if partial else "")
     return f"{job_id} finished:\n{job['future'].result()}"
 
 
@@ -523,6 +547,8 @@ def terminate_jobs() -> None:
     for job in _jobs.values():
         if not job["future"].done():
             job["proc"].kill()
+        try: os.remove(job["outfile"])  # drop the tee file
+        except OSError: pass
     _jobs.clear()
 
 

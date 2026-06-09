@@ -62,7 +62,7 @@ def _make_tool_call_prefix_fn(tokenizer:transformers.PreTrainedTokenizer, tool_t
                 allowed.remove(tokenizer.eos_token_id)
                 allowed.append(tool_tokens[1])
             return allowed
-        elif tool_tokens[1] in tokens:
+        elif tool_tokens[1] in tokens: # TODO: should we force eos? if not, also account for this in execute_tools
             return [tokenizer.eos_token_id]
         return list(range(tokenizer.vocab_size))
     return prefix_fn
@@ -194,7 +194,8 @@ async def rollout(model:transformers.modeling_utils.PreTrainedModel, tokenizer:t
             if action == "abort":
                 trajectory[-1]["reward"] -= reward_utils.W_ABORT
                 break
-            elif action == "feedback":
+            max_steps += 10
+            if action == "feedback":
                 trajectory[-1]["reward"] -= reward_utils.W_FEEDBACK
                 fb_ids = tokenizer.apply_chat_template(
                     asst_msg + [{"role": "user", "content": feedback_text}],
