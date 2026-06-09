@@ -107,6 +107,24 @@ def _load_policy(path: str) -> dict[str, list[str]]:
     return policy
 
 
+def _is_protected(path: str) -> bool:
+    """True when path resolves to the guardrail policy file (case-insensitive on Windows)."""
+    try:
+        a, b = os.path.abspath(path), os.path.abspath(_policy_file)
+        return a.lower() == b.lower() if os.name == "nt" else a == b
+    except (OSError, ValueError):
+        return False
+
+
+def _refs_protected(command: str) -> bool:
+    """True when the command string contains the policy filename or its abspath.
+    Broad by design — even reads via shell are blocked; use read_file instead."""
+    needle_base = os.path.basename(_policy_file).lower()
+    needle_abs  = os.path.abspath(_policy_file).lower()
+    cmd_lower   = command.lower()
+    return needle_base in cmd_lower or needle_abs in cmd_lower
+
+
 # Hardcoded evasion patterns — not in command_policy.txt so they can't be trivially removed.
 # NOTE: `-e` (short PS alias for -EncodedCommand) omitted to avoid false positives (e.g. sed -e).
 _EVASION: list[tuple[re.Pattern, str]] = [
@@ -199,6 +217,9 @@ def run_command(command: str, timeout: int = 30, background: bool = False) -> st
     # Lazy-load policy on first call, re-read each time to pick up user edits
     _policy = _load_policy(_policy_file)
 
+    if _refs_protected(command):
+        return f"Blocked: command references the protected policy file {_policy_file}"
+
     status = _check_policy(command, _policy)
     status = _worst(status, _scan_scripts(command, _policy))
     if status == "blocked":
@@ -286,6 +307,8 @@ def write_file(path: str, content: str, append: bool = False) -> str:
         content: The text content to write.
         append: If true, append to existing file instead of overwriting.
     """
+    if _is_protected(path):
+        return f"Refused: {path} is the guardrail policy file and cannot be modified by the agent."
     try:
         # Back up existing file before overwriting (not on append, not on new file)
         if not append and os.path.isfile(path):
