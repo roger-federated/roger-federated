@@ -125,13 +125,6 @@ def _refs_protected(command: str) -> bool:
     return needle_base in cmd_lower or needle_abs in cmd_lower
 
 
-# Hardcoded evasion patterns — not in command_policy.txt so they can't be trivially removed.
-# NOTE: `-e` (short PS alias for -EncodedCommand) omitted to avoid false positives (e.g. sed -e).
-_EVASION: list[tuple[re.Pattern, str]] = [
-    (re.compile(r"-enc(odedcommand)?\b", re.I), "confirm"),        # encoded PS payloads
-    (re.compile(r"\biex\b|invoke-expression\b", re.I), "confirm"), # in-shell eval
-]
-
 
 def _worst(a: str, b: str) -> str:
     """Return the stricter of two policy verdicts: blocked > confirm > allowed."""
@@ -157,10 +150,10 @@ def _check_policy(command: str, policy: dict[str, list[str]]) -> str:
         for rule in policy.get("confirm", []):
             if seg.startswith(rule) or seg == rule:
                 verdict = "confirm"
-        # Evasion patterns (substring match — prefix matching misses mid-command tokens)
-        for pat, pv in _EVASION:
-            if pat.search(seg):
-                verdict = _worst(verdict, pv)
+        # Evasion entries: case-insensitive substring match (prefix matching misses mid-command tokens)
+        for token in policy.get("evasion", []):
+            if token.lower() in seg.lower():
+                verdict = _worst(verdict, "confirm")
     return verdict
 
 

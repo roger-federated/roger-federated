@@ -16,3 +16,11 @@ git push
 git reset
 chmod
 chown
+
+# Substrings that trigger confirm regardless of position in the command (case-insensitive).
+# Catches in-shell evasion primitives that prefix matching would miss.
+# Note: bare '-e' omitted to avoid false positives (e.g. sed -e).
+[evasion]
+-enc
+invoke-expression
+iex
