@@ -38,16 +38,17 @@ This software is still in development. Below is a non-exhaustive list of to-do i
 - [x] Give the model agency, i.e., integrate tool use, reasoning, etc., with the LLM as foundation.
 - [x] Enable connecting to MCP servers.
 - [x] Implement standard tools (e.g., run_command, read_file, write_file, search_file, search_dir, prompt_user).
+- [ ] Make tool searcher better.
+- [ ] Implement auto-triggered RAG.
 - [ ] Make it executable.
 - [ ] *Congrats, you now have a semi-basic agent.*
-- [ ] Implement what the finetuning framework considers as rewards.
+- [x] Implement what the finetuning framework considers as rewards.
 - [ ] Implement automatic LoRA RL execution.
 - [ ] Implement federated learning-style hives.
-- [ ] Implement sandboxing for the environment.
 - [ ] Integrate product into an (CLI) application in which an account is set up, hives are selected, finetuning is scheduled, gradient sharing settings are applied, as well as (background/execution) autonomy settings, and (file) permission settings.
 - [ ] *Congrats, you now have a shippable.*
 
 Further into the future:
 - [ ] Sandboxed docker environments.
 - [ ] LLM-as-judge.
-- [ ] State embeddings to efficiently track environment and progress.
+- [ ] Dynalang-style world model for embedded state roll-forward.
