@@ -65,7 +65,7 @@ def build_index(root: str = None, max_bytes: int = 262144) -> dict:
     N = len(docs)
     avgdl = sum(d["dl"] for d in docs) / max(N, 1)
     idf = {t: math.log((N - n + 0.5) / (n + 0.5) + 1.0) for t, n in df.items()}
-    return {"docs": docs, "idf": idf, "avgdl": avgdl, "N": N, "root": root}
+    return {"docs": docs, "idf": idf, "df": df, "avgdl": avgdl, "N": N, "root": root}
 
 
 def score(query_tokens: list[str], index: dict) -> list[float]:
@@ -132,14 +132,18 @@ def _localize(path: str, root: str, query_terms: set[str], idf: dict,
     return start + 1, end + 1, "".join(lines[start:end + 1])   # 1-indexed
 
 
-def retrieve(query: str, index: dict, k: int = 5,
-             min_overlap: int = 2, exclude: dict = None) -> list[dict]:
+def retrieve(query: str, index: dict, k: int = 3,
+             min_ratio: float = 0.5, specific_df_frac: float = 0.25,
+             exclude: dict = None) -> list[dict]:
     """Return up to `k` localized file spans most relevant to `query`.
 
-    `exclude`: dict[relpath → set[int]] of already-shown 1-indexed line numbers.
-    Relevance gate: query must share ≥ `min_overlap` terms with the corpus vocabulary.
-    A span is skipped when > 50% of its lines are already in the exclusion set.
-    Returns [] when nothing clears the gate — safe to call every turn.
+    Discriminative gate: only fires when the query contains ≥1 *specific* term —
+    one that appears in ≤ `specific_df_frac` of corpus files (rare ⇒ informative).
+    Generic queries ("run the task", "help me") carry no specific term and return [].
+    After ranking, drops tail docs whose score < `min_ratio` × top score.
+    Each returned doc must contain ≥1 specific term (excludes common-word-only matches).
+    `exclude`: dict[relpath → set[int]] of already-shown 1-indexed line numbers;
+    a span is skipped when > 50% of its lines overlap the exclusion set.
     """
     if exclude is None:
         exclude = {}
@@ -147,16 +151,28 @@ def retrieve(query: str, index: dict, k: int = 5,
     if not qtokens:
         return []
     unique = set(qtokens)
-    if len(unique & index["idf"].keys()) < min_overlap:
-        return []
 
-    ranked = sorted(
-        ((s, doc) for s, doc in zip(score(qtokens, index), index["docs"]) if s > 0),
-        key=lambda x: -x[0]
-    )
+    # Discriminative gate: specific = terms present in ≤ df_cap files
+    df_cap = max(1, int(specific_df_frac * index["N"]))
+    specific = {t for t in unique if 0 < index["df"].get(t, 0) <= df_cap}
+    if not specific:
+        return []   # query is all common words — no retrieval signal
+
+    # Score all docs but keep only those containing ≥1 specific term
+    scored = [
+        (s, doc) for s, doc in zip(score(qtokens, index), index["docs"])
+        if s > 0 and any(doc["tf"].get(t) for t in specific)
+    ]
+    if not scored:
+        return []
+    ranked = sorted(scored, key=lambda x: -x[0])
+    top = ranked[0][0]
+
     hits = []
-    for _, doc in ranked:
+    for s, doc in ranked:
         if len(hits) >= k:
+            break
+        if s < min_ratio * top:   # relative cutoff — drop weak tail matches
             break
         result = _localize(doc["path"], index["root"], unique, index["idf"])
         if result is None:

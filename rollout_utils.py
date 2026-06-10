@@ -167,7 +167,7 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
                   tool_handlers: dict = {}, max_steps: int = 10,
                   max_new_tokens: int | None = 4096,
                   on_token: Callable = None,
-                  enable_rag: bool = True, rag_k: int = 5,
+                  enable_rag: bool = True, rag_k: int = 3,
                   rag_root: str = None) -> list:
 
     # Probe once: last token of a dummy assistant-turn-with-tool-calls marks the delta boundary.
@@ -269,6 +269,7 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
         attn_mask = torch.ones(1, input_ids.shape[1], device=model.device, dtype=torch.long)
         prefix_fn, mask_log = _make_prefix_fn(inner_fn, tokenizer, tool_tokens, new_idx)
         # Prepare inputs; model.generate slices the new tokens internally via past_key_values length
+        print(tokenizer.decode(input_ids.squeeze(), skip_special_tokens=False))  # debug: see the full prompt each turn
         kwargs = {
             "input_ids": input_ids,
             "attention_mask": attn_mask,
