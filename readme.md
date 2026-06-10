@@ -38,8 +38,9 @@ This software is still in development. Below is a non-exhaustive list of to-do i
 - [x] Give the model agency, i.e., integrate tool use, reasoning, etc., with the LLM as foundation.
 - [x] Enable connecting to MCP servers.
 - [x] Implement standard tools (e.g., run_command, read_file, write_file, search_file, search_dir, prompt_user).
-- [ ] Make tool searcher better.
+- [x] Make tool searcher better.
 - [ ] Implement auto-triggered RAG.
+- [ ] Allow importing skills and agent.md files.
 - [ ] Make it executable.
 - [ ] *Congrats, you now have a semi-basic agent.*
 - [x] Implement what the finetuning framework considers as rewards.

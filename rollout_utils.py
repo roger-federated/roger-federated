@@ -6,45 +6,45 @@ from collections.abc import Callable
 from std_tools import (get_standard_tools, prompt_user, offer_revert, maxsteps_checkin,
                        drain_finished_jobs, pending_jobs, terminate_jobs)
 
-def make_tool_searcher(tools, model, tokenizer, k=3):
-    """Pre-compute tool embeddings; return a search_tools(query) closure for deferred loading."""
-    embed_layer = model.get_input_embeddings()
-    # Extract name/description from each tool (supports both dict-schema and callable formats)
-    tool_info = []
+def make_tool_loader(tools):
+    """Build a terse catalog string + load_tools closure for deferred schema loading.
+
+    Returns (catalog_text, load_tools) where catalog_text lists every tool as
+    '- name: one-line description' and load_tools(names) returns full stripped
+    schemas for the requested subset.  No embedding model required.
+    """
+    from mcp_utils import _strip_schema
+    # Build index: name -> (one-liner, original tool object)
+    index = {}
     for t in tools:
         if isinstance(t, dict):
             f = t["function"]
-            name, desc = f["name"], f.get("description", "")
+            name = f["name"]
+            desc = f.get("description", "").split("\n")[0].strip()
         else:
-            name, desc = t.__name__, (t.__doc__ or "").split("\n")[0].strip()
-        tool_info.append((name, desc, t))
-    # Pre-compute avg-pooled token embeddings per tool description (embedding table lookup only)
-    tool_embs = {}
-    with torch.no_grad():
-        for name, desc, _ in tool_info:
-            ids = tokenizer.encode(f"{name}: {desc}", add_special_tokens=False, return_tensors="pt").to(embed_layer.weight.device)
-            tool_embs[name] = embed_layer(ids).mean(dim=1)
+            name = t.__name__
+            desc = (t.__doc__ or "").split("\n")[0].strip()
+        index[name] = (desc, t)
 
-    def tool_searcher(query: str) -> str:
-        """Search for a tool by describing the desired functionality.
+    catalog_text = "\n".join(f"- {n}: {d}" for n, (d, _) in index.items())
+
+    def load_tools(names: list) -> str:
+        """Load full schemas for named tools so you can call them.
         Args:
-            query: what you want to accomplish (e.g. 'type text into a form field')
+            names: list of tool names to load (from the catalog)
+        Returns: JSON array of tool schemas
         """
-        with torch.no_grad():
-            ids = tokenizer.encode(query, add_special_tokens=False, return_tensors="pt").to(embed_layer.weight.device)
-            q_emb = embed_layer(ids).mean(dim=1)
-        sims = {n: torch.cosine_similarity(q_emb, e).item() for n, e in tool_embs.items()}
-        top = sorted(sims, key=sims.get, reverse=True)[:k]
-        if sims[top[0]] < 0.5:
-            return "No matching tools found. Try rephrasing your query or cancelling the task by not emitting a new tool call."
-        from mcp_utils import _strip_schema
         results = []
-        for name in top:
-            _, _, t = next(x for x in tool_info if x[0] == name)
-            results.append(_strip_schema(t) if isinstance(t, dict) else {"name": name, "description": (t.__doc__ or "").strip()})
+        for n in names:
+            if n not in index:
+                results.append({"name": n, "error": "unknown tool name"})
+                continue
+            _, t = index[n]
+            results.append(_strip_schema(t) if isinstance(t, dict) else
+                           {"name": n, "description": (t.__doc__ or "").strip()})
         return json.dumps(results, indent=2)
 
-    return tool_searcher
+    return catalog_text, load_tools
 
 def _make_tool_call_prefix_fn(tokenizer:transformers.PreTrainedTokenizer, tool_tokens:tuple[int,int], new_idx:int=0) -> Callable:
     """Restrict generation to valid JSON tool call format while inside a tool call block."""
@@ -70,7 +70,7 @@ def _make_tool_call_prefix_fn(tokenizer:transformers.PreTrainedTokenizer, tool_t
 async def execute_tools(sequences:torch.Tensor, tokenizer:transformers.PreTrainedTokenizer,
                         tool_handlers:dict, tool_tokens:tuple[int,int]) -> str|torch.Tensor:
     """Extract and execute (a single) tool call from output token sequence. If start of tool call is not detected, result is 'terminate'."""
-    tokens = sequences.squeeze().tolist()
+    tokens = sequences.tolist()
     # No tool call emitted -> signal termination
     if tool_tokens[0] not in tokens:
         return "terminate"
@@ -81,7 +81,7 @@ async def execute_tools(sequences:torch.Tensor, tokenizer:transformers.PreTraine
     if handler := tool_handlers.get(call["name"], False):
         result = await handler(**call["arguments"]) if inspect.iscoroutinefunction(handler) else handler(**call["arguments"])
     else:
-        raise NotImplementedError(f"No tool handler provided for {call['name']}")
+        result = f"No tool handler provided for {call['name']}. Perhaps you misspelled the tool name?"
 
     return result
 
@@ -113,22 +113,29 @@ async def rollout(model:transformers.modeling_utils.PreTrainedModel, tokenizer:t
 
     # Initialize trajectory
     trajectory = []
-    # Defer tool loading if too many tools for the prompt
-    if len(tools) > 10:
-        tool_searcher = make_tool_searcher(tools, model, tokenizer)
-        tool_handlers["tool_searcher"] = tool_searcher
-        prompt_tools = [tool_searcher]
+    # Defer tool loading if too many tools: keep terse name catalog in context; model calls
+    # load_tools(names=[...]) to pull full schemas before using them.
+    if len(tools) > 15:
+        catalog_text, load_tools_fn = make_tool_loader(tools)
+        tool_handlers["load_tools"] = load_tools_fn
+        tools = [load_tools_fn]
     else:
-        prompt_tools = tools
+        catalog_text, tools = None, list(tools)
     std_tools, std_handlers = get_standard_tools()
-    prompt_tools += std_tools
+    tools += std_tools
     tool_handlers = tool_handlers | std_handlers
-    # Create initial input message TODO: allow skills
-    messages = [{"role": "system", "content":
-                "\
-                You are an agent, will be given a current state and a task description, and must interact with the provided (MCP) tools in order to accomplish the task. \
-                After thinking very concisely about intent, provide your tool call in JSON format.\
-                "},
+    # Create initial input message
+    sys_content = (
+        "You are an agent, will be given a current state and a task description, and must "
+        "interact with the provided (MCP) tools in order to accomplish the task. "
+        "After thinking very concisely about intent, provide your tool call in JSON format."
+    )
+    if catalog_text:
+        sys_content += (
+            "\nAvailable tools (call load_tools(names=[...]) to load a tool's full schema "
+            "before using it):\n" + catalog_text
+        )
+    messages = [{"role": "system", "content": sys_content},
                 {"role": "user", "content": []}
     ]
     if image is not None:
@@ -143,7 +150,7 @@ async def rollout(model:transformers.modeling_utils.PreTrainedModel, tokenizer:t
         messages,
         add_generation_prompt=True, tokenize=True,
         return_tensors="pt", return_dict=True,
-        enable_thinking=True, tools=prompt_tools
+        enable_thinking=True, tools=tools
     ).to(model.device)
     input_ids = inputs["input_ids"]
     new_idx = input_ids.shape[1]
@@ -181,7 +188,7 @@ async def rollout(model:transformers.modeling_utils.PreTrainedModel, tokenizer:t
         generate_task = loop.run_in_executor(None, lambda: model.generate(**kwargs, streamer=streamer))
         outputs, _ = await asyncio.gather(generate_task, _drain())
         gen_ids = outputs.sequences[:, :-1] if outputs.sequences[0, -1] == tokenizer.eos_token_id else outputs.sequences
-        new_ids = gen_ids.squeeze()[:, new_idx:].detach()
+        new_ids = gen_ids.squeeze()[new_idx:].detach()
         past_key_values = outputs.past_key_values
 
         # Parse and execute tool calls from the newly generated tokens only
