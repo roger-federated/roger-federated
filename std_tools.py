@@ -10,18 +10,17 @@ Usage:
     await rollout(..., tools=tools, tool_handlers=handlers)
 """
 
-import subprocess, os, re, pathlib, shutil, time, ast, math, asyncio, tempfile
+import os, re, pathlib, shutil, time, ast, math, asyncio, tempfile
+import shell_tools   # shell execution + policy machinery lives here
 
 
 # ---------------------------------------------------------------------------
 # Calculator internals
 # ---------------------------------------------------------------------------
 
-# Expose all public math symbols plus a few builtins
 _MATH_NS: dict = {k: v for k, v in vars(math).items() if not k.startswith("_")}
 _MATH_NS.update({"abs": abs, "round": round, "min": min, "max": max, "sum": sum})
 
-# AST node whitelist — anything not in here is rejected before eval
 _SAFE_NODES = {
     ast.Expression, ast.BinOp, ast.UnaryOp, ast.Constant,
     ast.Name, ast.Call, ast.Load, ast.Tuple, ast.List,
@@ -43,12 +42,10 @@ def _ast_safe(node: ast.AST) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Module-level state (set by get_standard_tools, used by tools internally)
+# Module-level per-rollout state
 # ---------------------------------------------------------------------------
 
-# Pluggable prompt backend — all user-facing prompts route through this
 def _default_prompt(question: str) -> str:
-    """Fallback prompt backend: blocking input() with EOFError/KeyboardInterrupt handling."""
     try:
         return input(question + " ")
     except EOFError:
@@ -57,215 +54,23 @@ def _default_prompt(question: str) -> str:
         return "(user cancelled)"
 
 _prompt_backend = _default_prompt
+_policy_file: str = "command_policy.txt"   # kept here so write_file/_is_protected can read it
 
-# Command policy — loaded lazily on first run_command call
-_policy: dict | None = None
-_policy_file: str = "command_policy.txt"
-
-# Write backups — list of (original_path, backup_path) for end-of-rollout revert
+# Write backups — (original_path, backup_path) for end-of-rollout revert
 _backups: list[tuple[str, str]] = []
 
-# Timer registry — id ("t1", "t2", ...) -> {"fires_at": float, "label": str}
-# fires_at = time.monotonic() + seconds; pure timestamp math, no background tasks.
+# Timer registry: id -> {"fires_at": float, "label": str}
 _timers: dict[str, dict] = {}
 _timer_seq: int = 0
 
-# Stopwatch registry — id ("w1", "w2", ...) -> {"start_at": float, "stopped_at": float|None, "label": str}
+# Stopwatch registry: id -> {"start_at": float, "stopped_at": float|None, "label": str}
 _stopwatches: dict[str, dict] = {}
 _stopwatch_seq: int = 0
 
-# Background command jobs — id ("c1", ...) -> {"proc": Popen, "future": Future, "command": str,
-# "reported": bool, "outfile": str}. Process is created eagerly (so stop_command gets a handle);
-# output is tee'd to a temp file so check_command can read partial output while it runs.
-_jobs: dict[str, dict] = {}
-_job_seq: int = 0
-
 
 # ---------------------------------------------------------------------------
-# Command policy internals
+# File tools
 # ---------------------------------------------------------------------------
-
-def _load_policy(path: str) -> dict[str, list[str]]:
-    """Parse command_policy.txt into {"blocked": [...], "confirm": [...]}.
-    Missing file = empty lists (fully permissive). Lines starting with # are comments."""
-    policy = {"blocked": [], "confirm": []}
-    try:
-        with open(path, encoding="utf-8") as f:
-            section = None
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#"):
-                    continue
-                if line.startswith("[") and line.endswith("]"):
-                    section = line[1:-1]
-                    if section not in policy:
-                        policy[section] = []
-                elif section:
-                    policy[section].append(line)
-    except FileNotFoundError:
-        pass
-    return policy
-
-
-def _is_protected(path: str) -> bool:
-    """True when path resolves to the guardrail policy file (case-insensitive on Windows)."""
-    try:
-        a, b = os.path.abspath(path), os.path.abspath(_policy_file)
-        return a.lower() == b.lower() if os.name == "nt" else a == b
-    except (OSError, ValueError):
-        return False
-
-
-def _refs_protected(command: str) -> bool:
-    """True when the command string contains the policy filename or its abspath.
-    Broad by design — even reads via shell are blocked; use read_file instead."""
-    needle_base = os.path.basename(_policy_file).lower()
-    needle_abs  = os.path.abspath(_policy_file).lower()
-    cmd_lower   = command.lower()
-    return needle_base in cmd_lower or needle_abs in cmd_lower
-
-
-
-def _worst(a: str, b: str) -> str:
-    """Return the stricter of two policy verdicts: blocked > confirm > allowed."""
-    _rank = {"blocked": 2, "confirm": 1, "allowed": 0}
-    return a if _rank.get(a, 0) >= _rank.get(b, 0) else b
-
-
-def _check_policy(command: str, policy: dict[str, list[str]]) -> str:
-    """Check a command against the policy. Splits on shell operators AND newlines to catch
-    chained/compounded dangerous commands (pipes, PS multi-statement ;, bash &&, newlines).
-    Returns "blocked", "confirm", or "allowed"."""
-    segments = re.split(r"\|{1,2}|&&|;|\n", command)
-    verdict = "allowed"
-    for seg in segments:
-        seg = seg.strip()
-        if not seg:
-            continue
-        # Blocked rules take priority — check first
-        for rule in policy.get("blocked", []):
-            if seg.startswith(rule) or seg == rule:
-                return "blocked"
-        # Confirm rules escalate but don't short-circuit (a later segment may be blocked)
-        for rule in policy.get("confirm", []):
-            if seg.startswith(rule) or seg == rule:
-                verdict = "confirm"
-        # Evasion entries: case-insensitive substring match (prefix matching misses mid-command tokens)
-        for token in policy.get("evasion", []):
-            if token.lower() in seg.lower():
-                verdict = _worst(verdict, "confirm")
-    return verdict
-
-
-def _scan_scripts(command: str, policy: dict) -> str:
-    """Scan any script files referenced in command through _check_policy line-by-line.
-    Returns 'blocked'/'confirm' for policy violations, 'confirm' for unreadable/oversized
-    scripts (can't verify → ask user), and 'allowed' for clean or non-existent path tokens."""
-    _MAX_BYTES = 64 * 1024  # 64 KB — larger scripts get confirm rather than stall the rollout
-    _SCRIPT_RE = re.compile(r"""[^\s'";&|]+\.(?:bat|cmd|ps1|sh|vbs|py)\b""", re.I)
-    verdict = "allowed"
-    for m in _SCRIPT_RE.finditer(command):
-        path = m.group(0).strip("'\"")
-        try:
-            if os.path.getsize(path) > _MAX_BYTES:
-                verdict = _worst(verdict, "confirm"); continue
-            with open(path, encoding="utf-8", errors="replace") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line or line.startswith(("#", "::")):
-                        continue  # skip comments / batch rem-style lines
-                    verdict = _worst(verdict, _check_policy(line, policy))
-                    if verdict == "blocked":
-                        return "blocked"  # short-circuit
-        except FileNotFoundError:
-            pass  # path token is a flag value or future file — not a real script ref
-        except OSError:
-            verdict = _worst(verdict, "confirm")  # exists but unreadable — can't verify
-    return verdict
-
-
-# ---------------------------------------------------------------------------
-# Tools
-# ---------------------------------------------------------------------------
-
-def _popen(command: str, **kw) -> subprocess.Popen:
-    """Spawn `command` through the platform's shell: PowerShell on Windows, /bin/sh elsewhere."""
-    if os.name == "nt":
-        # shell=True on Windows would use cmd.exe; invoke PowerShell explicitly instead.
-        return subprocess.Popen(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command],
-                                text=True, **kw)
-    return subprocess.Popen(command, shell=True, text=True, **kw)
-
-
-def run_command(command: str, timeout: int = 30, background: bool = False) -> str:
-    """Execute a shell command and return its output. Uses Powershell on Windows, /bin/sh elsewhere.
-    Args:
-        command: The shell command to execute (supports pipes, redirects, chaining).
-        timeout: Max seconds before the process is killed; 0 means no limit.
-        background: If true, run the command in the background and return a job id
-            immediately; its output is delivered automatically once it finishes.
-            Use check_command to poll and stop_command to kill it.
-    """
-    global _policy, _job_seq
-    # Lazy-load policy on first call, re-read each time to pick up user edits
-    _policy = _load_policy(_policy_file)
-
-    if _refs_protected(command):
-        return f"Blocked: command references the protected policy file {_policy_file}"
-
-    status = _check_policy(command, _policy)
-    status = _worst(status, _scan_scripts(command, _policy))
-    if status == "blocked":
-        return f"Blocked by policy: '{command}' matches a blocked command pattern in {_policy_file}"
-    if status == "confirm":
-        answer = _prompt_backend(f"Agent wants to run: {command}\nAllow? [y/n]")
-        if answer.strip().lower() not in ("y", "yes"):
-            return f"Command rejected by user: {command}"
-
-    if background:
-        # Spawn now (instant) so stop_command has a handle; tee output to a temp file so
-        # check_command can read partial output, and just wait on the process in a worker thread.
-        path = tempfile.NamedTemporaryFile(delete=False, suffix=".out").name
-        proc = _popen(command, stdout=open(path, "w", encoding="utf-8"), stderr=subprocess.STDOUT)
-        fut = asyncio.get_running_loop().run_in_executor(None, _await_bg, proc, timeout, path)
-        _job_seq += 1
-        _jobs[f"c{_job_seq}"] = {"proc": proc, "future": fut, "command": command, "reported": False, "outfile": path}
-        return f"command c{_job_seq} started in background (timeout {timeout}s)"
-
-    try:
-        return _await_proc(_popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE), timeout)
-    except Exception as e:
-        return f"Error: {e}"
-
-
-def _await_proc(proc: subprocess.Popen, timeout: int) -> str:
-    """Block until proc finishes (or timeout), returning exit code + combined output (foreground)."""
-    try:
-        out, err = proc.communicate(timeout=timeout or None)
-        return (f"exit {proc.returncode}\n" + (out or "") + (err or "")).rstrip()
-    except subprocess.TimeoutExpired:
-        proc.kill(); proc.communicate()
-        return f"Command timed out after {timeout}s"
-
-
-def _read_outfile(path: str) -> str:
-    """Current contents of a background job's tee file ('' if unreadable)."""
-    try:
-        with open(path, encoding="utf-8", errors="replace") as f:
-            return f.read()
-    except OSError:
-        return ""
-
-
-def _await_bg(proc: subprocess.Popen, timeout: int, path: str) -> str:
-    """Wait on a background proc (output already tee'd to path), returning exit code + output."""
-    try:
-        proc.wait(timeout=timeout or None)
-        return (f"exit {proc.returncode}\n" + _read_outfile(path)).rstrip()
-    except subprocess.TimeoutExpired:
-        proc.kill(); proc.wait()
-        return (f"Command timed out after {timeout}s\n" + _read_outfile(path)).rstrip()
-
 
 def read_file(path: str, start_line: int = 0, end_line: int = 0) -> str:
     """Read the contents of a file, optionally a specific line range.
@@ -284,12 +89,9 @@ def read_file(path: str, start_line: int = 0, end_line: int = 0) -> str:
     except OSError as e:
         return f"Error reading file: {e}"
 
-    # Slice to requested range (1-indexed, 0 = unset sentinel)
     lo = (start_line - 1) if start_line > 0 else 0
     hi = end_line if end_line > 0 else len(lines)
     selected = lines[lo:hi]
-
-    # Prepend line numbers so the agent can reference specific locations
     return "".join(f"{lo + i + 1}: {line}" for i, line in enumerate(selected)).rstrip()
 
 
@@ -300,14 +102,11 @@ def write_file(path: str, content: str, append: bool = False) -> str:
         content: The text content to write.
         append: If true, append to existing file instead of overwriting.
     """
-    if _is_protected(path):
+    if shell_tools._is_protected(path):
         return f"Refused: {path} is the guardrail policy file and cannot be modified by the agent."
     try:
-        # Back up existing file before overwriting (not on append, not on new file)
         if not append and os.path.isfile(path):
             _backup_file(path)
-
-        # Auto-create parent dirs so the agent doesn't need a separate mkdir step
         parent = os.path.dirname(path)
         if parent:
             os.makedirs(parent, exist_ok=True)
@@ -322,14 +121,61 @@ def write_file(path: str, content: str, append: bool = False) -> str:
         return f"Error writing file: {e}"
 
 
+def edit_file(path: str, old: str, new: str, replace_all: bool = False) -> str:
+    """Replace an exact substring in a file. Read the file first to get exact text.
+    Args:
+        path: File to edit.
+        old: Exact text to find (must be unique in the file unless replace_all is set).
+        new: Replacement text.
+        replace_all: If true, replace every occurrence instead of requiring uniqueness.
+    """
+    if shell_tools._is_protected(path):
+        return f"Refused: {path} is the guardrail policy file and cannot be modified by the agent."
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            content = f.read()
+    except FileNotFoundError:
+        return f"File not found: {path}"
+    except PermissionError:
+        return f"Permission denied: {path}"
+    except OSError as e:
+        return f"Error reading file: {e}"
+
+    n = content.count(old)
+    if n == 0:
+        return f"No occurrence of the target text in {path}"
+    if not replace_all and n > 1:
+        return f"Target text is not unique ({n} matches); add more context or set replace_all"
+
+    new_content = content.replace(old, new) if replace_all else content.replace(old, new, 1)
+    _backup_file(path)
+    # Atomic write: temp file in same dir, then os.replace
+    try:
+        parent = os.path.dirname(os.path.abspath(path))
+        fd, tmp = tempfile.mkstemp(dir=parent)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(new_content)
+            os.replace(tmp, path)
+        except Exception:
+            try: os.unlink(tmp)
+            except OSError: pass
+            raise
+    except PermissionError:
+        return f"Permission denied: {path}"
+    except OSError as e:
+        return f"Error writing file: {e}"
+
+    replaced = n if replace_all else 1
+    return f"Replaced {replaced} occurrence(s) in {path}"
+
+
 def _backup_file(path: str) -> None:
-    """Copy an existing file to .backups/{path}.{timestamp}.bak and record it for revert."""
+    """Copy an existing file to .backups/{path}.{timestamp}.bak and record for revert."""
     ts = time.strftime("%Y%m%d_%H%M%S")
-    # Resolve to relative path if possible, keeping directory structure inside .backups/
     try:
         rel = os.path.relpath(path)
     except ValueError:
-        # relpath fails across drives on Windows
         rel = os.path.basename(path)
     backup_path = os.path.join(".backups", f"{rel}.{ts}.bak")
     os.makedirs(os.path.dirname(backup_path), exist_ok=True)
@@ -348,7 +194,6 @@ def search_file(path: str, pattern: str, max_results: int = 50) -> str:
         regex = re.compile(pattern)
     except re.error as e:
         return f"Invalid regex pattern: {e}"
-
     try:
         with open(path, encoding="utf-8", errors="replace") as f:
             lines = f.readlines()
@@ -359,14 +204,9 @@ def search_file(path: str, pattern: str, max_results: int = 50) -> str:
     except OSError as e:
         return f"Error reading file: {e}"
 
-    matches = []
-    for i, line in enumerate(lines, 1):
-        if regex.search(line):
-            matches.append(f"{i}: {line.rstrip()}")
-
+    matches = [f"{i}: {line.rstrip()}" for i, line in enumerate(lines, 1) if regex.search(line)]
     if not matches:
         return f"No matches found for '{pattern}' in {path}"
-    # Truncate to max_results to avoid flooding the context window
     total = len(matches)
     if total > max_results:
         matches = matches[:max_results]
@@ -384,32 +224,30 @@ def search_dir(path: str, pattern: str, max_results: int = 100) -> str:
     root = pathlib.Path(path)
     if not root.is_dir():
         return f"Not a directory: {path}"
-
     results = []
     try:
         for p in root.rglob(pattern):
-            # Show relative paths for readability; annotate with type/size
             rel = p.relative_to(root)
             if p.is_dir():
                 results.append(f"{rel}/")
             else:
-                try:
-                    size = p.stat().st_size
-                except OSError:
-                    size = "?"
+                try: size = p.stat().st_size
+                except OSError: size = "?"
                 results.append(f"{rel} ({size} bytes)")
             if len(results) >= max_results:
                 break
     except OSError as e:
         return f"Error searching directory: {e}"
-
     if not results:
         return f"No files matching '{pattern}' in {path}"
-    # Note truncation so the agent knows there may be more
     if len(results) >= max_results:
         results.append(f"... (truncated at {max_results} results)")
     return "\n".join(results)
 
+
+# ---------------------------------------------------------------------------
+# Calculator
+# ---------------------------------------------------------------------------
 
 def calculate(expression: str) -> str:
     """Evaluate a mathematical expression and return the result.
@@ -425,15 +263,9 @@ def calculate(expression: str) -> str:
             pi, e, tau, inf, nan.
             Examples: "2^10", "sqrt(2)*pi", "log(1000, 10)", "sin(pi/6)", "3.0e8 / 1e6"
     """
-    # Normalize alternative notations to Python syntax
     expr = (expression
-        .replace("^", "**")
-        .replace("×", "*")
-        .replace("÷", "/")
-        .replace("−", "-")   # Unicode minus −
-        .replace("²", "**2") # superscript ²
-        .replace("³", "**3") # superscript ³
-        .strip()
+        .replace("^", "**").replace("×", "*").replace("÷", "/")
+        .replace("−", "-").replace("²", "**2").replace("³", "**3").strip()
     )
     try:
         tree = ast.parse(expr, mode="eval")
@@ -445,7 +277,6 @@ def calculate(expression: str) -> str:
         return f"Unsafe expression — {e}"
     try:
         result = eval(compile(tree, "<calc>", "eval"), {"__builtins__": {}}, _MATH_NS)
-        # Clean up floats that are exact integers (e.g. sqrt(4) → 2 not 2.0)
         if isinstance(result, float) and result == int(result) and abs(result) < 1e15:
             return str(int(result))
         if isinstance(result, float):
@@ -457,6 +288,10 @@ def calculate(expression: str) -> str:
         return f"Error: {e}"
 
 
+# ---------------------------------------------------------------------------
+# User interaction
+# ---------------------------------------------------------------------------
+
 def prompt_user(question: str) -> str:
     """Ask the user a question and return their response.
     Args:
@@ -464,6 +299,19 @@ def prompt_user(question: str) -> str:
     """
     return _prompt_backend(question)
 
+
+def finish(message: str = "") -> str:
+    """Signal that the task is complete. Optionally provide a final answer or summary.
+    Args:
+        message: Final answer / summary to show the user. May be empty.
+    """
+    # The rollout loop detects this call by name and terminates after processing it.
+    return message or "(done)"
+
+
+# ---------------------------------------------------------------------------
+# Timers
+# ---------------------------------------------------------------------------
 
 def set_timer(seconds: float, label: str = "") -> str:
     """Set a countdown timer and return immediately with its id for later polling.
@@ -487,32 +335,31 @@ async def check_timer(timer_id: str = "", wait: bool = False) -> str:
     if not timer_id:
         if not _timers:
             return "no timers set"
-        lines = []
         now = time.monotonic()
+        lines = []
         for tid, t in _timers.items():
             rem = t["fires_at"] - now
             sfx = f" ({t['label']})" if t["label"] else ""
-            if rem > 0:
-                lines.append(f"{tid} pending, {rem:.1f}s remaining{sfx}")
-            else:
-                lines.append(f"{tid} fired {-rem:.1f}s ago{sfx}")
+            lines.append(f"{tid} {'pending, ' + f'{rem:.1f}s remaining' if rem > 0 else 'fired ' + f'{-rem:.1f}s ago'}{sfx}")
         return "\n".join(lines)
 
     if timer_id not in _timers:
         return f"unknown timer id: {timer_id}"
-
     t = _timers[timer_id]
     sfx = f" ({t['label']})" if t["label"] else ""
     rem = t["fires_at"] - time.monotonic()
     if rem > 0:
         if wait:
-            await asyncio.sleep(rem)  # yields the event loop; non-blocking
+            await asyncio.sleep(rem)
         else:
             return f"{timer_id} pending, {rem:.1f}s remaining{sfx}"
-    # Re-check elapsed after optional sleep
     ago = time.monotonic() - t["fires_at"]
     return f"{timer_id} fired {ago:.1f}s ago{sfx}"
 
+
+# ---------------------------------------------------------------------------
+# Stopwatches
+# ---------------------------------------------------------------------------
 
 def start_stopwatch(label: str = "") -> str:
     """Start a stopwatch and return its id for later reading.
@@ -535,20 +382,17 @@ def read_stopwatch(stopwatch_id: str = "", stop: bool = False) -> str:
     if not stopwatch_id:
         if not _stopwatches:
             return "no stopwatches started"
-        lines = []
         now = time.monotonic()
+        lines = []
         for wid, w in _stopwatches.items():
             elapsed = (w["stopped_at"] if w["stopped_at"] is not None else now) - w["start_at"]
             sfx = f" ({w['label']})" if w["label"] else ""
-            if w["stopped_at"] is not None:
-                lines.append(f"{wid} stopped at {elapsed:.2f}s{sfx}")
-            else:
-                lines.append(f"{wid} running, {elapsed:.2f}s elapsed{sfx}")
+            state = f"stopped at {elapsed:.2f}s" if w["stopped_at"] is not None else f"running, {elapsed:.2f}s elapsed"
+            lines.append(f"{wid} {state}{sfx}")
         return "\n".join(lines)
 
     if stopwatch_id not in _stopwatches:
         return f"unknown stopwatch id: {stopwatch_id}"
-
     w = _stopwatches[stopwatch_id]
     sfx = f" ({w['label']})" if w["label"] else ""
     now = time.monotonic()
@@ -560,122 +404,47 @@ def read_stopwatch(stopwatch_id: str = "", stop: bool = False) -> str:
     return f"{stopwatch_id} running, {elapsed:.2f}s elapsed{sfx}"
 
 
-def stop_command(job_id: str) -> str:
-    """Force-stop a background command started by run_command.
-    Args:
-        job_id: Id returned by run_command(background=True), e.g. 'c1'.
-    """
-    job = _jobs.get(job_id)
-    if not job:
-        return f"unknown command id: {job_id}"
-    if job["future"].done():
-        return f"{job_id} already finished"
-    job["proc"].kill()  # worker's communicate() returns, completing the future
-    return f"{job_id} stopped"
-
-
-def check_command(job_id: str = "") -> str:
-    """Check a background command's status/output, or list all background commands.
-    Args:
-        job_id: Id from run_command(background=True). Empty string lists all jobs.
-    """
-    if not job_id:
-        if not _jobs:
-            return "no background commands"
-        return "\n".join(f"{jid} {'finished' if j['future'].done() else 'running'}: {j['command']}"
-                         for jid, j in _jobs.items())
-    job = _jobs.get(job_id)
-    if not job:
-        return f"unknown command id: {job_id}"
-    if not job["future"].done():
-        partial = _read_outfile(job["outfile"])
-        return f"{job_id} still running" + (f", output so far:\n{partial}" if partial else "")
-    return f"{job_id} finished:\n{job['future'].result()}"
-
-
-# ---------------------------------------------------------------------------
-# Background-job helpers (not agent tools; called directly by the rollout)
-# ---------------------------------------------------------------------------
-
-def drain_finished_jobs() -> list[tuple[str, str]]:
-    """Return (id, output) for jobs that finished since the last drain, marking them reported."""
-    out = []
-    for jid, job in _jobs.items():
-        if job["future"].done() and not job["reported"]:
-            job["reported"] = True
-            out.append((jid, job["future"].result()))
-    return out
-
-
-def pending_jobs() -> list:
-    """Futures of background commands still running (for the rollout to await)."""
-    return [j["future"] for j in _jobs.values() if not j["future"].done()]
-
-
-def terminate_jobs() -> None:
-    """Kill any still-running background commands and clear the registry (rollout cleanup)."""
-    for job in _jobs.values():
-        if not job["future"].done():
-            job["proc"].kill()
-        try: os.remove(job["outfile"])  # drop the tee file
-        except OSError: pass
-    _jobs.clear()
-
-
 # ---------------------------------------------------------------------------
 # End-of-rollout revert
 # ---------------------------------------------------------------------------
 
 def offer_revert(prompt_fn=None) -> tuple[bool, int]:
     """Prompt the user to revert files overwritten during the rollout.
-    Returns (was_prompted, n_reverted): was_prompted is False when no backups
-    existed (caller should then ask for an explicit outcome grade instead)."""
+    Returns (was_prompted, n_reverted): was_prompted is False when no backups existed."""
     if not _backups:
         return False, 0
     fn = prompt_fn or _prompt_backend
-
     listing = "\n".join(f"  {i+1}. {orig}" for i, (orig, _bak) in enumerate(_backups))
     answer = fn(f"The following files were overwritten and backed up:\n{listing}\nRevert? [all / 1,2,... / none]")
     answer = answer.strip().lower()
 
     if answer == "none" or not answer:
-        _backups.clear()
-        return True, 0
-
+        _backups.clear(); return True, 0
     if answer == "all":
         indices = list(range(len(_backups)))
     else:
         try:
             indices = [int(x.strip()) - 1 for x in answer.split(",")]
         except ValueError:
-            _backups.clear()
-            return True, 0
+            _backups.clear(); return True, 0
 
     n_reverted = 0
     for idx in indices:
         if 0 <= idx < len(_backups):
             orig, bak = _backups[idx]
-            try:
-                shutil.copy2(bak, orig)
-                n_reverted += 1
-            except OSError:
-                pass
+            try: shutil.copy2(bak, orig); n_reverted += 1
+            except OSError: pass
     _backups.clear()
     return True, n_reverted
 
 
 # ---------------------------------------------------------------------------
-# Max-steps check-in (not exposed as an agent tool; called directly by rollout)
+# Max-steps check-in (called directly by rollout; not an agent tool)
 # ---------------------------------------------------------------------------
 
 def maxsteps_checkin(prompt_fn=None) -> tuple[str, str]:
     """Present the three-option max-steps check-in to the user.
-    Returns (action, feedback_text) where action is one of:
-        'continue'  — user is happy, loop continues          (small positive signal)
-        'abort'     — user stops the rollout                 (large negative signal)
-        'feedback'  — user continues but provides guidance   (small negative signal)
-    feedback_text is non-empty only for the 'feedback' action.
-    """
+    Returns (action, feedback_text): action in {'continue', 'abort', 'feedback'}."""
     fn = prompt_fn or _prompt_backend
     answer = fn(
         "Max steps reached.\n"
@@ -689,7 +458,6 @@ def maxsteps_checkin(prompt_fn=None) -> tuple[str, str]:
     if answer in ("3", "feedback", "3 continue with feedback"):
         text = fn("Feedback:").strip()
         return "feedback", text
-    # Default (empty / 1 / anything else) → continue
     return "continue", ""
 
 
@@ -703,16 +471,23 @@ def get_standard_tools(prompt_backend=None, policy_file="command_policy.txt") ->
         prompt_backend: Optional callable(question: str) -> str replacing input().
         policy_file: Path to the command policy file for run_command.
     """
-    global _prompt_backend, _policy_file, _timer_seq, _stopwatch_seq, _job_seq
+    global _prompt_backend, _policy_file, _timer_seq, _stopwatch_seq
     if prompt_backend is not None:
         _prompt_backend = prompt_backend
     _policy_file = policy_file
-    # Reset per-rollout state so timers/stopwatches/jobs don't leak across episodes
+
+    # Reset per-rollout state
     _timers.clear(); _timer_seq = 0
     _stopwatches.clear(); _stopwatch_seq = 0
-    _jobs.clear(); _job_seq = 0
+    _backups.clear()
 
-    tools = [run_command, read_file, write_file, search_file, search_dir, calculate, prompt_user,
-             set_timer, check_timer, start_stopwatch, read_stopwatch, stop_command, check_command]
+    # Configure shell_tools (sets its own prompt/policy globals and resets _jobs)
+    shell_tools.configure(prompt_backend=prompt_backend, policy_file=policy_file)
+
+    shell = [shell_tools.run_command, shell_tools.stop_command, shell_tools.check_command]
+    file  = [read_file, write_file, edit_file, search_file, search_dir]
+    misc  = [calculate, prompt_user, finish,
+             set_timer, check_timer, start_stopwatch, read_stopwatch]
+    tools = shell + file + misc
     handlers = {fn.__name__: fn for fn in tools}
     return tools, handlers
