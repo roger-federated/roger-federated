@@ -14,7 +14,7 @@ The codebase should eventually be split into several folders:
 - `training/` -- GRPO trainer, LoRA config, reward functions
 - `federated` -- gradient aggregation, differential privacy, strategies
 
-During code generation, be concise and efficient. I.e., implement the minimum changes necessary. Write plenty of compact comments.
+During code generation, be concise and efficient. I.e., implement the minimum changes necessary. Write plenty of compact comments. Do not delete commands that are unrelated to your changes. When asked to commit changes, group by relevance and commit separately.
 
 This code is primarily functional instead of object oriented. There must be a valid reason for statefulness if a class were to be implemented.
 
