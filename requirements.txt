@@ -1,0 +1,9 @@
+torch
+transformers
+accelerate
+bitsandbytes
+lm-format-enforcer
+pillow
+numpy
+mcp
+# optional: pydub (for AudioSegment support in parse_result)
