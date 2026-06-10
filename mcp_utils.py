@@ -87,11 +87,13 @@ class MCPConnection:
         """Wrap a single MCP tool as an async callable that forwards kwargs to the server."""
         async def handler(**kwargs):
             result = await self._session.call_tool(name, kwargs)
-            # Single image block → PIL.Image (e.g. Playwright screenshot); multi/text → joined str
-            if len(result.content) == 1 and hasattr(result.content[0], "data"):
+            # Single image block → PIL.Image (e.g. Playwright screenshot)
+            # Use the explicit type field rather than duck-typing .data
+            if len(result.content) == 1 and getattr(result.content[0], "type", None) == "image":
                 c = result.content[0]
                 return Image.open(io.BytesIO(base64.b64decode(c.data)))
-            texts = [c.text for c in result.content if hasattr(c, "text")]
+            # Text blocks → joined string; anything else (audio, resource) falls back to str()
+            texts = [c.text for c in result.content if getattr(c, "type", None) == "text"]
             return "\n".join(texts) if texts else str(result.content)
         handler.__name__ = name
         return handler
