@@ -150,13 +150,13 @@ async def rollout(model:transformers.modeling_utils.PreTrainedModel, tokenizer:t
         messages,
         add_generation_prompt=True, tokenize=True,
         return_tensors="pt", return_dict=True,
-        enable_thinking=True, tools=tools
+        enable_thinking=False, tools=tools
     ).to(model.device)
     input_ids = inputs["input_ids"]
     new_idx = input_ids.shape[1]
     # Get tool result token ids (asst_msg prefixes the delta so the template renders it; sliced off via str_token_id)
     def result_to_ids(tool_result):
-        tool_msg = [{"role": "tool", "content": tool_result}]
+        tool_msg = [{"role": "tool", "tool_call_id": "0", "content": tool_result}]
         tool_ids = tokenizer.apply_chat_template(asst_msg + tool_msg, tokenize=True, add_generation_prompt=True)["input_ids"]
         return torch.tensor([tool_ids[tool_ids.index(str_token_id):]], device=model.device, dtype=torch.long)
     # Finished background commands, surfacing without polling
