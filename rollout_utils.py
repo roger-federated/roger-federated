@@ -1,5 +1,5 @@
 import asyncio, os, sys, torch, transformers, json, inspect, numpy as np, reward_utils
-from retrieval import build_index, retrieve, format_context, mark_injected
+from retrieval import build_index, retrieve, format_context
 from PIL import Image
 from lmformatenforcer import JsonSchemaParser
 from lmformatenforcer.integrations.transformers import build_transformers_prefix_allowed_tokens_fn
@@ -170,17 +170,25 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
                   enable_rag: bool = True, rag_k: int = 3,
                   rag_root: str = None) -> list:
 
-    # Probe once: last token of a dummy assistant-turn-with-tool-calls marks the delta boundary.
-    # Used for the max-steps feedback injection path (str_token_id still needed there).
+    # tool_res_id: last token of a dummy assistant-turn-with-tool-calls = <|tool_response> boundary.
+    # Used to slice prompt-free deltas in result_to_ids / rag_delta / fb_delta.
     _probe = tokenizer.apply_chat_template(
         asst_msg := [{"role": "assistant", "tool_calls": [
             {"id": "0", "type": "function", "function": {"name": "_", "arguments": {}}}]}],
         tokenize=True, add_generation_prompt=False
     )["input_ids"]
-    str_token_id = _probe[-1]
-    # Gen-prompt tokens: every delta is prompt-free; top of while loop prepends exactly one.
-    _with_gen = tokenizer.apply_chat_template(asst_msg, tokenize=True, add_generation_prompt=True)["input_ids"]
-    gen_prompt = torch.tensor([_with_gen[len(_probe):]], device=model.device, dtype=torch.long)
+    tool_res_id = _probe[-1]
+    # gen_prompt: the assistant-turn cue (<|turn>model\n). MUST be derived from a user-terminated
+    # diff — after a tool_call, Gemma-4's template suppresses the model-turn cue even with
+    # add_generation_prompt=True, so the asst_msg diff yields an empty tensor (verified).
+    _u  = tokenizer.apply_chat_template(
+        [{"role": "user", "content": "_"}], tokenize=True, add_generation_prompt=False)["input_ids"]
+    _ug = tokenizer.apply_chat_template(
+        [{"role": "user", "content": "_"}], tokenize=True, add_generation_prompt=True)["input_ids"]
+    _gp = _ug[len(_u):]
+    if not _gp:
+        import warnings; warnings.warn("gen_prompt is empty — chat template did not append a model-turn cue; model may emit immediate <eos>")
+    gen_prompt = torch.tensor([_gp], device=model.device, dtype=torch.long)
 
     trajectory = []
 
@@ -202,7 +210,6 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
 
     # RAG: build corpus index once (deterministic; no re-indexing on mid-rollout edits)
     rag_index = build_index(rag_root or os.getcwd()) if enable_rag else None
-    injected: dict = {}  # path → set[int] of shown 1-indexed line numbers
 
     # System prompt: environment header + behaviour guidance
     _shell = "PowerShell" if os.name == "nt" else "/bin/sh"
@@ -222,7 +229,6 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
         start_hits = retrieve(text, rag_index, rag_k)
         if start_hits:
             sys_content += "\n\n" + format_context(start_hits)
-            mark_injected(injected, start_hits)
     messages = [{"role": "system", "content": sys_content},
                 {"role": "user", "content": []}]
     if image is not None:
@@ -250,7 +256,7 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
                      for k, (_, res) in enumerate(call_results)]
         ids = tokenizer.apply_chat_template(
             dummy_asst + tool_msgs, tokenize=True, add_generation_prompt=False)["input_ids"]
-        return torch.tensor([ids[ids.index(str_token_id):]], device=model.device, dtype=torch.long)
+        return torch.tensor([ids[ids.index(tool_res_id):]], device=model.device, dtype=torch.long)
 
     def bg_msgs():
         """Inject finished background jobs as tool result messages."""
@@ -269,7 +275,6 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
         attn_mask = torch.ones(1, input_ids.shape[1], device=model.device, dtype=torch.long)
         prefix_fn, mask_log = _make_prefix_fn(inner_fn, tokenizer, tool_tokens, new_idx)
         # Prepare inputs; model.generate slices the new tokens internally via past_key_values length
-        print(tokenizer.decode(input_ids.squeeze(), skip_special_tokens=False))  # debug: see the full prompt each turn
         kwargs = {
             "input_ids": input_ids,
             "attention_mask": attn_mask,
@@ -318,25 +323,10 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
             bg = bg_msgs()
             input_ids = torch.cat([gen_ids, bg], dim=1) if isinstance(bg, torch.Tensor) else gen_ids
         else:
-            # Append tool results; RAG context if relevant; bg jobs — all prompt-free
+            # Append tool results and any finished bg jobs — all prompt-free
             tool_ids = result_to_ids(results)
             bg = bg_msgs()
-            rag_delta = None
-            if rag_index is not None and not any(name == "finish" for name, _ in results):
-                asst_text = tokenizer.decode(new_ids, skip_special_tokens=True)
-                rag_hits = retrieve(asst_text, rag_index, rag_k, exclude=injected)[:2]
-                if rag_hits:
-                    rag_ids = tokenizer.apply_chat_template(
-                        asst_msg + [{"role": "user", "content": format_context(rag_hits)}],
-                        tokenize=True, add_generation_prompt=False
-                    )["input_ids"]
-                    rag_delta = torch.tensor(
-                        [rag_ids[rag_ids.index(str_token_id):]],
-                        device=model.device, dtype=torch.long)
-                    mark_injected(injected, rag_hits)
-            parts = ([gen_ids, tool_ids]
-                     + ([rag_delta] if rag_delta is not None else [])
-                     + ([bg] if isinstance(bg, torch.Tensor) else []))
+            parts = [gen_ids, tool_ids] + ([bg] if isinstance(bg, torch.Tensor) else [])
             input_ids = torch.cat(parts, dim=1)
             if any(name == "finish" for name, _ in results):
                 break
@@ -356,7 +346,7 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
                     tokenize=True, add_generation_prompt=False
                 )["input_ids"]
                 fb_delta = torch.tensor(
-                    [fb_ids[fb_ids.index(str_token_id):]], device=model.device, dtype=torch.long)
+                    [fb_ids[fb_ids.index(tool_res_id):]], device=model.device, dtype=torch.long)
                 input_ids = torch.cat([input_ids, fb_delta], dim=1)
             else: # continue
                 trajectory[-1]["reward"] += reward_utils.W_CONTINUE

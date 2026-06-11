@@ -15,8 +15,8 @@ _SKIP_DIRS = {".git", "node_modules", "__pycache__", "venv", ".venv",
               ".mypy_cache", ".ruff_cache", "dist", "build", ".next"}
 _BM25_K1 = 1.5
 _BM25_B  = 0.75
-_LOC_MAX = 40   # max lines returned by localizer
-_LOC_PAD = 2    # context lines added around the trimmed match span
+_LOC_MAX = 10   # max lines returned by localizer
+_LOC_PAD = 1    # context lines added around the trimmed match span
 
 
 def tokenize_lexical(text: str) -> list[str]:
@@ -133,14 +133,16 @@ def _localize(path: str, root: str, query_terms: set[str], idf: dict,
 
 
 def retrieve(query: str, index: dict, k: int = 3,
-             min_ratio: float = 0.5, specific_df_frac: float = 0.25,
+             min_ratio: float = 0.5, min_score: float = 0.15,
+             specific_df_frac: float = 0.25,
              exclude: dict = None) -> list[dict]:
     """Return up to `k` localized file spans most relevant to `query`.
 
     Discriminative gate: only fires when the query contains ≥1 *specific* term —
     one that appears in ≤ `specific_df_frac` of corpus files (rare ⇒ informative).
     Generic queries ("run the task", "help me") carry no specific term and return [].
-    After ranking, drops tail docs whose score < `min_ratio` × top score.
+    After ranking, drops tail docs whose score < `min_ratio` × top score (relative)
+    or whose normalized score < `min_score` (absolute floor, corpus-independent).
     Each returned doc must contain ≥1 specific term (excludes common-word-only matches).
     `exclude`: dict[relpath → set[int]] of already-shown 1-indexed line numbers;
     a span is skipped when > 50% of its lines overlap the exclusion set.
@@ -158,6 +160,13 @@ def retrieve(query: str, index: dict, k: int = 3,
     if not specific:
         return []   # query is all common words — no retrieval signal
 
+    # Absolute quality floor: BM25 max achievable score (tf→∞ limit, per-term idf*(k1+1))
+    # Normalizing by this makes min_score corpus- and length-independent.
+    max_score = sum(index["idf"][t] * (_BM25_K1 + 1)
+                    for t in unique if t in index["idf"])
+    if max_score <= 0:
+        return []
+
     # Score all docs but keep only those containing ≥1 specific term
     scored = [
         (s, doc) for s, doc in zip(score(qtokens, index), index["docs"])
@@ -173,6 +182,8 @@ def retrieve(query: str, index: dict, k: int = 3,
         if len(hits) >= k:
             break
         if s < min_ratio * top:   # relative cutoff — drop weak tail matches
+            break
+        if s / max_score < min_score:   # absolute floor — abstain on uniformly-weak matches
             break
         result = _localize(doc["path"], index["root"], unique, index["idf"])
         if result is None:
@@ -196,11 +207,14 @@ def format_context(hits: list[dict]) -> str:
     """Render retrieved hits as a context block for prompt injection.
 
     Returns "" when hits is empty — callers can guard with a plain truthiness check.
+    Each span is rendered with a file/line-range header and a numeric gutter so the
+    model can reference exact line numbers.
     """
     if not hits:
         return ""
     parts = ["[Retrieved working-directory context]"]
     for h in hits:
-        parts.append(f"--- {h['path']}:{h['start']}-{h['end']} ---")
-        parts.append(h["text"].rstrip())
+        parts.append(f"\n### {h['path']} (lines {h['start']}-{h['end']})")
+        for n, line in enumerate(h["text"].rstrip("\n").split("\n"), start=h["start"]):
+            parts.append(f"{n:>4} | {line}")
     return "\n".join(parts)
