@@ -12,6 +12,7 @@ Usage:
 
 import os, re, pathlib, shutil, time, ast, math, asyncio, tempfile
 import shell_tools   # shell execution + policy machinery lives here
+from path_utils import gutter
 
 
 # ---------------------------------------------------------------------------
@@ -91,8 +92,7 @@ def read_file(path: str, start_line: int = 0, end_line: int = 0) -> str:
 
     lo = (start_line - 1) if start_line > 0 else 0
     hi = end_line if end_line > 0 else len(lines)
-    selected = lines[lo:hi]
-    return "".join(f"{lo + i + 1}: {line}" for i, line in enumerate(selected)).rstrip()
+    return gutter("".join(lines[lo:hi]), lo + 1)
 
 
 def write_file(path: str, content: str, append: bool = False) -> str:

@@ -5,6 +5,7 @@ Public API: build_index → retrieve → format_context → mark_injected.
 the rollout wiring.
 """
 import os, re, math
+from path_utils import gutter
 
 _TEXT_EXTS = {
     ".py", ".js", ".ts", ".jsx", ".tsx", ".md", ".txt", ".json", ".yaml",
@@ -215,6 +216,5 @@ def format_context(hits: list[dict]) -> str:
     parts = ["[Retrieved working-directory context]"]
     for h in hits:
         parts.append(f"\n### {h['path']} (lines {h['start']}-{h['end']})")
-        for n, line in enumerate(h["text"].rstrip("\n").split("\n"), start=h["start"]):
-            parts.append(f"{n:>4} | {line}")
+        parts.append(gutter(h["text"], h["start"]))
     return "\n".join(parts)
