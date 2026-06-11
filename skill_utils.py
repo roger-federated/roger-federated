@@ -8,6 +8,7 @@ Conventions:
 """
 
 import os, glob
+from path_utils import expand_at_references
 
 # ---------------------------------------------------------------------------
 # Instruction files
@@ -95,6 +96,8 @@ def discover_skills(root: str) -> list[dict]:
                 else:
                     fallback = os.path.splitext(os.path.basename(path))[0]
                 name = meta.get("name", "").strip() or fallback
+                # Expand @path refs relative to the skill's own directory
+                body = expand_at_references(body, os.path.dirname(path))
                 skills.append({"name": name, "description": desc, "body": body, "path": path})
     return skills
 

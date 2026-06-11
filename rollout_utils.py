@@ -1,6 +1,7 @@
 import asyncio, os, sys, torch, transformers, json, inspect, numpy as np, reward_utils
 from retrieval import build_index, retrieve, format_context
 from skill_utils import load_instructions, discover_skills, make_skill_loader
+from path_utils import expand_at_references
 from PIL import Image
 from lmformatenforcer import JsonSchemaParser
 from lmformatenforcer.integrations.transformers import build_transformers_prefix_allowed_tokens_fn
@@ -232,9 +233,10 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
         "Call finish() when the task is complete, or simply stop emitting calls."
     )
     # Project instructions: AGENTS.md or CLAUDE.md from cwd (first-found-wins)
+    # @path refs in the file are expanded relative to _sroot
     instr = load_instructions(_sroot)
     if instr:
-        sys_content += "\n\n" + instr
+        sys_content += "\n\n" + expand_at_references(instr, _sroot)
     if catalog_text:
         sys_content += (
             "\nAvailable tools (call load_tools(names=[...]) to load a tool's full schema "
@@ -255,7 +257,8 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
                 {"role": "user", "content": []}]
     if image is not None:
         messages[1]["content"] += [{"type": "image", "image": image}]
-    messages[1]["content"] += [{"type": "text", "text": text}]
+    # Expand @path refs in the user prompt; RAG query stays on original text
+    messages[1]["content"] += [{"type": "text", "text": expand_at_references(text, os.getcwd())}]
 
     # Tokenize the prompt once; input_ids grows by concatenation each turn
     i = 0
