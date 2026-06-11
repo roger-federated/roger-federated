@@ -1,5 +1,6 @@
 import asyncio, os, sys, torch, transformers, json, inspect, numpy as np, reward_utils
 from retrieval import build_index, retrieve, format_context
+from skill_utils import load_instructions, discover_skills, make_skill_loader
 from PIL import Image
 from lmformatenforcer import JsonSchemaParser
 from lmformatenforcer.integrations.transformers import build_transformers_prefix_allowed_tokens_fn
@@ -168,7 +169,8 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
                   max_new_tokens: int | None = 4096,
                   on_token: Callable = None,
                   enable_rag: bool = True, rag_k: int = 3,
-                  rag_root: str = None) -> list:
+                  rag_root: str = None,
+                  enable_skills: bool = True, skills_root: str = None) -> list:
 
     # tool_res_id: last token of a dummy assistant-turn-with-tool-calls = <|tool_response> boundary.
     # Used to slice prompt-free deltas in result_to_ids / rag_delta / fb_delta.
@@ -204,6 +206,16 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
     tools += std_tools_list
     tool_handlers = tool_handlers | std_handlers
 
+    # Skills: discover .agents/skills/ and .claude/skills/ (nested + flat); register load_skill only when skills exist
+    _sroot = skills_root or os.getcwd()
+    skill_catalog, load_skill_fn = None, None
+    if enable_skills:
+        _skills = discover_skills(_sroot)
+        if _skills:
+            skill_catalog, load_skill_fn = make_skill_loader(_skills)
+            tools.append(load_skill_fn)
+            tool_handlers["load_skill"] = load_skill_fn
+
     # Build constrained-decoding inner fn once for this rollout (schema uses full name list)
     tool_names = [t["function"]["name"] if isinstance(t, dict) else t.__name__ for t in tools]
     inner_fn = _build_inner_fn(tokenizer, tool_names)
@@ -211,7 +223,7 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
     # RAG: build corpus index once (deterministic; no re-indexing on mid-rollout edits)
     rag_index = build_index(rag_root or os.getcwd()) if enable_rag else None
 
-    # System prompt: environment header + behaviour guidance
+    # System prompt: env header + behaviour guidance + instructions + catalogs + RAG
     _shell = "PowerShell" if os.name == "nt" else "/bin/sh"
     sys_content = (
         f"Environment: cwd={os.getcwd()}, platform={sys.platform}, shell={_shell}\n"
@@ -219,10 +231,20 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
         "You may issue multiple tool calls in one turn by emitting them back-to-back in JSON. "
         "Call finish() when the task is complete, or simply stop emitting calls."
     )
+    # Project instructions: AGENTS.md or CLAUDE.md from cwd (first-found-wins)
+    instr = load_instructions(_sroot)
+    if instr:
+        sys_content += "\n\n" + instr
     if catalog_text:
         sys_content += (
             "\nAvailable tools (call load_tools(names=[...]) to load a tool's full schema "
             "before using it):\n" + catalog_text
+        )
+    # Skill catalog: just name+description; body fetched on demand via load_skill(name)
+    if skill_catalog:
+        sys_content += (
+            "\nAvailable skills (call load_skill(name) to load instructions before using):\n"
+            + skill_catalog
         )
     # RAG start: retrieve on the initial task text, prepend to system prompt
     if rag_index is not None:

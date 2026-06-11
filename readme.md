@@ -40,7 +40,7 @@ This software is still in development. Below is a non-exhaustive list of to-do i
 - [x] Implement standard tools (e.g., run_command, read_file, write_file, search_file, search_dir, prompt_user).
 - [x] Replace tool searcher with catalog+load_tools deferred loading (no embedding model needed).
 - [x] Implement auto-triggered RAG.
-- [ ] Allow importing skills and agent.md files.
+- [x] Allow importing skills and agent.md files.
 - [ ] Add @path ability.
 - [ ] Integrate into a CLI application.
 - [ ] *Congrats, you now have a semi-basic agent.*
