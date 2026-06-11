@@ -103,7 +103,9 @@ def _make_prefix_fn(inner, tokenizer: transformers.PreTrainedTokenizer,
 
 async def execute_tools(sequences: torch.Tensor, tokenizer: transformers.PreTrainedTokenizer,
                         tool_handlers: dict,
-                        tool_tokens: tuple[int, int]) -> list[tuple[str, any]]:
+                        tool_tokens: tuple[int, int],
+                        on_tool_call: Callable = None,
+                        on_tool_result: Callable = None) -> list[tuple[str, any]]:
     """Extract and execute all tool calls from the generated token sequence.
 
     Returns an ordered list of (name, result) pairs.  Empty list → no call emitted → terminate.
@@ -129,6 +131,7 @@ async def execute_tools(sequences: torch.Tensor, tokenizer: transformers.PreTrai
         except (json.JSONDecodeError, AttributeError) as e:
             results.append(("__parse_error__", f"Error: malformed tool call — {e}"))
             i = end_idx + 1; continue
+        if on_tool_call: on_tool_call(name, args)
         handler = tool_handlers.get(name)
         if not handler:
             result = f"No tool handler provided for '{name}'. Perhaps you misspelled the tool name?"
@@ -140,6 +143,7 @@ async def execute_tools(sequences: torch.Tensor, tokenizer: transformers.PreTrai
                 result = f"Error calling '{name}': wrong arguments — {e}"
             except Exception as e:
                 result = f"Error calling '{name}': {e}"
+        if on_tool_result: on_tool_result(name, result)
         results.append((name, result))
         i = end_idx + 1
     return results
@@ -169,6 +173,10 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
                   tool_handlers: dict = {}, max_steps: int = 10,
                   max_new_tokens: int | None = 4096,
                   on_token: Callable = None,
+                  on_tool_call: Callable = None,   # (name, args) → None; fired before each call
+                  on_tool_result: Callable = None, # (name, result) → None; fired after
+                  prompt_backend: Callable = None, # replaces input() for all user prompts
+                  root: str = None,                # project root; defaults to os.getcwd()
                   enable_rag: bool = True, rag_k: int = 3,
                   rag_root: str = None,
                   enable_skills: bool = True, skills_root: str = None) -> list:
@@ -203,12 +211,12 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
         tools = [load_tools_fn]
     else:
         catalog_text, tools = None, list(tools)
-    std_tools_list, std_handlers = get_standard_tools()
+    std_tools_list, std_handlers = get_standard_tools(prompt_backend=prompt_backend)
     tools += std_tools_list
     tool_handlers = tool_handlers | std_handlers
 
     # Skills: discover .agents/skills/ and .claude/skills/ (nested + flat); register load_skill only when skills exist
-    _sroot = skills_root or os.getcwd()
+    _sroot = skills_root or root or os.getcwd()
     skill_catalog, load_skill_fn = None, None
     if enable_skills:
         _skills = discover_skills(_sroot)
@@ -222,7 +230,7 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
     inner_fn = _build_inner_fn(tokenizer, tool_names)
 
     # RAG: build corpus index once (deterministic; no re-indexing on mid-rollout edits)
-    rag_index = build_index(rag_root or os.getcwd()) if enable_rag else None
+    rag_index = build_index(rag_root or root or os.getcwd()) if enable_rag else None
 
     # System prompt: env header + behaviour guidance + instructions + catalogs + RAG
     _shell = "PowerShell" if os.name == "nt" else "/bin/sh"
@@ -327,7 +335,8 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
         past_key_values = outputs.past_key_values
 
         # Parse and execute all tool calls from the newly generated tokens only
-        results = await execute_tools(new_ids, tokenizer, tool_handlers, tool_tokens)
+        results = await execute_tools(new_ids, tokenizer, tool_handlers, tool_tokens,
+                                      on_tool_call=on_tool_call, on_tool_result=on_tool_result)
 
         # Step reward: sum auto_signal over all results in this turn, clamped to [-1, 1]
         step_reward = max(-1.0, min(1.0,
