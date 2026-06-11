@@ -41,6 +41,7 @@ This software is still in development. Below is a non-exhaustive list of to-do i
 - [x] Replace tool searcher with catalog+load_tools deferred loading (no embedding model needed).
 - [x] Implement auto-triggered RAG.
 - [ ] Allow importing skills and agent.md files.
+- [ ] Add @path ability.
 - [ ] Integrate into a CLI application.
 - [ ] *Congrats, you now have a semi-basic agent.*
 - [x] Implement what the finetuning framework considers as rewards.
@@ -53,5 +54,6 @@ This software is still in development. Below is a non-exhaustive list of to-do i
 
 Further into the future:
 - [ ] Automatic subagent spawning and automatic git worktrees.
+- [ ] Accelerate.
 - [ ] LLM-as-judge.
 - [ ] Dynalang-style world model for embedded state roll-forward.
