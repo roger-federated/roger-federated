@@ -21,6 +21,25 @@ You and the community can now contribute to the next generation of AI. Not just 
 
 ---
 
+### Installation
+
+**Recommended — [`uv`](https://docs.astral.sh/uv/) (auto-provisions Python, isolates deps):**
+```bash
+uv tool install .          # installs `roger` command globally
+# or, without installing:
+uvx --from . roger
+```
+
+**Alternatives:**
+```bash
+pipx install .                        # isolated, requires Python 3.10+ already present
+python -m venv .venv && source .venv/bin/activate && pip install -e .  # classic venv
+```
+
+After install, run `roger` from any terminal. First launch walks you through initial setup.
+
+---
+
 ### Use cases
 <details>
 <summary>Connect a desktop interaction MCP for autonomous background tasks</summary>
@@ -41,8 +60,8 @@ This software is still in development. Below is a non-exhaustive list of to-do i
 - [x] Replace tool searcher with catalog+load_tools deferred loading (no embedding model needed).
 - [x] Implement auto-triggered RAG.
 - [x] Allow importing skills and agent.md files.
-- [ ] Add @path ability.
-- [ ] Integrate into a CLI application.
+- [x] Add @path ability.
+- [x] Integrate into a CLI application.
 - [ ] *Congrats, you now have a semi-basic agent.*
 - [x] Implement what the finetuning framework considers as rewards.
 - [ ] Implement automatic LoRA RL execution.
@@ -57,3 +76,4 @@ Further into the future:
 - [ ] Accelerate.
 - [ ] LLM-as-judge.
 - [ ] Dynalang-style world model for embedded state roll-forward.
+- [ ] Anonymous remote control — copy a session code, enter it on our website, continue interacting through the browser.

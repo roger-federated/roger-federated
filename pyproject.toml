@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "roger"
+version = "0.1.0"
+description = "Roger Federated — local agentic RL with federated finetuning"
+requires-python = ">=3.10"
+dependencies = [
+    "torch",
+    "transformers",
+    "accelerate",
+    "bitsandbytes",
+    "lm-format-enforcer",
+    "pillow",
+    "numpy",
+    "mcp",
+    "rich",
+    "prompt_toolkit",
+]
+
+[project.scripts]
+roger = "cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
