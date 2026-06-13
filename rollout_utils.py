@@ -224,13 +224,14 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
     # RAG: build corpus index once (deterministic; no re-indexing on mid-rollout edits)
     rag_index = build_index(rag_root or os.getcwd()) if enable_rag else None
 
-    # System prompt: env header + behaviour guidance + instructions + catalogs + RAG
+    # System prompt: env header + behaviour guidance + shell idioms + instructions + catalogs + RAG
     _shell = "PowerShell" if os.name == "nt" else "/bin/sh"
     sys_content = (
         f"Environment: cwd={os.getcwd()}, platform={sys.platform}, shell={_shell}\n"
         "You are an agentic assistant. Given a task, use the provided tools to accomplish it.\n"
         "You may issue multiple tool calls in one turn by emitting them back-to-back in JSON. "
-        "Call finish() when the task is complete, or simply stop emitting calls."
+        "Call finish() when the task is complete, or simply stop emitting calls.\n\n"
+        + shell_tools.shell_idioms()
     )
     # Project instructions: AGENTS.md or CLAUDE.md from cwd (first-found-wins)
     # @path refs in the file are expanded relative to _sroot

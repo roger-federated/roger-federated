@@ -5,7 +5,6 @@ Public API: build_index → retrieve → format_context → mark_injected.
 the rollout wiring.
 """
 import os, re, math
-from path_utils import gutter
 
 _TEXT_EXTS = {
     ".py", ".js", ".ts", ".jsx", ".tsx", ".md", ".txt", ".json", ".yaml",
@@ -208,13 +207,12 @@ def format_context(hits: list[dict]) -> str:
     """Render retrieved hits as a context block for prompt injection.
 
     Returns "" when hits is empty — callers can guard with a plain truthiness check.
-    Each span is rendered with a file/line-range header and a numeric gutter so the
-    model can reference exact line numbers.
+    Each span is rendered with a file/line-range header.
     """
     if not hits:
         return ""
     parts = ["[Retrieved working-directory context]"]
     for h in hits:
         parts.append(f"\n### {h['path']} (lines {h['start']}-{h['end']})")
-        parts.append(gutter(h["text"], h["start"]))
+        parts.append(h["text"])
     return "\n".join(parts)

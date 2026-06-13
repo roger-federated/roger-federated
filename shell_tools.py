@@ -44,6 +44,36 @@ def configure(prompt_backend=None, policy_file: str = "command_policy.txt") -> N
     _policy = None          # force re-read on next run_command
     _jobs.clear()
     _job_seq = 0
+    _ensure_scratch_ignored()
+
+
+def _ensure_scratch_ignored() -> None:
+    """Append .scratch/ and .backups/ to .gitignore if cwd is a git repo and they are missing."""
+    # Quick guard: skip when git is absent or cwd is not inside a repo
+    try:
+        r = subprocess.run(
+            ["git", "rev-parse", "--git-dir"],
+            capture_output=True, text=True, timeout=3
+        )
+        if r.returncode != 0:
+            return
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return
+
+    gitignore = ".gitignore"
+    try:
+        existing = open(gitignore, encoding="utf-8").read() if os.path.isfile(gitignore) else ""
+    except OSError:
+        existing = ""
+
+    to_add = [e for e in (".scratch/", ".backups/") if e not in existing]
+    if not to_add:
+        return
+    with open(gitignore, "a", encoding="utf-8") as f:
+        if existing and not existing.endswith("\n"):
+            f.write("\n")
+        f.write("\n".join(to_add) + "\n")
+    print(f"[shell_tools] appended to .gitignore: {', '.join(to_add)}")
 
 
 # ---------------------------------------------------------------------------
@@ -82,7 +112,7 @@ def _is_protected(path: str) -> bool:
 
 def _refs_protected(command: str) -> bool:
     """True when the command string contains the policy filename or its abspath.
-    Broad by design — even reads via shell are blocked; use read_file instead."""
+    Broad by design — even reads of it via shell are blocked."""
     needle_base = os.path.basename(_policy_file).lower()
     needle_abs  = os.path.abspath(_policy_file).lower()
     cmd_lower   = command.lower()
@@ -140,6 +170,42 @@ def _scan_scripts(command: str, policy: dict) -> str:
         except OSError:
             verdict = _worst(verdict, "confirm")
     return verdict
+
+
+# ---------------------------------------------------------------------------
+# System-prompt idioms block
+# ---------------------------------------------------------------------------
+
+def shell_idioms() -> str:
+    """Return an OS-specific shell cheat-sheet for injection into the system prompt."""
+    if os.name == "nt":
+        return """\
+Shell idioms for common commands (PowerShell via run_command):
+  Read file:          Get-Content f  (alias: gc f)
+  Read lines N-M:     (gc f)[N-1..M-1]          # 0-indexed slices
+  Locate (+ lines):   Select-String -n 'pat' f
+  Find files:         Get-ChildItem -Recurse -Filter *.py
+  Copy region A→B:    (gc a)[N-1..M-1] | Add-Content b     # no re-typing
+  Append to file:     "text" | Add-Content f
+  Calculate:          [math]::Sqrt(2) * [math]::Pi   or   (2 + 3) * 4
+  Time a command:     Measure-Command { run_command "..." }
+  Delay:              Start-Sleep -Seconds N
+  Temp files:         use .scratch\\ (gitignored); clean up when done.
+Emit *new* file content with write_file/edit_file, not PowerShell here-strings."""
+    else:
+        return """\
+Shell idioms for common commands (sh via run_command):
+  Read file:          cat f
+  Read lines N-M:     sed -n 'N,Mp' f
+  Locate (+ lines):   grep -rn 'pat' .
+  Find files:         find . -name '*.py'
+  Copy region A→B:    sed -n 'N,Mp' a >> b          # no re-typing
+  Append to file:     echo "text" >> f
+  Calculate:          awk 'BEGIN{print sqrt(2)*atan2(0,-1)}'   or   bc -l <<<'2^10'
+  Time a command:     time <cmd>
+  Delay:              sleep N
+  Temp files:         use .scratch/ (gitignored); clean up when done.
+Emit *new* file content with write_file/edit_file, not heredocs."""
 
 
 # ---------------------------------------------------------------------------
