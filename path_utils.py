@@ -1,25 +1,13 @@
-"""path_utils.py — @path reference expansion and shared line-gutter primitive.
+"""path_utils.py — @path reference expansion.
 
 Public API:
-  gutter(text, start)              — right-aligned line-number rendering
   expand_at_references(text, root) — expand @path tokens; append referenced blocks
-
-Both std_tools.read_file and retrieval.format_context use gutter() so all
-file-content surfaces look identical to the model.
 """
 import os, re
 
 _MAX_BYTES = 262144                     # mirrors retrieval.build_index max_bytes
 # @token preceded by whitespace or start-of-string (skips emails, in-word @)
 _AT_RE = re.compile(r"(?<!\S)@(\S+)")
-
-
-def gutter(text: str, start: int = 1) -> str:
-    """Render text with right-aligned 1-indexed line numbers '   N | line'."""
-    return "\n".join(
-        f"{start + i:>4} | {line}"
-        for i, line in enumerate(text.rstrip("\n").split("\n"))
-    )
 
 
 def _parse_ref(token: str) -> tuple[str, int | None, int | None]:
@@ -41,7 +29,7 @@ def _parse_ref(token: str) -> tuple[str, int | None, int | None]:
 
 def _collect_refs(text: str, root: str, seen: set, depth: int,
                   blocks: list) -> None:
-    """Append gutter-rendered file blocks for all @path tokens in text (recursive)."""
+    """Append file blocks for all @path tokens in text (recursive)."""
     for m in _AT_RE.finditer(text):
         ref, lo1, hi1 = _parse_ref(m.group(1))
         resolved = os.path.realpath(os.path.join(root, ref))
@@ -72,7 +60,7 @@ def _collect_refs(text: str, root: str, seen: set, depth: int,
 
         blocks.append(
             f"### {display} (lines {a_start}-{a_end})\n"
-            + gutter(content, a_start)
+            + content
         )
         # Recurse into refs inside this file; resolve relative to its own dir
         if depth < 5:
