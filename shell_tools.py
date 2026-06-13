@@ -180,6 +180,7 @@ def shell_idioms() -> str:
     """Return an OS-specific shell cheat-sheet for injection into the system prompt."""
     if os.name == "nt":
         return """\
+```
 Shell idioms for common commands (PowerShell via run_command):
   Read file:          Get-Content f  (alias: gc f)
   Read lines N-M:     (gc f)[N-1..M-1]          # 0-indexed slices
@@ -191,9 +192,11 @@ Shell idioms for common commands (PowerShell via run_command):
   Time a command:     Measure-Command { run_command "..." }
   Delay:              Start-Sleep -Seconds N
   Temp files:         use .roger\\scratch\\ (gitignored); clean up when done.
-Emit *new* file content with write_file/edit_file, not PowerShell here-strings."""
+Emit *new* file content with write_file/edit_file, not PowerShell here-strings.
+```"""
     else:
         return """\
+```
 Shell idioms for common commands (sh via run_command):
   Read file:          cat f
   Read lines N-M:     sed -n 'N,Mp' f
@@ -205,7 +208,8 @@ Shell idioms for common commands (sh via run_command):
   Time a command:     time <cmd>
   Delay:              sleep N
   Temp files:         use .roger/scratch/ (gitignored); clean up when done.
-Emit *new* file content with write_file/edit_file, not heredocs."""
+Emit *new* file content with write_file/edit_file, not heredocs.
+```"""
 
 
 # ---------------------------------------------------------------------------
