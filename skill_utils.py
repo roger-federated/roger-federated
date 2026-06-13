@@ -1,8 +1,8 @@
 """skill_utils.py — instruction-file loading and skill progressive-disclosure.
 
 Conventions:
-  AGENTS.md / CLAUDE.md   — freeform project instructions, prepended to system prompt
-  .claude/skills/*/SKILL.md — per-skill files with YAML frontmatter (name, description)
+  AGENTS.md / CLAUDE.md              — freeform project instructions, prepended to system prompt
+  .roger/.agents/.claude/skills/*.md — per-skill files with YAML frontmatter (name, description)
                               + a markdown body; only the catalog is shown up front;
                               model fetches the body on demand via load_skill(name).
 """
@@ -61,14 +61,14 @@ def _parse_frontmatter(text: str) -> tuple[dict, str]:
 def discover_skills(root: str) -> list[dict]:
     """Discover skill files under root, deduplicating by resolved path.
 
-    Searches two folder names (.agents/skills, .claude/skills) and two layouts:
+    Searches three folder names (.roger/skills, .agents/skills, .claude/skills) and two layouts:
       nested: <folder>/<name>/SKILL.md  — name from frontmatter or parent dir
       flat:   <folder>/<name>.md        — name from frontmatter or file stem
 
     Each record: {name, description, body, path}.
     Skips files with no usable description (would make a useless catalog entry).
     """
-    _FOLDERS = (".agents", ".claude")
+    _FOLDERS = (".roger", ".agents", ".claude")  # .roger is canonical; others for cross-agent compat
     seen, skills = set(), []
     for folder in _FOLDERS:
         base = os.path.join(root, folder, "skills")

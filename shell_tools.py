@@ -48,7 +48,7 @@ def configure(prompt_backend=None, policy_file: str = "command_policy.txt") -> N
 
 
 def _ensure_scratch_ignored() -> None:
-    """Append .scratch/ and .backups/ to .gitignore if cwd is a git repo and they are missing."""
+    """Append .roger/ to .gitignore if cwd is a git repo and it is missing."""
     # Quick guard: skip when git is absent or cwd is not inside a repo
     try:
         r = subprocess.run(
@@ -66,14 +66,14 @@ def _ensure_scratch_ignored() -> None:
     except OSError:
         existing = ""
 
-    to_add = [e for e in (".scratch/", ".backups/") if e not in existing]
-    if not to_add:
+    # .* in gitignore already covers .roger/, so only add the explicit entry if .* is absent
+    if ".roger/" in existing or ".*" in existing:
         return
     with open(gitignore, "a", encoding="utf-8") as f:
         if existing and not existing.endswith("\n"):
             f.write("\n")
-        f.write("\n".join(to_add) + "\n")
-    print(f"[shell_tools] appended to .gitignore: {', '.join(to_add)}")
+        f.write(".roger/\n")
+    print("[shell_tools] appended .roger/ to .gitignore")
 
 
 # ---------------------------------------------------------------------------
@@ -190,7 +190,7 @@ Shell idioms for common commands (PowerShell via run_command):
   Calculate:          [math]::Sqrt(2) * [math]::Pi   or   (2 + 3) * 4
   Time a command:     Measure-Command { run_command "..." }
   Delay:              Start-Sleep -Seconds N
-  Temp files:         use .scratch\\ (gitignored); clean up when done.
+  Temp files:         use .roger\\scratch\\ (gitignored); clean up when done.
 Emit *new* file content with write_file/edit_file, not PowerShell here-strings."""
     else:
         return """\
@@ -204,7 +204,7 @@ Shell idioms for common commands (sh via run_command):
   Calculate:          awk 'BEGIN{print sqrt(2)*atan2(0,-1)}'   or   bc -l <<<'2^10'
   Time a command:     time <cmd>
   Delay:              sleep N
-  Temp files:         use .scratch/ (gitignored); clean up when done.
+  Temp files:         use .roger/scratch/ (gitignored); clean up when done.
 Emit *new* file content with write_file/edit_file, not heredocs."""
 
 
