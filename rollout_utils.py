@@ -7,7 +7,7 @@ from lmformatenforcer import JsonSchemaParser
 from lmformatenforcer.integrations.transformers import build_transformers_prefix_allowed_tokens_fn
 from collections.abc import Callable
 from std_tools import get_standard_tools, prompt_user, offer_revert, maxsteps_checkin
-from shell_tools import drain_finished_jobs, pending_jobs, terminate_jobs
+from shell_tools import drain_finished_jobs, pending_jobs, terminate_jobs, shell_idioms
 
 def make_tool_loader(tools):
     """Build a terse catalog string + load_tools closure for deferred schema loading.
@@ -239,7 +239,7 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
         "You are an agentic assistant. Given a task, use the provided tools to accomplish it.\n"
         "You may issue multiple tool calls in one turn by emitting them back-to-back in JSON. "
         "Call finish() when the task is complete, or simply stop emitting calls.\n\n"
-        + shell_tools.shell_idioms()
+        + shell_idioms()
     )
     # Project instructions: AGENTS.md or CLAUDE.md from cwd (first-found-wins)
     # @path refs in the file are expanded relative to _sroot
