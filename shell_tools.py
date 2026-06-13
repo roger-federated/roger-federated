@@ -180,36 +180,32 @@ def shell_idioms() -> str:
     """Return an OS-specific shell cheat-sheet for injection into the system prompt."""
     if os.name == "nt":
         return """\
-```
 Shell idioms for common commands (PowerShell via run_command):
-  Read file:          Get-Content f  (alias: gc f)
-  Read lines N-M:     (gc f)[N-1..M-1]          # 0-indexed slices
-  Locate (+ lines):   Select-String -n 'pat' f
-  Find files:         Get-ChildItem -Recurse -Filter *.py
-  Copy region A→B:    (gc a)[N-1..M-1] | Add-Content b     # no re-typing
-  Append to file:     "text" | Add-Content f
-  Calculate:          [math]::Sqrt(2) * [math]::Pi   or   (2 + 3) * 4
-  Time a command:     Measure-Command { run_command "..." }
-  Delay:              Start-Sleep -Seconds N
-  Temp files:         use .roger\\scratch\\ (gitignored); clean up when done.
-Emit *new* file content with write_file/edit_file, not PowerShell here-strings.
-```"""
+  Read file:          `Get-Content f`  (alias: `gc f`)
+  Read lines N-M:     `(gc f)[N-1..M-1]`          # 0-indexed slices
+  Locate (+ lines):   `Select-String -n 'pat' f`
+  Find files:         `Get-ChildItem -Recurse -Filter *.py`
+  Copy region A→B:    `(gc a)[N-1..M-1] | Add-Content b`     # no re-typing
+  Append to file:     `"text" | Add-Content f`
+  Calculate:          `[math]::Sqrt(2) * [math]::Pi`   or   `(2 + 3) * 4`
+  Time a command:     `Measure-Command { run_command "..." }`
+  Delay:              `Start-Sleep -Seconds N`
+  Temp files:         use `.roger\\scratch\\` (gitignored); clean up when done.
+Emit *new* file content with write_file/edit_file, not PowerShell here-strings."""
     else:
         return """\
-```
 Shell idioms for common commands (sh via run_command):
-  Read file:          cat f
-  Read lines N-M:     sed -n 'N,Mp' f
-  Locate (+ lines):   grep -rn 'pat' .
-  Find files:         find . -name '*.py'
-  Copy region A→B:    sed -n 'N,Mp' a >> b          # no re-typing
-  Append to file:     echo "text" >> f
-  Calculate:          awk 'BEGIN{print sqrt(2)*atan2(0,-1)}'   or   bc -l <<<'2^10'
-  Time a command:     time <cmd>
-  Delay:              sleep N
-  Temp files:         use .roger/scratch/ (gitignored); clean up when done.
-Emit *new* file content with write_file/edit_file, not heredocs.
-```"""
+  Read file:          `cat f`
+  Read lines N-M:     `sed -n 'N,Mp' f`
+  Locate (+ lines):   `grep -rn 'pat' .`
+  Find files:         `find . -name '*.py'`
+  Copy region A→B:    `sed -n 'N,Mp' a >> b`          # no re-typing
+  Append to file:     `echo "text" >> f`
+  Calculate:          `awk 'BEGIN{print sqrt(2)*atan2(0,-1)}'`   or   `bc -l <<<'2^10'`
+  Time a command:     `time <cmd>`
+  Delay:              `sleep N`
+  Temp files:         use `.roger/scratch/` (gitignored); clean up when done.
+Emit *new* file content with write_file/edit_file, not heredocs."""
 
 
 # ---------------------------------------------------------------------------
