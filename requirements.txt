@@ -6,4 +6,6 @@ lm-format-enforcer
 pillow
 numpy
 mcp
+rich
+prompt_toolkit
 # optional: pydub (for AudioSegment support in parse_result)

@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "roger"
+version = "0.1.0"
+description = "Roger Federated — local agentic RL with federated finetuning"
+requires-python = ">=3.10"
+dependencies = [
+    "torch",
+    "transformers",
+    "accelerate",
+    "bitsandbytes",
+    "lm-format-enforcer",
+    "pillow",
+    "numpy",
+    "mcp",
+    "rich",
+    "prompt_toolkit",
+]
+
+[project.optional-dependencies]
+audio = ["pydub"]  # AudioSegment support in rollout_utils (guarded import)
+
+[project.scripts]
+roger = "cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]

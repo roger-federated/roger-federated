@@ -21,6 +21,31 @@ You and the community can now contribute to the next generation of AI. Not just 
 
 ---
 
+### Installation
+
+**Requirements:**
+- Python 3.10+
+- Compatible GPU strongly recommended for quantization and speed.
+- First run downloads the selected model (several GB) and writes settings under `~/.roger/config.json`. These can be changed at any time.
+- Linux: `apt install python3-tk` enables the native folder picker; otherwise a text-prompt fallback is used automatically.
+
+**Recommended: [`uv`](https://docs.astral.sh/uv/) (auto-provisions Python, isolates deps):**
+```bash
+uv tool install .          # installs `roger` command globally
+# or, without installing:
+uvx --from . roger
+```
+
+**Alternatives:**
+```bash
+pipx install .                        # isolated, requires Python 3.10+ to be already present
+python -m venv .venv && source .venv/bin/activate && pip install -e .  # classic venv
+```
+
+After install, run `roger` from any terminal. First launch walks you through initial setup.
+
+---
+
 ### Use cases
 <details>
 <summary>Connect a desktop interaction MCP for autonomous background tasks</summary>
@@ -41,8 +66,9 @@ This software is still in development. Below is a non-exhaustive list of to-do i
 - [x] Replace tool searcher with catalog+load_tools deferred loading (no embedding model needed).
 - [x] Implement auto-triggered RAG.
 - [x] Allow importing skills and agent.md files.
-- [ ] Add @path ability.
-- [ ] Integrate into a CLI application.
+- [x] Add @path ability.
+- [x] Integrate into a CLI application.
+- [ ] Auto read/write memory and create agent folder for temp files.
 - [ ] *Congrats, you now have a semi-basic agent.*
 - [x] Implement what the finetuning framework considers as rewards.
 - [ ] Implement automatic LoRA RL execution.
@@ -57,3 +83,4 @@ Further into the future:
 - [ ] Accelerate.
 - [ ] LLM-as-judge.
 - [ ] Dynalang-style world model for embedded state roll-forward.
+- [ ] Remote control: copy a session code, enter it on our website, continue interacting encrypted through the browser.
