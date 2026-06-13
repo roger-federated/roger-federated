@@ -143,7 +143,7 @@ async def execute_tools(sequences: torch.Tensor, tokenizer: transformers.PreTrai
                 result = f"Error calling '{name}': wrong arguments — {e}"
             except Exception as e:
                 result = f"Error calling '{name}': {e}"
-        if on_tool_result: on_tool_result(name, result)
+        if on_tool_result: on_tool_result(name, result, args)
         results.append((name, result))
         i = end_idx + 1
     return results
@@ -174,7 +174,7 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
                   max_new_tokens: int | None = 4096,
                   on_token: Callable = None,
                   on_tool_call: Callable = None,   # (name, args) → None; fired before each call
-                  on_tool_result: Callable = None, # (name, result) → None; fired after
+                  on_tool_result: Callable = None, # (name, result, args) → None; fired after
                   prompt_backend: Callable = None, # replaces input() for all user prompts
                   root: str = None,                # project root; defaults to os.getcwd()
                   enable_rag: bool = True, rag_k: int = 3,
