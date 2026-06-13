@@ -1,7 +1,7 @@
 """recording.py — Persist rollout trajectories for downstream LoRA RL training.
 
 Each run is saved to:
-  runs/<ISO-timestamp>/
+  .roger/runs/<ISO-timestamp>/
     trajectory.pt       — torch.save of per-step tensors (gen_token_ids, logits,
                           masks, reward); consumed by the REINFORCE++ trainer.
     transcript.jsonl    — human-readable prompt + per-step events.
@@ -19,12 +19,12 @@ console = Console(highlight=False)
 
 
 def save_run(trajectory: list, prompt: str, root: str) -> str:
-    """Save trajectory to disk under <root>/runs/<timestamp>/."""
+    """Save trajectory to disk under <root>/.roger/runs/<timestamp>/."""
     if not trajectory:
         return ""  # nothing to record (e.g. cancelled before first step)
 
     ts      = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%SZ")
-    run_dir = os.path.join(root, "runs", ts)
+    run_dir = os.path.join(root, ".roger", "runs", ts)
     os.makedirs(run_dir, exist_ok=True)
 
     # --- trajectory.pt: tensors only (RL training input) ---

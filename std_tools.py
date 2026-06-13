@@ -117,13 +117,13 @@ def edit_file(path: str, old: str, new: str, replace_all: bool = False) -> str:
 
 
 def _backup_file(path: str) -> None:
-    """Copy an existing file to .backups/{path}.{timestamp}.bak and record for revert."""
+    """Copy an existing file to .roger/backups/{path}.{timestamp}.bak and record for revert."""
     ts = time.strftime("%Y%m%d_%H%M%S")
     try:
         rel = os.path.relpath(path)
     except ValueError:
         rel = os.path.basename(path)
-    backup_path = os.path.join(".backups", f"{rel}.{ts}.bak")
+    backup_path = os.path.join(".roger", "backups", f"{rel}.{ts}.bak")
     os.makedirs(os.path.dirname(backup_path), exist_ok=True)
     shutil.copy2(path, backup_path)
     _backups.append((os.path.abspath(path), os.path.abspath(backup_path)))
@@ -226,7 +226,7 @@ def get_standard_tools(prompt_backend=None, policy_file="command_policy.txt") ->
     _backups.clear()
 
     # Configure shell_tools (sets its own prompt/policy globals, resets _jobs, and
-    # ensures .scratch/.backups are git-ignored)
+    # ensures .roger/ is git-ignored)
     shell_tools.configure(prompt_backend=prompt_backend, policy_file=policy_file)
 
     shell = [shell_tools.run_command, shell_tools.stop_command, shell_tools.check_command]

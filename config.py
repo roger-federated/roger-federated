@@ -1,11 +1,12 @@
-"""config.py — Persistent user configuration for Roger (~/.roger/config.json).
+"""config.py — Persistent user configuration for Roger (.roger/config.json in cwd).
 
 Loaded once at startup; CLI flags override individual keys for that run.
 Users edit the JSON file directly to change defaults persistently.
 """
 import json, os
 
-_CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".roger", "config.json")
+def _config_path() -> str:
+    return os.path.join(os.getcwd(), ".roger", "config.json")
 
 _DEFAULTS = {
     "model_id":      "google/gemma-4-E2B-it",
@@ -20,12 +21,12 @@ _DEFAULTS = {
 
 def load() -> dict:
     """Load config from disk; create with defaults on first run."""
-    if not os.path.exists(_CONFIG_PATH):
-        os.makedirs(os.path.dirname(_CONFIG_PATH), exist_ok=True)
-        with open(_CONFIG_PATH, "w") as f:
+    if not os.path.exists(_config_path()):
+        os.makedirs(os.path.dirname(_config_path()), exist_ok=True)
+        with open(_config_path(), "w") as f:
             json.dump(_DEFAULTS, f, indent=2)
         return dict(_DEFAULTS)
-    with open(_CONFIG_PATH) as f:
+    with open(_config_path()) as f:
         cfg = json.load(f)
     # Fill any missing keys introduced in newer versions
     changed = False
@@ -38,10 +39,10 @@ def load() -> dict:
 
 
 def save(cfg: dict) -> None:
-    os.makedirs(os.path.dirname(_CONFIG_PATH), exist_ok=True)
-    with open(_CONFIG_PATH, "w") as f:
+    os.makedirs(os.path.dirname(_config_path()), exist_ok=True)
+    with open(_config_path(), "w") as f:
         json.dump(cfg, f, indent=2)
 
 
 def path() -> str:
-    return _CONFIG_PATH
+    return _config_path()

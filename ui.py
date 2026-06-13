@@ -240,7 +240,7 @@ def select_root(default: str) -> str:
 
 def make_session() -> PromptSession:
     """Create a prompt_toolkit session with persistent history."""
-    history_path = os.path.join(os.path.expanduser("~"), ".roger", "history")
+    history_path = os.path.join(os.getcwd(), ".roger", "history")
     os.makedirs(os.path.dirname(history_path), exist_ok=True)
     return PromptSession(
         history=FileHistory(history_path),
