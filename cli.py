@@ -16,6 +16,7 @@ from rich.text import Text
 
 import config
 import ui
+import model_setup
 from model_setup import fetch_model
 from rollout_utils import rollout
 import recording
@@ -72,7 +73,10 @@ async def _repl(cfg: dict, root: str) -> None:
     # Spinner while loading
     with console.status("[bold]Loading model…[/bold]", spinner="dots"):
         model, processor, tool_tokens = fetch_model(cfg["model_id"])
-    tokenizer = processor.tokenizer
+    tokenizer    = processor.tokenizer
+    # Decode delimiter token-ids back to strings for the text renderer; derive think-channel once
+    tool_delims  = tuple(tokenizer.decode([t]) for t in tool_tokens)
+    think_delims = model_setup.find_think_delims(tokenizer)
     console.print("[bold green]Model loaded.[/bold green]\n")
 
     # Prompt toolkit session (history + styled input)
@@ -87,7 +91,9 @@ async def _repl(cfg: dict, root: str) -> None:
         if not text:             # empty or Ctrl-C at prompt
             continue
 
-        renderer = ui.StreamRenderer(verbose=cfg["verbose"])
+        renderer = ui.StreamRenderer(verbose=cfg["verbose"],
+                                     think_delims=think_delims,
+                                     tool_delims=tool_delims)
         console.print()  # blank line before output
 
         # Wrap rollout in a Task so Ctrl-C aborts only this turn

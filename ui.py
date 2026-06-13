@@ -1,14 +1,14 @@
 """ui.py — Rich + prompt_toolkit terminal UI for the Roger CLI.
 
 Public API:
-  StreamRenderer(verbose)          — on_token callback that collapses thinking blocks
+  StreamRenderer(verbose, think_delims, tool_delims) — on_token callback; collapses thinking-channel blocks
   render_tool_call(name, args)     — pretty-print a tool invocation
   render_tool_result(name, result) — pretty-print a tool result
   make_prompt_backend()            — prompt_toolkit-backed input() replacement
   select_root(default)             — interactive folder selection (tkinter or text)
   read_prompt(session)             — multi-line prompt_toolkit input
 """
-import os, sys, re, textwrap
+import os, sys, textwrap
 from typing import Callable
 
 from rich.console import Console
@@ -26,36 +26,35 @@ from prompt_toolkit.styles import Style as PTStyle
 # ---------------------------------------------------------------------------
 console = Console(highlight=False)
 
-# Thinking delimiters used by Gemma-4 / Gemma-3n and similar reasoning models.
-# The model emits <think>…</think> around its reasoning block.
-_THINK_OPEN  = "<think>"
-_THINK_CLOSE = "</think>"
-
-# Tool-call JSON is delimited by special tokens in the raw stream; we suppress
-# it entirely from on_token output (already rendered via on_tool_call).
-# We detect it by looking for the constrained-output prefix {"name":
-_TOOL_JSON_RE = re.compile(r'\{"name":\s*"')
-
 
 # ---------------------------------------------------------------------------
 # StreamRenderer — state machine for one agent turn
 # ---------------------------------------------------------------------------
 
 class StreamRenderer:
-    """Feed text chunks from on_token; collapses <think> blocks inline.
+    """Feed text chunks from on_token; collapses thinking-channel blocks inline.
 
+    think_delims: (open_str, close_str) scraped from the tokenizer by
+                  model_setup.find_think_delims — e.g. ("<|channel>", "<channel|>")
+                  for Gemma-4. None → skip thinking detection (stream raw).
+    tool_delims:  (open_str, close_str) decoded from tool_tokens — e.g.
+                  ("<|tool_call>", "<tool_call|>"). None → skip suppression.
     Stateful because a delimiter can arrive split across chunks.
     One instance per rollout turn; do not reuse.
     """
 
-    def __init__(self, verbose: bool = False):
-        self._verbose = verbose
-        # States: "answer" | "thinking" | "tool_json"
-        self._state = "answer"
-        self._buf   = ""           # cross-chunk accumulator
-        self._think_secs = 0.0
+    def __init__(self, verbose: bool = False,
+                 think_delims: tuple[str, str] | None = None,
+                 tool_delims:  tuple[str, str] | None = None):
+        self._verbose     = verbose
+        self._think_open  = think_delims[0] if think_delims else None
+        self._think_close = think_delims[1] if think_delims else None
+        self._tool_open   = tool_delims[0]  if tool_delims  else None
+        self._tool_close  = tool_delims[1]  if tool_delims  else None
+        # States: "answer" | "thinking" | "tool"
+        self._state       = "answer"
+        self._buf         = ""          # cross-chunk accumulator
         self._think_start = None
-        self._think_line_printed = False
         import time; self._time = time
 
     def feed(self, chunk: str) -> None:
@@ -66,82 +65,68 @@ class StreamRenderer:
         """Process buf until no more complete transitions can be resolved."""
         while True:
             if self._state == "answer":
-                # Check for start of thinking block
-                idx = self._buf.find(_THINK_OPEN)
-                if idx == -1:
-                    # Check for start of tool JSON — suppress until we see matching close
-                    m = _TOOL_JSON_RE.search(self._buf)
-                    if m:
-                        # Print everything before the JSON, then suppress
-                        pre = self._buf[:m.start()]
-                        if pre: console.print(pre, end="", markup=False)
-                        self._buf = self._buf[m.start():]
-                        self._state = "tool_json"
-                        continue
-                    # No special token starting — safe to print up to a potential
-                    # partial delimiter at the end of the buffer
-                    safe = self._buf[: len(self._buf) - len(_THINK_OPEN) + 1]
+                # Candidate transition points; pick the earliest
+                t_idx = self._buf.find(self._think_open) if self._think_open else -1
+                c_idx = self._buf.find(self._tool_open)  if self._tool_open  else -1
+                # Earliest positive hit
+                if t_idx == -1 and c_idx == -1:
+                    # No delimiter starting — safe to flush up to a potential partial at tail.
+                    # Guard length = longest possible delimiter prefix we might be mid-stream on.
+                    guard = max((len(self._think_open) if self._think_open else 0),
+                                (len(self._tool_open)  if self._tool_open  else 0)) - 1
+                    safe  = self._buf[:max(0, len(self._buf) - guard)]
                     if safe:
                         console.print(safe, end="", markup=False)
                         self._buf = self._buf[len(safe):]
                     return
-                # Print text before <think>
-                if idx > 0:
-                    console.print(self._buf[:idx], end="", markup=False)
-                self._buf   = self._buf[idx + len(_THINK_OPEN):]
-                self._state = "thinking"
-                self._think_start = self._time.monotonic()
-                if not self._verbose:
-                    # Print collapsed placeholder; will be overwritten on close
-                    console.print("\n[dim]● Thinking…[/dim]", end="", markup=True)
-                    self._think_line_printed = True
+                # Determine which delimiter fires first
+                if   t_idx == -1: first, state = c_idx, "tool"
+                elif c_idx == -1: first, state = t_idx, "thinking"
+                else:             first, state = (t_idx, "thinking") if t_idx <= c_idx else (c_idx, "tool")
+                # Flush text before the delimiter
+                if first > 0:
+                    console.print(self._buf[:first], end="", markup=False)
+                delim = self._think_open if state == "thinking" else self._tool_open
+                self._buf   = self._buf[first + len(delim):]
+                self._state = state
+                if state == "thinking":
+                    self._think_start = self._time.monotonic()
+                    if not self._verbose:
+                        console.print("\n[dim]● Thinking…[/dim]", end="", markup=True)
                 continue
 
             elif self._state == "thinking":
-                idx = self._buf.find(_THINK_CLOSE)
+                idx = self._buf.find(self._think_close)
                 if idx == -1:
-                    # Still inside thinking — print if verbose, else discard
-                    safe = self._buf[: len(self._buf) - len(_THINK_CLOSE) + 1]
+                    # Still inside — print if verbose, else discard
+                    guard = len(self._think_close) - 1
+                    safe  = self._buf[:max(0, len(self._buf) - guard)]
                     if self._verbose and safe:
                         console.print(safe, end="", markup=False,
                                       style=Style(color="grey50", italic=True))
                     if safe: self._buf = self._buf[len(safe):]
                     return
-                elapsed = self._time.monotonic() - self._think_start
-                thinking_text = self._buf[:idx]
-                self._buf   = self._buf[idx + len(_THINK_CLOSE):]
-                self._state = "answer"
+                elapsed      = self._time.monotonic() - self._think_start
+                thinking_txt = self._buf[:idx]
+                self._buf    = self._buf[idx + len(self._think_close):]
+                self._state  = "answer"
                 if self._verbose:
-                    if thinking_text:
-                        console.print(thinking_text, end="", markup=False,
+                    if thinking_txt:
+                        console.print(thinking_txt, end="", markup=False,
                                       style=Style(color="grey50", italic=True))
-                    console.print(f"\n[dim]● Thought for {elapsed:.1f}s[/dim]\n",
-                                  markup=True)
+                    console.print(f"\n[dim]● Thought for {elapsed:.1f}s[/dim]\n", markup=True)
                 else:
-                    # Overwrite placeholder with elapsed summary
-                    console.print(f"\r[dim]● Thought for {elapsed:.1f}s[/dim]   \n",
-                                  markup=True)
+                    console.print(f"\r[dim]● Thought for {elapsed:.1f}s[/dim]   \n", markup=True)
                 continue
 
-            elif self._state == "tool_json":
-                # Suppress until the JSON object closes (balanced braces) then discard.
-                # A simpler heuristic: the JSON ends when we exit the constrained window,
-                # signalled by the matching close-tool token — but that's a token ID, not
-                # text.  Instead we track brace depth; resets to answer when depth = 0.
-                depth = 0
-                end   = 0
-                for i, ch in enumerate(self._buf):
-                    if   ch == "{": depth += 1
-                    elif ch == "}":
-                        depth -= 1
-                        if depth == 0:
-                            end = i + 1
-                            break
-                if end:
-                    self._buf   = self._buf[end:]
+            elif self._state == "tool":
+                # Suppress until the close delimiter; discard the whole span.
+                idx = self._buf.find(self._tool_close) if self._tool_close else -1
+                if idx != -1:
+                    self._buf   = self._buf[idx + len(self._tool_close):]
                     self._state = "answer"
                     continue
-                return  # JSON not complete yet; wait for more chunks
+                return  # close not yet arrived; wait for more chunks
 
 
 # ---------------------------------------------------------------------------
@@ -155,7 +140,7 @@ _TOOL_ICONS = {
     "calculate": "🧮", "prompt_user": "💬", "finish": "✅",
     "load_tools": "🔧", "load_skill": "📚",
 }
-_DEFAULT_ICON = "🔧"
+_DEFAULT_ICON = "⚙"
 
 
 def render_tool_call(name: str, args: dict) -> None:
@@ -197,7 +182,7 @@ def make_prompt_backend(session: PromptSession) -> Callable[[str], str]:
         try:
             return session.prompt(HTML(f"<ansiyellow>{question} </ansiyellow>"))
         except (EOFError, KeyboardInterrupt):
-            return ""
+            return "[user interrupted; no answer provided]"
     return _ask
 
 
