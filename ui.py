@@ -197,7 +197,7 @@ def render_tool_call(name: str, args: dict) -> None:
     run_command calls that match a known shell idiom are suppressed here —
     the past-tense summary is emitted after completion in render_tool_result.
     """
-    if name == "run_command" and _classify_command(args.get("command", "")):
+    if name == "run_command" and not args.get("background") and _classify_command(args.get("command", "")):
         return  # intent line shown post-completion
     icon  = _TOOL_ICONS.get(name, _DEFAULT_ICON)
     title = Text(f"{icon} {name}", style="bold cyan")
@@ -219,8 +219,8 @@ def render_tool_result(name: str, result, args: dict = None) -> None:
         _render_diff(args.get("path", "?"), args.get("old", ""), args.get("new", ""))
         return
 
-    # --- shell intent lines ---
-    if name == "run_command" and args:
+    # --- shell intent lines (foreground only; background returns a job-id string, not output) ---
+    if name == "run_command" and args and not args.get("background"):
         cls = _classify_command(args.get("command", ""))
         if cls:
             icon, label, detail = cls
