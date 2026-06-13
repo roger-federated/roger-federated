@@ -23,7 +23,13 @@ You and the community can now contribute to the next generation of AI. Not just 
 
 ### Installation
 
-**Recommended — [`uv`](https://docs.astral.sh/uv/) (auto-provisions Python, isolates deps):**
+**Requirements:**
+- Python 3.10+
+- Compatible GPU strongly recommended for quantization and speed.
+- First run downloads the selected model (several GB) and writes settings under `~/.roger/config.json`. These can be changed at any time.
+- Linux: `apt install python3-tk` enables the native folder picker; otherwise a text-prompt fallback is used automatically.
+
+**Recommended: [`uv`](https://docs.astral.sh/uv/) (auto-provisions Python, isolates deps):**
 ```bash
 uv tool install .          # installs `roger` command globally
 # or, without installing:
@@ -32,7 +38,7 @@ uvx --from . roger
 
 **Alternatives:**
 ```bash
-pipx install .                        # isolated, requires Python 3.10+ already present
+pipx install .                        # isolated, requires Python 3.10+ to be already present
 python -m venv .venv && source .venv/bin/activate && pip install -e .  # classic venv
 ```
 
@@ -62,6 +68,7 @@ This software is still in development. Below is a non-exhaustive list of to-do i
 - [x] Allow importing skills and agent.md files.
 - [x] Add @path ability.
 - [x] Integrate into a CLI application.
+- [ ] Auto read/write memory and create agent folder for temp files.
 - [ ] *Congrats, you now have a semi-basic agent.*
 - [x] Implement what the finetuning framework considers as rewards.
 - [ ] Implement automatic LoRA RL execution.
@@ -76,4 +83,4 @@ Further into the future:
 - [ ] Accelerate.
 - [ ] LLM-as-judge.
 - [ ] Dynalang-style world model for embedded state roll-forward.
-- [ ] Anonymous remote control — copy a session code, enter it on our website, continue interacting through the browser.
+- [ ] Remote control: copy a session code, enter it on our website, continue interacting encrypted through the browser.
