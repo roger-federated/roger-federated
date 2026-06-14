@@ -15,6 +15,7 @@ _DEFAULTS = {
     "enable_rag":    True,
     "rag_k":         3,
     "enable_skills": True,
+    "enable_memory": True,
     "verbose":       False,   # show thinking blocks expanded
 }
 

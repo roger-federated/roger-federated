@@ -6,22 +6,14 @@
 from transformers import AutoProcessor, AutoModelForImageTextToText, BitsAndBytesConfig
 import torch
 
-def _ids(tokenizer, messages):
-    """Tokenize a message list; return flat int list (handles dict or list output)."""
-    out = tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=False)
-    return out["input_ids"] if isinstance(out, dict) else out
-
 def _probe_delims(tokenizer, forcing, baseline):
-    """Return (open_id, close_id) of the first construct `forcing` adds over `baseline`.
-
-    Walks the special-token subsequence of the forced render; the first id not present in
-    the baseline's special-token set is the open delimiter, and the very next special token
-    is the close (paired-bracket convention used by Gemma-4 and similar models).
-    Returns None if no new special token is found.
-    """
+    """Return (open_id, close_id) of the first token `forcing` adds over `baseline` (special-tokens only)."""
+    def _tok(msgs):
+        out = tokenizer.apply_chat_template(msgs, tokenize=True, add_generation_prompt=False)
+        return out["input_ids"] if isinstance(out, dict) else out
     sp   = set(tokenizer.all_special_ids)
-    base = {t for t in _ids(tokenizer, baseline) if t in sp}
-    seq  = [t for t in _ids(tokenizer, forcing)  if t in sp]   # specials in render order
+    base = {t for t in _tok(baseline) if t in sp}
+    seq  = [t for t in _tok(forcing)  if t in sp]
     for i, t in enumerate(seq):
         if t not in base:
             return t, (seq[i + 1] if i + 1 < len(seq) else None)
@@ -72,6 +64,25 @@ def find_think_delims(tokenizer) -> tuple[str, str] | None:
     if close_id is None:
         return None     # can't delimit without a close token; stream raw
     return tokenizer.decode([open_id]), tokenizer.decode([close_id])
+
+def find_gen_prompt(tokenizer) -> list[int]:
+    """Token ids of the assistant-turn cue (add_generation_prompt diff). Returns [] if none."""
+    base = tokenizer.apply_chat_template(
+        [{"role": "user", "content": "_"}], tokenize=True, add_generation_prompt=False)
+    full = tokenizer.apply_chat_template(
+        [{"role": "user", "content": "_"}], tokenize=True, add_generation_prompt=True)
+    base = base["input_ids"] if isinstance(base, dict) else base
+    full = full["input_ids"] if isinstance(full, dict) else full
+    return full[len(base):]
+
+def find_tool_res_id(tokenizer) -> int:
+    """Last token of a dummy tool-call assistant turn — the tool_response boundary token."""
+    out = tokenizer.apply_chat_template(
+        [{"role": "assistant", "tool_calls": [
+            {"id": "0", "type": "function", "function": {"name": "_", "arguments": {}}}]}],
+        tokenize=True, add_generation_prompt=False)
+    ids = out["input_ids"] if isinstance(out, dict) else out
+    return ids[-1]
 
 def fetch_model(model_id="google/gemma-4-E2B-it") -> tuple[AutoModelForImageTextToText, AutoProcessor, tuple[int, int]]:
     # Quantization

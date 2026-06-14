@@ -191,6 +191,8 @@ Shell idioms for common commands (PowerShell via run_command):
   Time a command:     Measure-Command { run_command "..." }
   Delay:              Start-Sleep -Seconds N
   Temp files:         use .roger\\scratch\\ (gitignored); clean up when done.
+  Edit a file:        edit_file(path, old, new) — consider copying `old` verbatim from Get-Content so it matches
+                      exactly; to insert without removing, set `new = old + your_addition`.
 Emit *new* file content with write_file/edit_file, not PowerShell here-strings."""
     else:
         return """\
@@ -205,6 +207,8 @@ Shell idioms for common commands (sh via run_command):
   Time a command:     time <cmd>
   Delay:              sleep N
   Temp files:         use .roger/scratch/ (gitignored); clean up when done.
+  Edit a file:        edit_file(path, old, new) — consider copying `old` verbatim from cat so it matches
+                      exactly; to insert without removing, set `new = old + your_addition`.
 Emit *new* file content with write_file/edit_file, not heredocs."""
 
 

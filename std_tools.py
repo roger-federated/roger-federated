@@ -118,6 +118,9 @@ def edit_file(path: str, old: str, new: str, replace_all: bool = False) -> str:
 
 def _backup_file(path: str) -> None:
     """Copy an existing file to .roger/backups/{path}.{timestamp}.bak and record for revert."""
+    # .roger/ is gitignored agent state — never back up or offer to revert its contents.
+    if os.path.abspath(path).startswith(os.path.abspath(".roger") + os.sep):
+        return
     ts = time.strftime("%Y%m%d_%H%M%S")
     try:
         rel = os.path.relpath(path)
