@@ -32,6 +32,18 @@ def load_instructions(root: str) -> str:
     return ""
 
 
+def load_memory(root: str) -> str:
+    """Write protocol for .roger/memory.md + current contents (appended when present)."""
+    block = "## Persistent memory (.roger/memory.md)\nTo be updated at the end of each task."
+    path = os.path.join(root, ".roger", "memory.md")
+    if os.path.isfile(path):
+        try:
+            return block + "\n\nCurrent memory:\n" + open(path, encoding="utf-8").read().strip()
+        except OSError:
+            return block + "\n\nCurrent memory: (error reading .roger/memory.md)"
+    return block + "\n\nNo memory yet."
+
+
 # ---------------------------------------------------------------------------
 # Skill discovery + progressive-disclosure loader
 # ---------------------------------------------------------------------------
