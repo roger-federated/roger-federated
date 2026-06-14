@@ -3,3 +3,4 @@ experiments.ipynb
 .*
 *.egg-info
 build
+dist
