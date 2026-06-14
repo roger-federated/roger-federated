@@ -110,6 +110,7 @@ async def _repl(cfg: dict, root: str) -> None:
             enable_rag     = cfg["enable_rag"],
             rag_k          = cfg["rag_k"],
             enable_skills  = cfg["enable_skills"],
+            enable_memory  = cfg["enable_memory"],
         ))
 
         try:
@@ -138,6 +139,7 @@ def main() -> None:
     parser.add_argument("--max-new-tokens", type=int,  help="Max generated tokens per turn")
     parser.add_argument("--no-rag",         action="store_true", help="Disable RAG")
     parser.add_argument("--no-skills",      action="store_true", help="Disable skills")
+    parser.add_argument("--no-memory",      action="store_true", help="Disable persistent memory")
     parser.add_argument("--verbose",        action="store_true", help="Expand thinking blocks")
     args = parser.parse_args()
 
@@ -150,6 +152,7 @@ def main() -> None:
     if args.max_new_tokens: cfg["max_new_tokens"] = args.max_new_tokens
     if args.no_rag:         cfg["enable_rag"]     = False
     if args.no_skills:      cfg["enable_skills"]  = False
+    if args.no_memory:      cfg["enable_memory"]  = False
     if args.verbose:        cfg["verbose"]         = True
 
     # Banner

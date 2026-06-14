@@ -1,13 +1,14 @@
 import asyncio, os, sys, torch, transformers, json, inspect, numpy as np, reward_utils
 from retrieval import build_index, retrieve, format_context
-from skill_utils import load_instructions, discover_skills, make_skill_loader
+from skill_utils import load_instructions, load_memory, discover_skills, make_skill_loader
 from path_utils import expand_at_references
 from PIL import Image
 from lmformatenforcer import JsonSchemaParser
 from lmformatenforcer.integrations.transformers import build_transformers_prefix_allowed_tokens_fn
 from collections.abc import Callable
 from std_tools import get_standard_tools, prompt_user, offer_revert, maxsteps_checkin
-from shell_tools import drain_finished_jobs, pending_jobs, terminate_jobs
+from shell_tools import drain_finished_jobs, pending_jobs, terminate_jobs, shell_idioms
+from model_setup import find_gen_prompt, find_tool_res_id
 
 def make_tool_loader(tools):
     """Build a terse catalog string + load_tools closure for deferred schema loading.
@@ -179,24 +180,17 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
                   root: str = None,                # project root; defaults to os.getcwd()
                   enable_rag: bool = True, rag_k: int = 3,
                   rag_root: str = None,
-                  enable_skills: bool = True, skills_root: str = None) -> list:
+                  enable_skills: bool = True, skills_root: str = None,
+                  enable_memory: bool = True) -> list:
 
-    # tool_res_id: last token of a dummy assistant-turn-with-tool-calls = <|tool_response> boundary.
-    # Used to slice prompt-free deltas in result_to_ids / rag_delta / fb_delta.
-    _probe = tokenizer.apply_chat_template(
-        asst_msg := [{"role": "assistant", "tool_calls": [
-            {"id": "0", "type": "function", "function": {"name": "_", "arguments": {}}}]}],
-        tokenize=True, add_generation_prompt=False
-    )["input_ids"]
-    tool_res_id = _probe[-1]
-    # gen_prompt: the assistant-turn cue (<|turn>model\n). MUST be derived from a user-terminated
-    # diff — after a tool_call, Gemma-4's template suppresses the model-turn cue even with
-    # add_generation_prompt=True, so the asst_msg diff yields an empty tensor (verified).
-    _u  = tokenizer.apply_chat_template(
-        [{"role": "user", "content": "_"}], tokenize=True, add_generation_prompt=False)["input_ids"]
-    _ug = tokenizer.apply_chat_template(
-        [{"role": "user", "content": "_"}], tokenize=True, add_generation_prompt=True)["input_ids"]
-    _gp = _ug[len(_u):]
+    # tool_res_id: <|tool_response> boundary; used to slice prompt-free deltas.
+    tool_res_id = find_tool_res_id(tokenizer)
+    asst_msg = [{"role": "assistant", "tool_calls": [   # reused in feedback injection below
+        {"id": "0", "type": "function", "function": {"name": "_", "arguments": {}}}]}]
+    # gen_prompt: assistant-turn cue (e.g. <start_of_turn>model\n). MUST be derived from a
+    # user-terminated diff — after a tool_call, Gemma-4's template suppresses the cue even with
+    # add_generation_prompt=True (the asst_msg diff yields an empty tensor; verified).
+    _gp = find_gen_prompt(tokenizer)
     if not _gp:
         import warnings; warnings.warn("gen_prompt is empty — chat template did not append a model-turn cue; model may emit immediate <eos>")
     gen_prompt = torch.tensor([_gp], device=model.device, dtype=torch.long)
@@ -228,6 +222,12 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
     # Build constrained-decoding inner fn once for this rollout (schema uses full name list)
     tool_names = [t["function"]["name"] if isinstance(t, dict) else t.__name__ for t in tools]
     inner_fn = _build_inner_fn(tokenizer, tool_names)
+    # Forced side-effect-only memory turn: one extra loop iteration after task completion with the
+    # name-enum restricted to file ops. Not recorded to trajectory (avoids policy-gradient bias).
+    _MEM_SEED = ("Okay.\nLet me update my memory at .roger/memory.md with what I learned about the project and the user."
+                 "I will be concise and properly format it under the headings 'Project'/'User'/'Conventions'")
+    mem_inner  = _build_inner_fn(tokenizer, ["write_file", "edit_file"]) if enable_memory else None
+    saving_mem = False
 
     # RAG: build corpus index once (deterministic; no re-indexing on mid-rollout edits)
     rag_index = build_index(rag_root or root or os.getcwd()) if enable_rag else None
@@ -238,14 +238,18 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
         f"Environment: cwd={os.getcwd()}, platform={sys.platform}, shell={_shell}\n"
         "You are an agentic assistant. Given a task, use the provided tools to accomplish it.\n"
         "You may issue multiple tool calls in one turn by emitting them back-to-back in JSON. "
+        "They will be executed sequentially, unless `background=True. "
         "Call finish() when the task is complete, or simply stop emitting calls.\n\n"
-        + shell_tools.shell_idioms()
+        + shell_idioms()
     )
     # Project instructions: AGENTS.md or CLAUDE.md from cwd (first-found-wins)
     # @path refs in the file are expanded relative to _sroot
     instr = load_instructions(_sroot)
     if instr:
         sys_content += "\n\n" + expand_at_references(instr, _sroot)
+    # Persistent memory: always inject the write protocol + current contents (if any)
+    if enable_memory:
+        sys_content += "\n\n" + load_memory(_sroot)
     if catalog_text:
         sys_content += (
             "\nAvailable tools (call load_tools(names=[...]) to load a tool's full schema "
@@ -304,10 +308,19 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
     while True:
         # Prepend generation prompt once per turn; every delta is prompt-free
         input_ids = torch.cat([input_ids, gen_prompt], dim=1)
-        new_idx = input_ids.shape[1]
+        if saving_mem:
+            # Seed preamble + open token so the turn drives straight into a (restricted) file call
+            _seed = tokenizer.encode(_MEM_SEED, add_special_tokens=False) + [tool_tokens[0]]
+            input_ids = torch.cat(
+                [input_ids, torch.tensor([_seed], device=model.device, dtype=torch.long)], dim=1)
+            new_idx = input_ids.shape[1] - 1    # slice from the open token; constraint engages immediately
+            active_fn = mem_inner
+        else:
+            new_idx   = input_ids.shape[1]
+            active_fn = inner_fn
         # Attention mask covers the full sequence; kv cache accounts for the already-processed prefix
         attn_mask = torch.ones(1, input_ids.shape[1], device=model.device, dtype=torch.long)
-        prefix_fn, mask_log = _make_prefix_fn(inner_fn, tokenizer, tool_tokens, new_idx)
+        prefix_fn, mask_log = _make_prefix_fn(active_fn, tokenizer, tool_tokens, new_idx)
         # Prepare inputs; model.generate slices the new tokens internally via past_key_values length
         kwargs = {
             "input_ids": input_ids,
@@ -338,6 +351,8 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
         # Parse and execute all tool calls from the newly generated tokens only
         results = await execute_tools(new_ids, tokenizer, tool_handlers, tool_tokens,
                                       on_tool_call=on_tool_call, on_tool_result=on_tool_result)
+        if saving_mem:
+            break   # memory is now written; end
 
         # Step reward: sum auto_signal over all results in this turn, clamped to [-1, 1]
         step_reward = max(-1.0, min(1.0,
@@ -349,22 +364,24 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
             "reward": step_reward,
         })
 
-        if not results:
+        if not results and (pending := pending_jobs()):
             # No tool call: wait for any pending background job, then grant another turn
-            if pending := pending_jobs():
-                await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
-            else:
-                break  # truly done
+            await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
             bg = bg_msgs()
             input_ids = torch.cat([gen_ids, bg], dim=1) if isinstance(bg, torch.Tensor) else gen_ids
+        elif not results or any(name == "finish" for name, _ in results):
+            # Task done. Enter memory turn or break
+            if enable_memory and not saving_mem:
+                saving_mem = True
+                input_ids = gen_ids
+                continue
+            break
         else:
-            # Append tool results and any finished bg jobs — all prompt-free
+            # Append tool results and any finished bg jobs
             tool_ids = result_to_ids(results)
             bg = bg_msgs()
             parts = [gen_ids, tool_ids] + ([bg] if isinstance(bg, torch.Tensor) else [])
             input_ids = torch.cat(parts, dim=1)
-            if any(name == "finish" for name, _ in results):
-                break
 
         # Max-steps check-in (interval doubles each time for exponential backoff)
         i += 1
