@@ -1,8 +1,8 @@
 import asyncio, os, sys, torch, transformers, json, inspect, numpy as np
 import roger.training.reward_utils as reward_utils
 from roger.agency.retrieval import build_index, retrieve, format_context
-from roger.agency.skill_utils import load_instructions, load_memory, discover_skills, make_skill_loader
-from roger.agency.path_utils import expand_at_references
+from roger.agency.skill_utils import load_instructions, load_memory, discover_skills, make_skill_loader, project_mem_dir
+from roger.agency.path_utils import expand_at_references, state_dir
 from PIL import Image
 from lmformatenforcer import JsonSchemaParser
 # compat: lm-format-enforcer 0.11.3 imports PreTrainedTokenizerBase from transformers.tokenization_utils, which was removed
@@ -214,7 +214,8 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
     tools += std_tools_list
     tool_handlers = tool_handlers | std_handlers
 
-    # Skills: discover .agents/skills/ and .claude/skills/ (nested + flat); register load_skill only when skills exist
+    # Skills: discover ~/.roger/skills (global) + project .agents/.claude/skills (nested + flat);
+    # register load_skill only when skills exist
     _sroot = skills_root or root or os.getcwd()
     skill_catalog, load_skill_fn = None, None
     if enable_skills:
@@ -229,8 +230,11 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
     inner_fn = _build_inner_fn(tokenizer, tool_names)
     # Forced side-effect-only memory turn: one extra loop iteration after task completion with the
     # name-enum restricted to file ops. Not recorded to trajectory (avoids policy-gradient bias).
-    _MEM_SEED = ("Okay.\nLet me update my memory at .roger/memory.md with what I learned about the project and the user."
-                 "I will be concise and properly format it under the headings 'Project'/'User'/'Conventions'")
+    _glob_mem = os.path.join(state_dir(), "memory.md")
+    _proj_mem = os.path.join(project_mem_dir(root or os.getcwd()), "memory.md")
+    _MEM_SEED = (f"Okay.\nLet me update my memory with what I learned. User-level facts (preferences, identity) "
+                 f"go in {_glob_mem}; project-specific facts go in {_proj_mem}. I will be concise, update "
+                 f"whichever file(s) changed, and format under the headings 'Project'/'User'/'Conventions'.")
     mem_inner  = _build_inner_fn(tokenizer, ["write_file", "edit_file"]) if enable_memory else None
     saving_mem = False
 

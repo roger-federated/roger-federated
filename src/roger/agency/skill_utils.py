@@ -2,13 +2,17 @@
 
 Conventions:
   AGENTS.md / CLAUDE.md              — freeform project instructions, prepended to system prompt
-  .roger/.agents/.claude/skills/*.md — per-skill files with YAML frontmatter (name, description)
-                              + a markdown body; only the catalog is shown up front;
-                              model fetches the body on demand via load_skill(name).
+  Memory (two tiers, both under the global ~/.roger tree, never in the project):
+    ~/.roger/memory.md                — user-level facts (preferences, identity), cross-project
+    ~/.roger/projects/<key>/memory.md — facts specific to the current project (key = its
+                                        abspath with separators dashed, like Claude Code)
+  Skills (per-skill .md with YAML frontmatter + body; only the catalog is shown up front,
+  body fetched on demand via load_skill(name)) are discovered in ~/.roger/skills (global) and
+  the project's .agents/skills and .claude/skills.
 """
 
-import os, glob
-from path_utils import expand_at_references
+import os, re, glob
+from roger.agency.path_utils import expand_at_references, state_dir
 
 # ---------------------------------------------------------------------------
 # Instruction files
@@ -32,16 +36,29 @@ def load_instructions(root: str) -> str:
     return ""
 
 
+def project_mem_dir(root: str) -> str:
+    """Per-project memory dir under the global tree, keyed by the project's abspath with path
+    separators dashed out (e.g. C:\\…\\newventure → C--…-newventure), mirroring Claude Code."""
+    key = re.sub(r"[\\/:]", "-", os.path.abspath(root))
+    return os.path.join(state_dir(), "projects", key)
+
+
+def _read(path: str) -> str:
+    try:
+        return open(path, encoding="utf-8").read().strip()
+    except OSError:
+        return ""
+
+
 def load_memory(root: str) -> str:
-    """Write protocol for .roger/memory.md + current contents (appended when present)."""
-    block = "## Persistent memory (.roger/memory.md)\nTo be updated at the end of each task."
-    path = os.path.join(root, ".roger", "memory.md")
-    if os.path.isfile(path):
-        try:
-            return block + "\n\nCurrent memory:\n" + open(path, encoding="utf-8").read().strip()
-        except OSError:
-            return block + "\n\nCurrent memory: (error reading .roger/memory.md)"
-    return block + "\n\nNo memory yet."
+    """Write protocol + current contents of both memory tiers (global + this project)."""
+    g = os.path.join(state_dir(), "memory.md")
+    p = os.path.join(project_mem_dir(root), "memory.md")
+    block = ("## Persistent memory\nUpdate at the end of each task: user-level facts "
+             f"(preferences, identity) → {g}; facts specific to this project → {p}.")
+    return (block
+            + f"\n\nGlobal memory:\n{_read(g) or '(none yet)'}"
+            + f"\n\nProject memory:\n{_read(p) or '(none yet)'}")
 
 
 # ---------------------------------------------------------------------------
@@ -71,19 +88,23 @@ def _parse_frontmatter(text: str) -> tuple[dict, str]:
 
 
 def discover_skills(root: str) -> list[dict]:
-    """Discover skill files under root, deduplicating by resolved path.
+    """Discover skill files, deduplicating by resolved path.
 
-    Searches three folder names (.roger/skills, .agents/skills, .claude/skills) and two layouts:
-      nested: <folder>/<name>/SKILL.md  — name from frontmatter or parent dir
-      flat:   <folder>/<name>.md        — name from frontmatter or file stem
+    Searches the global ~/.roger/skills (canonical) plus the project's .agents/skills and
+    .claude/skills (cross-agent compat), in two layouts:
+      nested: <base>/<name>/SKILL.md  — name from frontmatter or parent dir
+      flat:   <base>/<name>.md        — name from frontmatter or file stem
 
     Each record: {name, description, body, path}.
     Skips files with no usable description (would make a useless catalog entry).
     """
-    _FOLDERS = (".roger", ".agents", ".claude")  # .roger is canonical; others for cross-agent compat
+    bases = (
+        os.path.join(state_dir(), "skills"),          # global, canonical
+        os.path.join(root, ".agents", "skills"),      # project, cross-agent
+        os.path.join(root, ".claude", "skills"),      # project, cross-agent
+    )
     seen, skills = set(), []
-    for folder in _FOLDERS:
-        base = os.path.join(root, folder, "skills")
+    for base in bases:
         patterns = [
             (os.path.join(base, "*", "SKILL.md"), "nested"),
             (os.path.join(base, "*.md"),           "flat"),
