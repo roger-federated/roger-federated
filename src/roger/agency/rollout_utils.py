@@ -245,7 +245,7 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
     _shell = "PowerShell" if os.name == "nt" else "/bin/sh"
     sys_content = (
         f"Environment: cwd={os.getcwd()}, platform={sys.platform}, shell={_shell}\n"
-        "You are an agentic assistant. Given a task, use the provided tools to accomplish it.\n"
+        "You are an agentic assistant called 'Roger Federated'. Given a task, use the provided tools to accomplish it.\n"
         "You may issue multiple tool calls in one turn by emitting them back-to-back in JSON. "
         "They will be executed sequentially, unless `background=True. "
         "Call finish() when the task is complete, or simply stop emitting calls.\n\n"
