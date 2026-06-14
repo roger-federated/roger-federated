@@ -9,6 +9,7 @@ description = "Roger Federated — The world's first true agent, built together 
 requires-python = ">=3.10"
 dependencies = [
     "torch",
+    "torchvision",   # Gemma4 image processor imports torchvision.transforms.v2
     "transformers",
     "accelerate",
     "bitsandbytes; sys_platform != 'darwin' and (platform_machine == 'x86_64' or platform_machine == 'AMD64')",
