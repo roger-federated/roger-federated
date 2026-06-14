@@ -1,14 +1,19 @@
-import asyncio, os, sys, torch, transformers, json, inspect, numpy as np, reward_utils
-from retrieval import build_index, retrieve, format_context
-from skill_utils import load_instructions, load_memory, discover_skills, make_skill_loader
-from path_utils import expand_at_references
+import asyncio, os, sys, torch, transformers, json, inspect, numpy as np
+import roger.training.reward_utils as reward_utils
+from roger.agency.retrieval import build_index, retrieve, format_context
+from roger.agency.skill_utils import load_instructions, load_memory, discover_skills, make_skill_loader
+from roger.agency.path_utils import expand_at_references
 from PIL import Image
 from lmformatenforcer import JsonSchemaParser
+# compat: lm-format-enforcer 0.11.3 imports PreTrainedTokenizerBase from transformers.tokenization_utils, which was removed
+import transformers.tokenization_utils as _tu
+if not hasattr(_tu, "PreTrainedTokenizerBase"):
+    _tu.PreTrainedTokenizerBase = transformers.PreTrainedTokenizerBase
 from lmformatenforcer.integrations.transformers import build_transformers_prefix_allowed_tokens_fn
 from collections.abc import Callable
-from std_tools import get_standard_tools, prompt_user, offer_revert, maxsteps_checkin
-from shell_tools import drain_finished_jobs, pending_jobs, terminate_jobs, shell_idioms
-from model_setup import find_gen_prompt, find_tool_res_id
+from roger.tools.std_tools import get_standard_tools, prompt_user, offer_revert, maxsteps_checkin
+from roger.tools.shell_tools import drain_finished_jobs, pending_jobs, terminate_jobs, shell_idioms
+from roger.serving.model_setup import find_gen_prompt, find_tool_res_id
 
 def make_tool_loader(tools):
     """Build a terse catalog string + load_tools closure for deferred schema loading.
@@ -17,7 +22,7 @@ def make_tool_loader(tools):
     '- name: one-line description' and load_tools(names) returns full stripped
     schemas for the requested subset.  No embedding model required.
     """
-    from mcp_utils import _strip_schema
+    from roger.tools.mcp_utils import _strip_schema
     index = {}
     for t in tools:
         if isinstance(t, dict):
