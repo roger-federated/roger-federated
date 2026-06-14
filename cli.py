@@ -8,11 +8,10 @@ Usage:
 
 Config lives at ~/.roger/config.json; CLI flags override per-run only.
 """
-import argparse, asyncio, os, sys, signal, ctypes
+import argparse, asyncio, os, sys, ctypes
 from typing import Callable
 
 from rich.console import Console
-from rich.text import Text
 
 import config
 import ui

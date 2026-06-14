@@ -1,6 +1,6 @@
 """Lexical BM25 retrieval over working-directory files for auto-triggered RAG.
 
-Public API: build_index → retrieve → format_context → mark_injected.
+Public API: build_index → retrieve → format_context.
 `score` is the pluggable scorer seam; swap it for dense/hybrid without touching
 the rollout wiring.
 """
@@ -195,12 +195,6 @@ def retrieve(query: str, index: dict, k: int = 3,
             continue
         hits.append({"path": doc["path"], "start": start, "end": end, "text": text})
     return hits
-
-
-def mark_injected(injected: dict, hits: list[dict]):
-    """Record shown line ranges in the dedup ledger (mutates `injected` in-place)."""
-    for h in hits:
-        injected.setdefault(h["path"], set()).update(range(h["start"], h["end"] + 1))
 
 
 def format_context(hits: list[dict]) -> str:

@@ -8,7 +8,7 @@ Public API:
   select_root(default)             — interactive folder selection (tkinter or text)
   read_prompt(session)             — multi-line prompt_toolkit input
 """
-import os, sys, textwrap, difflib, re
+import os, sys, difflib, re
 from typing import Callable
 
 from rich.console import Console
@@ -16,7 +16,6 @@ from rich.panel import Panel
 from rich.text import Text
 from rich.style import Style
 from rich.syntax import Syntax
-from rich import print as rprint
 from prompt_toolkit import PromptSession
 from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.history import FileHistory
