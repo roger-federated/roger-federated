@@ -47,8 +47,30 @@ After install, run `roger` from any terminal. First launch walks you through ini
 ---
 
 ### Use cases
+Roger has the potential to perform any digital task. In other words, there is no limit to what you can do with (or delegate to) Roger. Here is a severely non-exhaustive list of examples.
+
 <details>
-<summary>Connect a desktop interaction MCP for autonomous background tasks</summary>
+<summary>Use always-on mode for a 24/7 unsupervised e-marketeer</summary>
+...
+</details>
+
+<details>
+<summary>Connect Touchpoint MCP for assistance in e.g. music production</summary>
+...
+</details>
+
+<details>
+<summary>Automate any MS Office-based task</summary>
+...
+</details>
+
+<details>
+<summary>Fully autonomous development of a social media app</summary>
+...
+</details>
+
+<details>
+<summary>End-to-end Steam game development</summary>
 ...
 </details>
 
@@ -68,8 +90,8 @@ This software is still in development. Below is a non-exhaustive list of to-do i
 - [x] Allow importing skills and agent.md files.
 - [x] Add @path ability.
 - [x] Integrate into a CLI application.
-- [ ] Auto read/write memory and create agent folder for temp files.
-- [ ] *Congrats, you now have a semi-basic agent.*
+- [x] Auto read/write memory and create agent folder for temp files.
+- [x] *Congrats, you now have a semi-basic agent.*
 - [x] Implement what the finetuning framework considers as rewards.
 - [ ] Implement automatic LoRA RL execution.
 - [ ] Allow resuming conversation after finish.
@@ -79,8 +101,10 @@ This software is still in development. Below is a non-exhaustive list of to-do i
 - [ ] *Congrats, you now have a shippable.*
 
 Further into the future:
+- [ ] Native support for agent loops.
 - [ ] Automatic subagent spawning and automatic git worktrees.
 - [ ] Accelerate.
 - [ ] LLM-as-judge.
 - [ ] Dynalang-style world model for embedded state roll-forward.
 - [ ] Remote control: copy a session code, enter it on our website, continue interacting encrypted through the browser.
+- [ ] Always-on mode: always listen, look, and read, and when a keyboard shortcut is entered, automatically infer and continue the user's task using e.g. Touchpoint.
