@@ -1,23 +1,21 @@
-"""config.py — Persistent user configuration for Roger (.roger/config.json in cwd).
+"""config.py — Persistent user configuration for Roger (~/.roger/config.json).
 
-Loaded once at startup; CLI flags override individual keys for that run.
-Users edit the JSON file directly to change defaults persistently.
+Global per-user config (not per-project); CLI flags override individual keys for that run.
+Users edit the JSON file directly to change defaults persistently. (Per-run artifacts —
+runs/backups/memory/scratch — live in the per-project .roger/ instead.)
+
+Baseline defaults ship as package data (apps/config.json) — like tools/command_policy.txt —
+so they're available after install; `verbose` controls whether thinking blocks show expanded.
 """
 import json, os
+from importlib.resources import files
+from roger.agency.path_utils import state_dir
 
 def _config_path() -> str:
-    return os.path.join(os.getcwd(), ".roger", "config.json")
+    return os.path.join(state_dir(), "config.json")
 
-_DEFAULTS = {
-    "model_id":      "google/gemma-4-E2B-it",
-    "max_steps":     10,
-    "max_new_tokens": 4096,
-    "enable_rag":    True,
-    "rag_k":         3,
-    "enable_skills": True,
-    "enable_memory": True,
-    "verbose":       False,   # show thinking blocks expanded
-}
+# Read shipped baseline once at import (package data, not the user's cwd config)
+_DEFAULTS = json.loads(files("roger.apps").joinpath("config.json").read_text(encoding="utf-8"))
 
 
 def load() -> dict:

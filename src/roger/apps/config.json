@@ -1,0 +1,10 @@
+{
+  "model_id": "google/gemma-4-E2B-it",
+  "max_steps": 10,
+  "max_new_tokens": 4096,
+  "enable_rag": true,
+  "rag_k": 3,
+  "enable_skills": true,
+  "enable_memory": true,
+  "verbose": false
+}
