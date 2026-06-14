@@ -43,9 +43,11 @@
 - `envs/`     — not created yet (concrete shell/browser/code environments are future work)
 - `tests/`    — e.g. `tests/test_rewards.py`
 
-Runtime artifacts: config at `~/.roger/config.json`; per-run state under `.roger/`
-(`memory.md`, `runs/`, `backups/`, `scratch/`). `build/` and `*.egg-info/` are build output —
-ignore them; edit only under `src/`.
+Runtime artifacts all live under the global `~/.roger/` (never in the project): `config.json`,
+global `memory.md` + per-project `projects/<dashed-abspath>/memory.md`, `runs/`, `backups/`,
+`scratch/`, `history`, and user `skills/`. Project-level skill dirs (`.agents/`, `.claude/`)
+and instruction files (`AGENTS.md`/`CLAUDE.md`) are still read from the project. `build/` and
+`*.egg-info/` are build output — ignore them; edit only under `src/`.
 
 ## Dev environment
 - Python: use the conda env **`roger`** (Python 3.13, CUDA torch 2.12.0+cu130) —
@@ -76,5 +78,4 @@ ignore them; edit only under `src/`.
 
 ## Keep this file current
 - When you find that something here is wrong, stale, or missing — and knowing it would help a
-  future session — update `CLAUDE.md` as part of your work. These instructions override default
-  behaviour, so their accuracy matters; keep edits minimal and scannable.
+  future session — update `CLAUDE.md` as part of your work. But also in this regard, only edit if necessary. Memory should be written to your memory files; not to `CLAUDE.md`.
