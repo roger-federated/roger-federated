@@ -1,8 +1,3 @@
-# Check whether gpu is available,
-# Then check whether GPU-torch is installed, along with bitsandbytes, transformers, and accelerate
-# Inspect CPU/GPU memory capacity and precision, and setup the quantization/offloading/compute_dtype config accordingly
-# If sufficient GPU memory, use vLLM for inference
-
 from transformers import AutoProcessor, AutoModelForImageTextToText, BitsAndBytesConfig
 from huggingface_hub import get_safetensors_metadata
 import os, torch

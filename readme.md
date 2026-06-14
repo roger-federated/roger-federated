@@ -116,7 +116,7 @@ This software is still in development. Below is a non-exhaustive list of to-do i
 Further into the future:
 - [ ] Native support for agent loops.
 - [ ] Automatic subagent spawning and automatic git worktrees.
-- [ ] Accelerate.
+- [ ] Accelerate using vLLM.
 - [ ] LLM-as-judge.
 - [ ] Dynalang-style world model for embedded state roll-forward.
 - [ ] Remote control: copy a session code, enter it on our website, continue interacting encrypted through the browser.
