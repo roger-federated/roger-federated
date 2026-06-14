@@ -4,7 +4,11 @@
 # If sufficient GPU memory, use vLLM for inference
 
 from transformers import AutoProcessor, AutoModelForImageTextToText, BitsAndBytesConfig
-import torch
+from huggingface_hub import get_safetensors_metadata
+import os, torch
+
+VRAM_UTIL     = 0.9   # fraction of total VRAM we aim to fill; the rest absorbs activations/KV
+TRAIN_HEADROOM = 1.7  # inflate the footprint estimate when loading for RL (grads + optimizer)
 
 def _probe_delims(tokenizer, forcing, baseline):
     """Return (open_id, close_id) of the first token `forcing` adds over `baseline` (special-tokens only)."""
@@ -84,23 +88,56 @@ def find_tool_res_id(tokenizer) -> int:
     ids = out["input_ids"] if isinstance(out, dict) else out
     return ids[-1]
 
-def fetch_model(model_id="google/gemma-4-E2B-it") -> tuple[AutoModelForImageTextToText, AutoProcessor, tuple[int, int]]:
-    # Quantization
+def _param_count(model_id: str) -> int | None:
+    """Total parameter count from HF safetensors metadata (no weight download). None on failure."""
+    try:
+        return sum(get_safetensors_metadata(model_id).parameter_count.values())
+    except Exception:
+        return None    # offline / gated / no safetensors → caller falls back to 4-bit
+
+def _4bit(compute_dtype) -> BitsAndBytesConfig:
+    return BitsAndBytesConfig(
+        load_in_4bit=True, bnb_4bit_quant_type="nf4", bnb_4bit_use_double_quant=True,
+        bnb_4bit_compute_dtype=compute_dtype, llm_int8_enable_fp32_cpu_offload=True)
+
+def _select_quant(model_id, gpu_available, device_count, for_training):
+    """Pick the highest-precision tier that fits VRAM: (quantization_config | None, dtype).
+
+    Estimates the model footprint from its param count and compares each tier
+    (bf16 → int8 → nf4) against ~VRAM_UTIL of total VRAM, inflated by TRAIN_HEADROOM when
+    loading for RL. The 4-bit tier is also the fallback; any overflow is offloaded by
+    device_map="auto". bitsandbytes needs CUDA, so the no-GPU path loads unquantized.
+    """
+    if not gpu_available:
+        return None, torch.float32
+    compute_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+    P = _param_count(model_id)
+    if P is None:
+        return _4bit(compute_dtype), compute_dtype     # safe default when size is unknown
+    budget = sum(torch.cuda.get_device_properties(i).total_memory
+                 for i in range(device_count)) * VRAM_UTIL
+    factor = TRAIN_HEADROOM if for_training else 1.0
+    if 2.0 * P * factor <= budget:                     # bf16 weights fit → no quant
+        return None, compute_dtype
+    if 1.0 * P * factor <= budget:                     # int8 fits
+        return BitsAndBytesConfig(load_in_8bit=True, llm_int8_enable_fp32_cpu_offload=True), compute_dtype
+    return _4bit(compute_dtype), compute_dtype          # nf4 (offload remainder if still tight)
+
+def fetch_model(model_id="google/gemma-4-E2B-it", for_training: bool = False) -> tuple[AutoModelForImageTextToText, AutoProcessor, tuple[int, int]]:
+    # VRAM-aware quantization: choose tier from model size vs available VRAM
     gpu_available = torch.cuda.is_available()
-    bnb_config = BitsAndBytesConfig(
-        load_in_4bit=True,
-        bnb_4bit_compute_dtype=torch.bfloat16 if (gpu_available and torch.cuda.is_bf16_supported()) else torch.float16,
-        bnb_4bit_use_double_quant=True,
-        llm_int8_enable_fp32_cpu_offload=True,
-        bnb_4bit_quant_type="nf4"
-    )
-    # Load model on GPUs if available
+    quant_cfg, dtype = _select_quant(model_id, gpu_available, torch.cuda.device_count(), for_training)
+    # device_map="auto" shards across GPUs and offloads overflow to CPU/disk (offload_folder)
+    offload_dir = os.path.join(os.getcwd(), ".roger", "scratch", "offload")
+    os.makedirs(offload_dir, exist_ok=True)
     model = AutoModelForImageTextToText.from_pretrained(
         model_id,
-        quantization_config=bnb_config,
-        device_map={"": i for i in range(torch.cuda.device_count())} if gpu_available else "auto",
+        quantization_config=quant_cfg,
+        dtype=dtype,
+        device_map="auto",
         low_cpu_mem_usage=True,
         offload_buffers=True,
+        offload_folder=offload_dir,
     )
     processor = AutoProcessor.from_pretrained(model_id)
     # Find tool call tokens
