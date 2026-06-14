@@ -8,13 +8,14 @@ Public API:
   select_root(default)             — interactive folder selection (tkinter or text)
   read_prompt(session)             — multi-line prompt_toolkit input
 """
-import os, sys, textwrap
+import os, sys, textwrap, difflib, re
 from typing import Callable
 
 from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
 from rich.style import Style
+from rich.syntax import Syntax
 from rich import print as rprint
 from prompt_toolkit import PromptSession
 from prompt_toolkit.formatted_text import HTML
@@ -143,8 +144,61 @@ _TOOL_ICONS = {
 _DEFAULT_ICON = "⚙"
 
 
+# ---------------------------------------------------------------------------
+# Shell command classifier — maps idiom commands to (icon, past_label, detail)
+# ---------------------------------------------------------------------------
+
+# Each entry: (regex matching the command verb/prefix, icon, past_label, detail_fn)
+# detail_fn receives the remainder of the command string after the verb.
+_CMD_PATTERNS: list[tuple] = [
+    # read: Get-Content/gc/cat/type — extract first non-flag token as filename
+    (re.compile(r"^\s*(?:Get-Content|gc|cat|type)\s+", re.I),
+     "📄", "Read",
+     lambda rest: re.split(r"\s+", rest.strip())[0] if rest.strip() else "…"),
+    # locate/search: Select-String/grep — extract pattern then file
+    (re.compile(r"^\s*(?:Select-String|grep)\b", re.I),
+     "🔍", "Searched for",
+     lambda rest: " ".join(rest.split()[:2]) if rest.strip() else "…"),
+    # find files: Get-ChildItem/gci/find
+    (re.compile(r"^\s*(?:Get-ChildItem|gci|find)\b", re.I),
+     "🗂️", "Found files",
+     lambda rest: rest.strip()[:60] or "…"),
+    # copy/append: Add-Content/>>
+    (re.compile(r"^\s*(?:Add-Content|.*>>\s*\S)", re.I),
+     "📋", "Copied",
+     lambda rest: rest.strip()[:60] or "…"),
+]
+
+def _classify_command(command: str):
+    """Return (icon, past_label, detail) if command matches a known shell idiom, else None."""
+    for pat, icon, label, detail_fn in _CMD_PATTERNS:
+        m = pat.match(command)
+        if m:
+            return icon, label, detail_fn(command[m.end():])
+    return None
+
+
+def _render_diff(path: str, old: str, new: str) -> None:
+    """Render a colored unified diff for an edit_file result."""
+    lines = list(difflib.unified_diff(
+        old.splitlines(), new.splitlines(),
+        fromfile=path, tofile=path, lineterm=""))
+    if not lines:
+        return  # no textual change
+    diff_text = "\n".join(lines)
+    title = Text(f"✏️  edit_file — {path}", style="bold green")
+    console.print(Panel(Syntax(diff_text, "diff", background_color="default"),
+                        title=title, border_style="green", expand=False, padding=(0, 1)))
+
+
 def render_tool_call(name: str, args: dict) -> None:
-    """Print a formatted panel for an outgoing tool call."""
+    """Print a formatted panel for an outgoing tool call.
+
+    run_command calls that match a known shell idiom are suppressed here —
+    the past-tense summary is emitted after completion in render_tool_result.
+    """
+    if name == "run_command" and not args.get("background") and _classify_command(args.get("command", "")):
+        return  # intent line shown post-completion
     icon  = _TOOL_ICONS.get(name, _DEFAULT_ICON)
     title = Text(f"{icon} {name}", style="bold cyan")
     lines = []
@@ -158,9 +212,38 @@ def render_tool_call(name: str, args: dict) -> None:
                         padding=(0, 1)))
 
 
-def render_tool_result(name: str, result) -> None:
-    """Print a formatted panel for a tool result."""
-    # Convert result to a displayable string; truncate long outputs
+def render_tool_result(name: str, result, args: dict = None) -> None:
+    """Print a formatted panel (or concise intent line) for a tool result."""
+    # --- edit_file diff ---
+    if name == "edit_file" and args and str(result).startswith("Replaced"):
+        _render_diff(args.get("path", "?"), args.get("old", ""), args.get("new", ""))
+        return
+
+    # --- shell intent lines (foreground only; background returns a job-id string, not output) ---
+    if name == "run_command" and args and not args.get("background"):
+        cls = _classify_command(args.get("command", ""))
+        if cls:
+            icon, label, detail = cls
+            result_str = str(result)
+            failed = bool(re.match(r"exit [^0]", result_str))  # non-zero exit
+            if failed:
+                # Show intent + raw output on failure so the error is visible
+                console.print(f"[bold red]{icon} {label}:[/bold red] [red]{detail}[/red]")
+                _print_raw_result(name, result_str)
+            else:
+                suffix = ""
+                if label == "Read":  # append line count for reads, suppress content
+                    n = result_str.count("\n")
+                    suffix = f" [dim]— {n} line{'s' if n != 1 else ''}[/dim]"
+                console.print(f"[bold]{icon} {label}:[/bold] {detail}{suffix}")
+            return
+
+    # --- generic fallback ---
+    _print_raw_result(name, result)
+
+
+def _print_raw_result(name: str, result) -> None:
+    """Generic green panel for a tool result (shared fallback)."""
     if isinstance(result, (bytes, bytearray)):
         text = f"<{len(result)} bytes>"
     else:
