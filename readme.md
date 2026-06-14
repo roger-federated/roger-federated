@@ -87,12 +87,12 @@ Roger has the potential to perform any digital task. In other words, there is no
 </details>
 
 <details>
-<summary>Fully autonomous development of a social media app</summary>
+<summary>Develop e.g. a social media app fully autonomously as a coding agent</summary>
 ...
 </details>
 
 <details>
-<summary>End-to-end Steam game development</summary>
+<summary>Use a native agent loop for end-to-end development of e.g. a Steam game</summary>
 ...
 </details>
 
