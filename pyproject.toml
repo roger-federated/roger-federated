@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "roger"
 version = "0.1.0"
-description = "Roger Federated — local agentic RL with federated finetuning"
+description = "Roger Federated — The world's first true agent, built together with the community using federated local reinforcement learning."
 requires-python = ">=3.10"
 dependencies = [
     "torch",
