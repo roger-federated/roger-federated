@@ -52,9 +52,9 @@ ignore them; edit only under `src/`.
   `conda run -n roger python ...`. It has the project installed editable (`pip install -e ".[audio]"`)
   plus pytest, so it covers syntax/import/test checks *and* real CUDA model loads. Bare
   `python`/`python3` hit the Windows Store stub (exit 49).
-- One manual patch lives in that env: lm-format-enforcer 0.11.3 imports `PreTrainedTokenizerBase`
-  from `transformers.tokenization_utils`, which transformers>=5.11 removed — patched to import it
-  from top-level `transformers` (in `.../site-packages/lmformatenforcer/integrations/transformers.py`).
+- No manual env patching needed: lm-format-enforcer 0.11.3 imports `PreTrainedTokenizerBase` from
+  `transformers.tokenization_utils`, which transformers>=5.11 removed — a compat shim in
+  `agency/rollout_utils.py` re-exposes it before the integration import, so any install just works.
 - Default model `google/gemma-4-E2B-it` is **5.12B** params (not 2B); dev box GPU =
   RTX 1000 Ada, 6.44 GB VRAM (bf16 supported).
 - Install/run for end users: `uv tool install . --torch-backend auto` then `roger`; or
