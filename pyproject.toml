@@ -24,7 +24,11 @@ dependencies = [
 audio = ["pydub"]  # AudioSegment support in rollout_utils (guarded import)
 
 [project.scripts]
-roger = "cli:main"
+roger = "roger.apps.cli:main"
 
 [tool.setuptools.packages.find]
-where = ["."]
+where = ["src"]                          # single package `roger` + its subpackages
+
+[tool.setuptools.package-data]
+"roger.tools" = ["command_policy.txt"]   # ship the run_command guardrail policy as data
+"roger.apps"  = ["config.json"]          # ship the baseline config defaults as data
