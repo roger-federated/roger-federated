@@ -21,6 +21,8 @@ from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.styles import Style as PTStyle
 
+from roger.agency.path_utils import state_dir
+
 # ---------------------------------------------------------------------------
 # Shared console (stderr=False keeps stdout clean for potential piping)
 # ---------------------------------------------------------------------------
@@ -322,7 +324,7 @@ def select_root(default: str) -> str:
 
 def make_session() -> PromptSession:
     """Create a prompt_toolkit session with persistent history."""
-    history_path = os.path.join(os.getcwd(), ".roger", "history")
+    history_path = os.path.join(state_dir(), "history")
     os.makedirs(os.path.dirname(history_path), exist_ok=True)
     return PromptSession(
         history=FileHistory(history_path),

@@ -44,61 +44,38 @@ def configure(prompt_backend=None, policy_file: str = "command_policy.txt") -> N
     _policy = None          # force re-read on next run_command
     _jobs.clear()
     _job_seq = 0
-    _ensure_scratch_ignored()
-
-
-def _ensure_scratch_ignored() -> None:
-    """Append .roger/ to .gitignore if cwd is a git repo and it is missing."""
-    # Quick guard: skip when git is absent or cwd is not inside a repo
-    try:
-        r = subprocess.run(
-            ["git", "rev-parse", "--git-dir"],
-            capture_output=True, text=True, timeout=3
-        )
-        if r.returncode != 0:
-            return
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return
-
-    gitignore = ".gitignore"
-    try:
-        existing = open(gitignore, encoding="utf-8").read() if os.path.isfile(gitignore) else ""
-    except OSError:
-        existing = ""
-
-    # .* in gitignore already covers .roger/, so only add the explicit entry if .* is absent
-    if ".roger/" in existing or ".*" in existing:
-        return
-    with open(gitignore, "a", encoding="utf-8") as f:
-        if existing and not existing.endswith("\n"):
-            f.write("\n")
-        f.write(".roger/\n")
-    print("[shell_tools] appended .roger/ to .gitignore")
 
 
 # ---------------------------------------------------------------------------
 # Policy internals
 # ---------------------------------------------------------------------------
 
-def _load_policy(path: str) -> dict[str, list[str]]:
-    """Parse command_policy.txt → {"blocked": [...], "confirm": [...], "evasion": [...]}."""
+def _parse_policy(lines) -> dict[str, list[str]]:
+    """Parse [section] / pattern lines → {"blocked": [...], "confirm": [...], "evasion": [...]}."""
     policy: dict[str, list[str]] = {"blocked": [], "confirm": [], "evasion": []}
-    try:
-        with open(path, encoding="utf-8") as f:
-            section = None
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#"):
-                    continue
-                if line.startswith("[") and line.endswith("]"):
-                    section = line[1:-1]
-                    if section not in policy:
-                        policy[section] = []
-                elif section:
-                    policy[section].append(line)
-    except FileNotFoundError:
-        pass
+    section = None
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            section = line[1:-1]
+            if section not in policy:
+                policy[section] = []
+        elif section:
+            policy[section].append(line)
     return policy
+
+
+def _load_policy(path: str) -> dict[str, list[str]]:
+    """Load the command policy: a cwd override file if present, else the packaged default."""
+    if os.path.isfile(path):                         # project-local override in cwd
+        with open(path, encoding="utf-8") as f:
+            return _parse_policy(f)
+    # Shipped default — resolve as package data so guardrails work after install anywhere
+    from importlib.resources import files
+    text = files("roger.tools").joinpath("command_policy.txt").read_text(encoding="utf-8")
+    return _parse_policy(text.splitlines())
 
 
 def _is_protected(path: str) -> bool:
@@ -190,7 +167,7 @@ Shell idioms for common commands (PowerShell via run_command):
   Calculate:          `[math]::Sqrt(2) * [math]::Pi`   or   `(2 + 3) * 4`
   Time a command:     `Measure-Command { run_command "..." }`
   Delay:              `Start-Sleep -Seconds N`
-  Temp files:         use `.roger\\scratch\\` (gitignored); clean up when done.
+  Temp files:         use `~\\.roger\\scratch\\` (outside the project); clean up when done.
   Edit a file:        edit_file(path, old, new) — consider copying `old` verbatim from Get-Content so it matches
                       exactly; to insert without removing, set `new = old + your_addition`.
 Emit *new* file content with write_file/edit_file, not PowerShell here-strings."""
@@ -206,7 +183,7 @@ Shell idioms for common commands (sh via run_command):
   Calculate:          `awk 'BEGIN{print sqrt(2)*atan2(0,-1)}'`   or   `bc -l <<<'2^10'`
   Time a command:     `time <cmd>`
   Delay:              `sleep N`
-  Temp files:         use `.roger/scratch/` (gitignored); clean up when done.
+  Temp files:         use `~/.roger/scratch/` (outside the project); clean up when done.
   Edit a file:        edit_file(path, old, new) — consider copying `old` verbatim from cat so it matches
                       exactly; to insert without removing, set `new = old + your_addition`.
 Emit *new* file content with write_file/edit_file, not heredocs."""

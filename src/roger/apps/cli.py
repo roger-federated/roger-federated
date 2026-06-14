@@ -13,12 +13,11 @@ from typing import Callable
 
 from rich.console import Console
 
-import config
-import ui
-import model_setup
-from model_setup import fetch_model
-from rollout_utils import rollout
-import recording
+from roger.apps import config, ui
+import roger.serving.model_setup as model_setup
+from roger.serving.model_setup import fetch_model
+from roger.agency.rollout_utils import rollout
+from roger.agency import recording
 
 console = Console(highlight=False)
 
@@ -123,7 +122,7 @@ async def _repl(cfg: dict, root: str) -> None:
             continue
 
         console.print()  # blank line after streamed output
-        recording.save_run(trajectory, text, root)
+        recording.save_run(trajectory, text)
 
 
 # ---------------------------------------------------------------------------

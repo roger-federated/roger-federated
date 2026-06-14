@@ -15,7 +15,8 @@ Usage:
 """
 
 import os, shutil, time, tempfile
-import shell_tools   # shell execution + policy machinery lives here
+from roger.tools import shell_tools   # shell execution + policy machinery lives here
+from roger.agency.path_utils import state_dir
 
 
 # ---------------------------------------------------------------------------
@@ -117,16 +118,16 @@ def edit_file(path: str, old: str, new: str, replace_all: bool = False) -> str:
 
 
 def _backup_file(path: str) -> None:
-    """Copy an existing file to .roger/backups/{path}.{timestamp}.bak and record for revert."""
-    # .roger/ is gitignored agent state — never back up or offer to revert its contents.
-    if os.path.abspath(path).startswith(os.path.abspath(".roger") + os.sep):
+    """Copy an existing file to ~/.roger/backups/{path}.{timestamp}.bak and record for revert."""
+    # ~/.roger/ is Roger's own state (memory, runs, …) — never back up or revert its contents.
+    if os.path.abspath(path).startswith(state_dir() + os.sep):
         return
     ts = time.strftime("%Y%m%d_%H%M%S")
     try:
         rel = os.path.relpath(path)
     except ValueError:
         rel = os.path.basename(path)
-    backup_path = os.path.join(".roger", "backups", f"{rel}.{ts}.bak")
+    backup_path = os.path.join(state_dir(), "backups", f"{rel}.{ts}.bak")
     os.makedirs(os.path.dirname(backup_path), exist_ok=True)
     shutil.copy2(path, backup_path)
     _backups.append((os.path.abspath(path), os.path.abspath(backup_path)))
@@ -228,8 +229,7 @@ def get_standard_tools(prompt_backend=None, policy_file="command_policy.txt") ->
     # Reset per-rollout state
     _backups.clear()
 
-    # Configure shell_tools (sets its own prompt/policy globals, resets _jobs, and
-    # ensures .roger/ is git-ignored)
+    # Configure shell_tools (sets its own prompt/policy globals, resets _jobs)
     shell_tools.configure(prompt_backend=prompt_backend, policy_file=policy_file)
 
     shell = [shell_tools.run_command, shell_tools.stop_command, shell_tools.check_command]

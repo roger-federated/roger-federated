@@ -1,9 +1,16 @@
-"""path_utils.py — @path reference expansion.
+"""path_utils.py — @path reference expansion + global state-dir location.
 
 Public API:
   expand_at_references(text, root) — expand @path tokens; append referenced blocks
+  state_dir() — global per-user Roger state directory (~/.roger)
 """
 import os, re
+
+
+def state_dir() -> str:
+    """Global per-user Roger state dir (~/.roger). Callers create subdirs as needed."""
+    return os.path.expanduser(os.path.join("~", ".roger"))
+
 
 _MAX_BYTES = 262144                     # mirrors retrieval.build_index max_bytes
 # @token preceded by whitespace or start-of-string (skips emails, in-word @)

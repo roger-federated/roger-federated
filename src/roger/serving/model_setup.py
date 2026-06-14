@@ -2,6 +2,8 @@ from transformers import AutoProcessor, AutoModelForImageTextToText, BitsAndByte
 from huggingface_hub import get_safetensors_metadata
 import os, torch
 
+from roger.agency.path_utils import state_dir
+
 VRAM_UTIL     = 0.9   # fraction of total VRAM we aim to fill; the rest absorbs activations/KV
 TRAIN_HEADROOM = 1.7  # inflate the footprint estimate when loading for RL (grads + optimizer)
 
@@ -124,7 +126,7 @@ def fetch_model(model_id="google/gemma-4-E2B-it", for_training: bool = False) ->
     gpu_available = torch.cuda.is_available()
     quant_cfg, dtype = _select_quant(model_id, gpu_available, for_training)
     # device_map="auto" shards across GPUs and offloads overflow to CPU/disk (offload_folder)
-    offload_dir = os.path.join(os.getcwd(), ".roger", "scratch", "offload")
+    offload_dir = os.path.join(state_dir(), "scratch", "offload")
     os.makedirs(offload_dir, exist_ok=True)
     model = AutoModelForImageTextToText.from_pretrained(
         model_id,
