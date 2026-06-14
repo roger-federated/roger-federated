@@ -1,10 +1,10 @@
 """Tests for reward utilities and std_tools reward-related behaviour.
-Run with:  python test_rewards.py
+Run with:  PYTHONPATH=src python -m pytest tests/test_rewards.py
 """
 
 import sys
-import reward_utils
-from reward_utils import auto_signal
+import roger.training.reward_utils as reward_utils
+from roger.training.reward_utils import auto_signal
 
 # ---------------------------------------------------------------------------
 # auto_signal — pure function
@@ -47,14 +47,14 @@ def test_auto_signal_clip():
 # ---------------------------------------------------------------------------
 
 def test_offer_revert_no_backups():
-    import std_tools
+    import roger.tools.std_tools as std_tools
     std_tools._backups.clear()
     prompted, n = std_tools.offer_revert()
     assert prompted == False and n == 0
     print("PASS test_offer_revert_no_backups")
 
 def test_offer_revert_user_says_none():
-    import std_tools
+    import roger.tools.std_tools as std_tools
     std_tools._backups = [("/fake/orig.txt", "/fake/orig.txt.bak")]
     std_tools._prompt_backend = lambda q: "none"
     prompted, n = std_tools.offer_revert()
@@ -66,7 +66,7 @@ def test_offer_revert_user_says_none():
 # ---------------------------------------------------------------------------
 
 def test_maxsteps_checkin_options():
-    import std_tools
+    import roger.tools.std_tools as std_tools
     for inp, expected in [("1", "continue"), ("2", "abort"), ("", "continue")]:
         std_tools._prompt_backend = lambda q, _i=inp: _i
         action, fb = std_tools.maxsteps_checkin()
