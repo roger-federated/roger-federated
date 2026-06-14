@@ -23,7 +23,12 @@ You and the community can now contribute to the next generation of AI. Not just 
 
 ### Installation
 
-After installing, run `roger` from any terminal. First launch walks you through initial setup.
+First:
+
+```bash
+git clone git@github.com:thijs-vanweezel/roger-federated.git
+cd roger-federated
+```
 
 **Requirements:**
 - Compatible GPU strongly recommended for quantization and speed.
@@ -55,7 +60,11 @@ python -m venv .venv && source .venv/bin/activate && pip install -e .
 
 **GPU notes:**
 - `bitsandbytes` (4/8-bit quantization) is installed automatically only where PyPI ships a wheel: x86-64 Linux and Windows. On other CUDA platforms (e.g. aarch64 Jetson/GH200) install a preview wheel manually, e.g. `pip install --force-reinstall https://github.com/bitsandbytes-foundation/bitsandbytes/releases/download/continuous-release_main/bitsandbytes-1.33.7.preview-py3-none-manylinux_2_24_aarch64.whl`.
-- Apple Silicon: GPU (MPS/Metal) is not used yet — only the CUDA path is wired up, so macOS runs unquantized on CPU. PRs adding an MPS check alongside the CUDA check in `model_setup.py` are welcome.
+- Apple Silicon: GPU (MPS/Metal) is not used yet — only the CUDA path is wired up, so macOS runs unquantized on CPU. PRs adding an MPS check alongside the CUDA check in `src/roger/serving/model_setup.py` are welcome.
+
+**Run:**
+
+After installing, run `roger` from any terminal. First launch walks you through initial setup. Settings (including the model selection) can subsequently be adjusted in `~/.roger/config.json`.
 
 ---
 
