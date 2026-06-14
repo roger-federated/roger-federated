@@ -23,26 +23,35 @@ You and the community can now contribute to the next generation of AI. Not just 
 
 ### Installation
 
+After installing, run `roger` from any terminal. First launch walks you through initial setup.
+
 **Requirements:**
-- Python 3.10+
 - Compatible GPU strongly recommended for quantization and speed.
 - First run downloads the selected model (several GB) and writes settings under `~/.roger/config.json`. These can be changed at any time.
 - Linux: `apt install python3-tk` enables the native folder picker; otherwise a text-prompt fallback is used automatically.
 
-**Recommended: [`uv`](https://docs.astral.sh/uv/) (auto-provisions Python, isolates deps):**
+**Recommended:**
+
+Additionally requires [`uv`](https://docs.astral.sh/uv/) to be installed (auto-provisions Python, isolates dependencies).
+
 ```bash
-uv tool install .          # installs `roger` command globally
-# or, without installing:
-uvx --from . roger
+uv tool install . --torch-backend auto   # installs `roger` globally; auto-picks CUDA/CPU torch
+# or run without installing:
+uvx --from . --torch-backend auto roger
 ```
 
 **Alternatives:**
-```bash
-pipx install .                        # isolated, requires Python 3.10+ to be already present
-python -m venv .venv && source .venv/bin/activate && pip install -e .  # classic venv
-```
 
-After install, run `roger` from any terminal. First launch walks you through initial setup.
+These methods additionally require Python 3.10 to be already installed.
+
+Isolated:
+```bash
+pipx install .
+```
+Classic venv:
+```bash
+python -m venv .venv && source .venv/bin/activate && pip install -e .
+```
 
 ---
 
