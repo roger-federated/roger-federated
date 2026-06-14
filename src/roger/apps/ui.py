@@ -281,9 +281,8 @@ def select_root(default: str) -> str:
     to a text prompt if no display is available (headless/SSH).
     """
     console.print(
-        f"\n[bold]Project root[/bold] — the folder the agent will work in.\n"
-        f"  Default: [cyan]{default}[/cyan]\n"
-        f"  Press [bold]Enter[/bold] to accept, or type a path."
+        f"\n[bold]Select the folder from which the agent will be working.[/bold]\n"
+        f"  Currently on: [cyan]{default}[/cyan]. Select a path."
     )
     # Try native folder dialog
     path = None

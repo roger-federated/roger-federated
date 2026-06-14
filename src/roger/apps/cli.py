@@ -22,10 +22,10 @@ from roger.agency import recording
 console = Console(highlight=False)
 
 _BANNER = """[bold cyan]
-  Roger Federated[/bold cyan] [dim]— local agentic RL[/dim]
+  Roger Federated:[/bold cyan] [dim] local agentic RL[/dim]
   Config: [cyan]{cfg_path}[/cyan]  |  Model: [cyan]{model}[/cyan]
+  Change your configuration any time by editing [cyan]{cfg_path}[/cyan].
   Type your task and press Enter. Ctrl-C cancels the current run. Ctrl-D to quit.
-  Tip: use [bold]@path/to/file[/bold] in your prompt to include a file's contents.
 """
 
 # ---------------------------------------------------------------------------
@@ -160,7 +160,7 @@ def main() -> None:
     console.print(
         "[bold yellow]⚠  Before starting a long run:[/bold yellow]\n"
         "   • Plug your laptop into power.\n"
-        "   • Automatic sleep will be suppressed while a run is active.\n"
+        "   • Sleep may be suppressed while a run is active.\n"
     )
 
     # Root selection
