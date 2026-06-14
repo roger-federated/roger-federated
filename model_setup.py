@@ -12,12 +12,13 @@ TRAIN_HEADROOM = 1.7  # inflate the footprint estimate when loading for RL (grad
 
 def _probe_delims(tokenizer, forcing, baseline):
     """Return (open_id, close_id) of the first token `forcing` adds over `baseline` (special-tokens only)."""
-    def _tok(msgs):
-        out = tokenizer.apply_chat_template(msgs, tokenize=True, add_generation_prompt=False)
-        return out["input_ids"] if isinstance(out, dict) else out
     sp   = set(tokenizer.all_special_ids)
-    base = {t for t in _tok(baseline) if t in sp}
-    seq  = [t for t in _tok(forcing)  if t in sp]
+    base = {t for t in tokenizer.apply_chat_template(
+        baseline, tokenize=True, add_generation_prompt=False
+        )["input_ids"] if t in sp}
+    seq  = [t for t in tokenizer.apply_chat_template(
+        forcing, tokenize=True, add_generation_prompt=False
+        )["input_ids"] if t in sp]
     for i, t in enumerate(seq):
         if t not in base:
             return t, (seq[i + 1] if i + 1 < len(seq) else None)
@@ -100,7 +101,7 @@ def _4bit(compute_dtype) -> BitsAndBytesConfig:
         load_in_4bit=True, bnb_4bit_quant_type="nf4", bnb_4bit_use_double_quant=True,
         bnb_4bit_compute_dtype=compute_dtype, llm_int8_enable_fp32_cpu_offload=True)
 
-def _select_quant(model_id, gpu_available, device_count, for_training):
+def _select_quant(model_id, gpu_available, for_training):
     """Pick the highest-precision tier that fits VRAM: (quantization_config | None, dtype).
 
     Estimates the model footprint from its param count and compares each tier
@@ -115,7 +116,7 @@ def _select_quant(model_id, gpu_available, device_count, for_training):
     if P is None:
         return _4bit(compute_dtype), compute_dtype     # safe default when size is unknown
     budget = sum(torch.cuda.get_device_properties(i).total_memory
-                 for i in range(device_count)) * VRAM_UTIL
+                 for i in range(torch.cuda.device_count())) * VRAM_UTIL
     factor = TRAIN_HEADROOM if for_training else 1.0
     if 2.0 * P * factor <= budget:                     # bf16 weights fit → no quant
         return None, compute_dtype
@@ -126,7 +127,7 @@ def _select_quant(model_id, gpu_available, device_count, for_training):
 def fetch_model(model_id="google/gemma-4-E2B-it", for_training: bool = False) -> tuple[AutoModelForImageTextToText, AutoProcessor, tuple[int, int]]:
     # VRAM-aware quantization: choose tier from model size vs available VRAM
     gpu_available = torch.cuda.is_available()
-    quant_cfg, dtype = _select_quant(model_id, gpu_available, torch.cuda.device_count(), for_training)
+    quant_cfg, dtype = _select_quant(model_id, gpu_available, for_training)
     # device_map="auto" shards across GPUs and offloads overflow to CPU/disk (offload_folder)
     offload_dir = os.path.join(os.getcwd(), ".roger", "scratch", "offload")
     os.makedirs(offload_dir, exist_ok=True)
