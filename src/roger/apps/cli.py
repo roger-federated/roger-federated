@@ -26,6 +26,7 @@ _BANNER = """[bold cyan]
   Config: [cyan]{cfg_path}[/cyan]  |  Model: [cyan]{model}[/cyan]
   Change your configuration any time by editing [cyan]{cfg_path}[/cyan].
   Type your task and press Enter. Ctrl-C cancels the current run. Ctrl-D to quit.
+  Tip: Plug in your computer before starting a long-running task and disable sleep in your system settings. 
 """
 
 # ---------------------------------------------------------------------------
@@ -155,13 +156,6 @@ def main() -> None:
 
     # Banner
     console.print(_BANNER.format(cfg_path=config.path(), model=cfg["model_id"]))
-
-    # Plug-in / sleep notice
-    console.print(
-        "[bold yellow]⚠  Before starting a long run:[/bold yellow]\n"
-        "   • Plug your laptop into power.\n"
-        "   • Sleep may be suppressed while a run is active.\n"
-    )
 
     # Root selection
     root = ui.select_root(os.getcwd())
