@@ -286,6 +286,7 @@ def select_root(default: str) -> str:
     )
     # Try native folder dialog
     path = None
+    dialog_shown = False
     try:
         import tkinter as tk
         from tkinter import filedialog
@@ -293,12 +294,13 @@ def select_root(default: str) -> str:
         picked = filedialog.askdirectory(initialdir=default,
                                          title="Select project root")
         root_win.destroy()
-        if picked:
-            path = picked
+        dialog_shown = True
+        path = picked or default  # Cancel returns "" → fall back to the default (cwd)
     except Exception:
         pass  # no display or tkinter missing — fall through to text input
 
-    if path is None:
+    # Text prompt only when no GUI was available; a cancelled dialog already chose the default
+    if path is None and not dialog_shown:
         # Text fallback with tab-completion
         try:
             from prompt_toolkit.completion import PathCompleter
