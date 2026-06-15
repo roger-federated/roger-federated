@@ -15,6 +15,7 @@ Usage:
 """
 
 import os, shutil, time, tempfile
+from ddgs import DDGS                  # keyless DuckDuckGo search + page fetch (web_search/web_fetch)
 from roger.tools import shell_tools   # shell execution + policy machinery lives here
 from roger.agency.path_utils import state_dir
 
@@ -145,13 +146,48 @@ def prompt_user(question: str) -> str:
     return _prompt_backend(question)
 
 
-def finish(message: str = "") -> str:
+def finish(message: str = "") -> str: # TODO: should include a self-evaluation score in [-1, 1]
     """Signal that the task is complete. Optionally provide a final answer or summary.
     Args:
         message: Final answer / summary to show the user. May be empty.
     """
     # The rollout loop detects this call by name and terminates after processing it.
     return message or "(done)"
+
+
+# ---------------------------------------------------------------------------
+# Web (keyless DuckDuckGo — ddgs handles request headers/UA rotation internally)
+# ---------------------------------------------------------------------------
+
+def web_search(query: str, max_results: int = 10) -> str:
+    """Search the web (DuckDuckGo) and return ranked results as title / url / snippet.
+    Args:
+        query: The search query.
+        max_results: Maximum number of results to return.
+    """
+    try:
+        results = DDGS().text(query, max_results=max_results)
+    except Exception as e:   # network/backend errors → string the agent can react to
+        return f"Search error: {e}"
+    if not results:
+        return f"No results for: {query}"
+    return "\n\n".join(
+        f"{r.get('title', '').strip()}\n{r.get('href', '').strip()}\n{r.get('body', '').strip()}"
+        for r in results
+    )
+
+
+def web_fetch(url: str) -> str:
+    """Fetch a web page and return its main content as readable markdown.
+    Args:
+        url: The URL to fetch.
+    """
+    try:
+        result = DDGS().extract(url)   # default fmt=text_markdown → {"url", "content"}
+    except Exception as e:
+        return f"Fetch error: {e}"
+    content = result.get("content") if isinstance(result, dict) else result
+    return content or f"No content extracted from {url}"
 
 
 # ---------------------------------------------------------------------------
@@ -234,7 +270,8 @@ def get_standard_tools(prompt_backend=None, policy_file="command_policy.txt") ->
 
     shell = [shell_tools.run_command, shell_tools.stop_command, shell_tools.check_command]
     file  = [write_file, edit_file]
+    web   = [web_search, web_fetch]
     misc  = [prompt_user, finish]
-    tools = shell + file + misc
+    tools = shell + file + web + misc
     handlers = {fn.__name__: fn for fn in tools}
     return tools, handlers

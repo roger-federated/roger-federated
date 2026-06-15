@@ -113,6 +113,7 @@ This software is still in development. Below is a non-exhaustive list of to-do i
 - [x] Add @path ability.
 - [x] Integrate into a CLI application.
 - [x] Auto read/write memory and create agent folder for temp files.
+- [x] Integrate web search and fetch by default.
 - [x] *Congrats, you now have a semi-basic agent.*
 - [x] Implement what the finetuning framework considers as rewards.
 - [ ] Implement automatic LoRA RL execution.

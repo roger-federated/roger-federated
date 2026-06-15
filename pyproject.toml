@@ -17,6 +17,7 @@ dependencies = [
     "pillow",
     "numpy",
     "mcp",
+    "ddgs",          # keyless DuckDuckGo search + page fetch backing the web_search/web_fetch tools
     "rich",
     "prompt_toolkit",
 ]
