@@ -73,9 +73,7 @@ def find_gen_prompt(tokenizer) -> list[int]:
         [{"role": "user", "content": "_"}], tokenize=True, add_generation_prompt=False)
     full = tokenizer.apply_chat_template(
         [{"role": "user", "content": "_"}], tokenize=True, add_generation_prompt=True)
-    base = base["input_ids"] if isinstance(base, dict) else base
-    full = full["input_ids"] if isinstance(full, dict) else full
-    return full[len(base):]
+    return full["input_ids"][len(base["input_ids"]):]
 
 def find_tool_res_id(tokenizer) -> int:
     """Last token of a dummy tool-call assistant turn — the tool_response boundary token."""
@@ -83,8 +81,7 @@ def find_tool_res_id(tokenizer) -> int:
         [{"role": "assistant", "tool_calls": [
             {"id": "0", "type": "function", "function": {"name": "_", "arguments": {}}}]}],
         tokenize=True, add_generation_prompt=False)
-    ids = out["input_ids"] if isinstance(out, dict) else out
-    return ids[-1]
+    return out["input_ids"][-1]
 
 def _param_count(model_id: str) -> int | None:
     """Total parameter count from HF safetensors metadata (no weight download). None on failure."""
