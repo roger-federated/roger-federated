@@ -27,6 +27,7 @@ _BANNER = """[bold cyan]
   Change your configuration any time by editing [cyan]{cfg_path}[/cyan].
   Type your task and press Enter. Ctrl-C cancels the current run. Ctrl-D to quit.
   Tip: Plug in your computer before starting a long-running task and disable sleep in your system settings. 
+  Tip: It's best to start a new session for each task, to avoid polluting the model's KV-cache.
 """
 
 # ---------------------------------------------------------------------------
@@ -83,7 +84,7 @@ async def _repl(cfg: dict, root: str) -> None:
     pt_backend = ui.make_prompt_backend(session)
 
     while True:
-        text = ui.read_prompt(session)
+        text = await ui.read_prompt(session)
         if text is None:         # Ctrl-D
             console.print("\n[dim]Goodbye.[/dim]")
             break

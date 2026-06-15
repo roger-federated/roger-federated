@@ -8,7 +8,7 @@ Public API:
   select_root(default)             — interactive folder selection (tkinter or text)
   read_prompt(session)             — multi-line prompt_toolkit input
 """
-import os, sys, difflib, re
+import os, sys, difflib, re, threading
 from typing import Callable
 
 from rich.console import Console
@@ -261,12 +261,23 @@ def _print_raw_result(name: str, result) -> None:
 # ---------------------------------------------------------------------------
 
 def make_prompt_backend(session: PromptSession) -> Callable[[str], str]:
-    """Return an input()-compatible callable backed by prompt_toolkit."""
+    """Return an input()-compatible callable backed by prompt_toolkit.
+
+    Tool handlers run on the asyncio loop thread, where prompt_toolkit's sync .prompt()
+    would call asyncio.run() and fail on the running loop. Run it in a worker thread that
+    has no running loop instead, and block until it returns. The main prompt app is never
+    running while a tool prompt fires, so reusing `session` across the thread is safe.
+    """
     def _ask(question: str) -> str:
-        try:
-            return session.prompt(HTML(f"<ansiyellow>{question} </ansiyellow>"))
-        except (EOFError, KeyboardInterrupt):
-            return "[user interrupted; no answer provided]"
+        box: dict = {}
+        def worker():
+            try:
+                box["v"] = session.prompt(HTML(f"<ansiyellow>{question} </ansiyellow>"))
+            except (EOFError, KeyboardInterrupt):
+                box["v"] = "[user interrupted; no answer provided]"
+        t = threading.Thread(target=worker)
+        t.start(); t.join()
+        return box["v"]
     return _ask
 
 
@@ -282,7 +293,7 @@ def select_root(default: str) -> str:
     """
     console.print(
         f"\n[bold]Select the folder from which the agent will be working.[/bold]\n"
-        f"  Currently on: [cyan]{default}[/cyan]. Select a path."
+        f"Currently on: [cyan]{default}[/cyan]"
     )
     # Try native folder dialog
     path = None
@@ -334,10 +345,15 @@ def make_session() -> PromptSession:
     )
 
 
-def read_prompt(session: PromptSession) -> str | None:
-    """Read a user prompt. Returns None on EOF (Ctrl-D → quit)."""
+async def read_prompt(session: PromptSession) -> str | None:
+    """Read a user prompt. Returns None on EOF (Ctrl-D → quit).
+
+    Async because the REPL runs inside asyncio.run(_repl): prompt_toolkit's sync
+    .prompt() would call asyncio.run() again and fail on the running loop. prompt_async
+    is the supported in-loop entry point.
+    """
     try:
-        text = session.prompt(HTML("<ansicyan><b>❯ </b></ansicyan>")).strip()
+        text = (await session.prompt_async(HTML("<ansicyan><b>❯ </b></ansicyan>"))).strip()
         return text if text else None
     except EOFError:
         return None   # Ctrl-D
