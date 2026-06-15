@@ -157,7 +157,8 @@ def fetch_model(model_id="google/gemma-4-E2B-it", for_training: bool = False) ->
     quant_cfg, dtype, fits = _select_quant(model_id, gpu_available, for_training)
     n_gpu = torch.cuda.device_count() if gpu_available else 0
     # device_map="auto" is unreliable; thus if model fits, we manually pin to gpu
-    kwargs = dict(quantization_config=quant_cfg, dtype=dtype, low_cpu_mem_usage=True)
+    kwargs = dict(quantization_config=quant_cfg, dtype=dtype, low_cpu_mem_usage=True,
+                  attn_implementation="sdpa")
     if not gpu_available: # CPU
         kwargs["device_map"] = "auto"
     elif n_gpu == 1 and fits: # Fits on one GPU
@@ -175,3 +176,15 @@ def fetch_model(model_id="google/gemma-4-E2B-it", for_training: bool = False) ->
     model = AutoModelForImageTextToText.from_pretrained(model_id, **kwargs)
     processor = AutoProcessor.from_pretrained(model_id)
     return model, processor
+
+
+def load_drafter(draft_id: str, target_tokenizer):
+    """Load a speculative-decoding draft model, or None if it doesn't share the target's vocab.
+
+    Assisted generation needs a shared token<->id map; we compare vocabs by loading only the draft
+    tokenizer (no model download), so an incompatible drafter is rejected before any heavy load.
+    """
+    from transformers import AutoTokenizer
+    if AutoTokenizer.from_pretrained(draft_id).get_vocab() != target_tokenizer.get_vocab():
+        return None
+    return fetch_model(draft_id)[0]

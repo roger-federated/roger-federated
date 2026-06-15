@@ -73,7 +73,19 @@ async def _repl(cfg: dict, root: str) -> None:
     # Spinner while loading
     with console.status("[bold]Loading model…[/bold]", spinner="dots"):
         model, processor = fetch_model(cfg["model_id"])
+        # Speculative decoding: a user-set draft_model (must share the target's tokenizer) is used
+        # as the assistant model; otherwise fall back to model-free n-gram prompt-lookup.
+        draft_id = cfg.get("draft_model")
+        drafter = model_setup.load_drafter(draft_id, processor.tokenizer) if draft_id else None
+        draft_kwargs = ({"assistant_model": drafter} if drafter
+                        else {"prompt_lookup_num_tokens": 10})
     tokenizer    = processor.tokenizer
+    if not draft_id:
+        console.print("[yellow]No draft_model set; using n-gram prompt-lookup. Pass --draft-model "
+                      "(saved to config) for faster speculative decoding.[/yellow]")
+    elif drafter is None:
+        console.print(f"[yellow]draft_model '{draft_id}' has a different tokenizer than the target; "
+                      "ignoring it and using n-gram prompt-lookup.[/yellow]")
     # Decode delimiter token-ids back to strings for the text renderer; derive think-channel once
     tool_delims  = tuple(tokenizer.decode([t]) for t in model_setup.find_tool_call_tokens(tokenizer))
     think_delims = model_setup.find_think_delims(tokenizer)
@@ -112,6 +124,7 @@ async def _repl(cfg: dict, root: str) -> None:
             rag_k          = cfg["rag_k"],
             enable_skills  = cfg["enable_skills"],
             enable_memory  = cfg["enable_memory"],
+            draft_kwargs    = draft_kwargs,
         ))
 
         try:
@@ -136,6 +149,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(prog="roger",
                                      description="Roger Federated — local agentic RL")
     parser.add_argument("--model",          help="HuggingFace model ID")
+    parser.add_argument("--draft-model",    help="HF model ID for the speculative-decoding draft model")
     parser.add_argument("--max-steps",      type=int,  help="Max tool-call turns per run")
     parser.add_argument("--max-new-tokens", type=int,  help="Max generated tokens per turn")
     parser.add_argument("--no-rag",         action="store_true", help="Disable RAG")
@@ -146,6 +160,11 @@ def main() -> None:
 
     # Load config; apply flag overrides
     cfg = config.load()
+    # --draft-model is persisted (unlike the other per-run flags): setting it once carries to
+    # future sessions. Saved before the transient overrides so only draft_model is written.
+    if args.draft_model:
+        cfg["draft_model"] = args.draft_model
+        config.save(cfg)
     first_run = not os.path.exists(config.path())  # path existed before load() — inaccurate here;
     # (first-run detection: load() creates the file, so check size afterwards instead)
     if args.model:          cfg["model_id"]      = args.model
