@@ -43,23 +43,34 @@ def test_auto_signal_clip():
     print("PASS test_auto_signal_clip")
 
 # ---------------------------------------------------------------------------
-# std_tools: offer_revert return type
+# std_tools: pending_backups / apply_revert
 # ---------------------------------------------------------------------------
 
-def test_offer_revert_no_backups():
+def test_apply_revert_no_backups():
     import roger.tools.std_tools as std_tools
     std_tools._backups.clear()
-    prompted, n = std_tools.offer_revert()
-    assert prompted == False and n == 0
-    print("PASS test_offer_revert_no_backups")
+    assert std_tools.pending_backups() == []
+    assert std_tools.apply_revert("all") == 0
+    print("PASS test_apply_revert_no_backups")
 
-def test_offer_revert_user_says_none():
+def test_apply_revert_none_clears():
     import roger.tools.std_tools as std_tools
     std_tools._backups = [("/fake/orig.txt", "/fake/orig.txt.bak")]
-    std_tools._prompt_backend = lambda q: "none"
-    prompted, n = std_tools.offer_revert()
-    assert prompted == True and n == 0
-    print("PASS test_offer_revert_user_says_none")
+    assert len(std_tools.pending_backups()) == 1
+    assert std_tools.apply_revert("none") == 0
+    assert std_tools.pending_backups() == []      # decision is final → backups cleared
+    print("PASS test_apply_revert_none_clears")
+
+def test_apply_revert_all_restores():
+    import os, tempfile
+    import roger.tools.std_tools as std_tools
+    d = tempfile.mkdtemp()
+    orig, bak = os.path.join(d, "f.txt"), os.path.join(d, "f.bak")
+    open(orig, "w").write("NEW"); open(bak, "w").write("OLD")
+    std_tools._backups = [(orig, bak)]
+    assert std_tools.apply_revert("all") == 1
+    assert open(orig).read() == "OLD" and std_tools.pending_backups() == []
+    print("PASS test_apply_revert_all_restores")
 
 # ---------------------------------------------------------------------------
 # std_tools: maxsteps_checkin
@@ -88,8 +99,9 @@ if __name__ == "__main__":
         test_auto_signal_error_str,
         test_auto_signal_cmd_reject,
         test_auto_signal_clip,
-        test_offer_revert_no_backups,
-        test_offer_revert_user_says_none,
+        test_apply_revert_no_backups,
+        test_apply_revert_none_clears,
+        test_apply_revert_all_restores,
         test_maxsteps_checkin_options,
     ]
     failed = 0

@@ -38,6 +38,9 @@ _policy_file: str = "command_policy.txt"   # kept here so write_file/_is_protect
 # Write backups — (original_path, backup_path) for end-of-rollout revert
 _backups: list[tuple[str, str]] = []
 
+# Self-eval grade [-1,1] from the most recent finish(); the rollout reads it via finish_score().
+_finish_score: float = 0.0
+
 
 # ---------------------------------------------------------------------------
 # File tools (emitters only — reading/searching goes through run_command)
@@ -146,13 +149,28 @@ def prompt_user(question: str) -> str:
     return _prompt_backend(question)
 
 
-def finish(message: str = "") -> str: # TODO: should include a self-evaluation score in [-1, 1]
-    """Signal that the task is complete. Optionally provide a final answer or summary.
+def finish(score: float = 0.0, message: str = "") -> str:
+    """Signal that the current task is complete, with an honest self-evaluation of how well it went.
     Args:
+        score: Your self-evaluation in [-1, 1] of how well the task was accomplished
+               (1 = fully succeeded, 0 = unclear / partial, -1 = failed). This is the training
+               reward for the task, so grade truthfully.
         message: Final answer / summary to show the user. May be empty.
     """
-    # The rollout loop detects this call by name and terminates after processing it.
+    # The rollout loop detects this call by name, reads the grade via finish_score(), then awaits
+    # the user's next turn. Coerce defensively: the decoding constraint does not type-check
+    # arguments, so the model may emit a string / out-of-range value.
+    global _finish_score
+    try:
+        _finish_score = max(-1.0, min(1.0, float(score)))
+    except (TypeError, ValueError):
+        _finish_score = 0.0
     return message or "(done)"
+
+
+def finish_score() -> float:
+    """Return the self-eval grade recorded by the most recent finish() call."""
+    return _finish_score
 
 
 # ---------------------------------------------------------------------------
@@ -194,26 +212,25 @@ def web_fetch(url: str) -> str:
 # End-of-rollout revert
 # ---------------------------------------------------------------------------
 
-def offer_revert(prompt_fn=None) -> tuple[bool, int]:
-    """Prompt the user to revert files overwritten during the rollout.
-    Returns (was_prompted, n_reverted): was_prompted is False when no backups existed."""
-    if not _backups:
-        return False, 0
-    fn = prompt_fn or _prompt_backend
-    listing = "\n".join(f"  {i+1}. {orig}" for i, (orig, _bak) in enumerate(_backups))
-    answer = fn(f"The following files were overwritten and backed up:\n{listing}\nRevert? [all / 1,2,... / none]")
-    answer = answer.strip().lower()
+def pending_backups() -> list[tuple[str, str]]:
+    """Current (original_path, backup_path) pairs awaiting a revert decision; empty when nothing changed."""
+    return list(_backups)
 
-    if answer == "none" or not answer:
-        _backups.clear(); return True, 0
+
+def apply_revert(answer: str) -> int:
+    """Revert backed-up files per `answer` ('all' / '1,2,...' / 'none') and clear the backup list.
+    Returns the number of files reverted. Always clears _backups — the decision is final, so the
+    caller can offer revert non-blockingly (an unparseable / 'none' answer just discards backups)."""
+    answer = (answer or "").strip().lower()
+    if answer in ("none", ""):
+        _backups.clear(); return 0
     if answer == "all":
         indices = list(range(len(_backups)))
     else:
         try:
             indices = [int(x.strip()) - 1 for x in answer.split(",")]
         except ValueError:
-            _backups.clear(); return True, 0
-
+            _backups.clear(); return 0
     n_reverted = 0
     for idx in indices:
         if 0 <= idx < len(_backups):
@@ -221,7 +238,7 @@ def offer_revert(prompt_fn=None) -> tuple[bool, int]:
             try: shutil.copy2(bak, orig); n_reverted += 1
             except OSError: pass
     _backups.clear()
-    return True, n_reverted
+    return n_reverted
 
 
 # ---------------------------------------------------------------------------
@@ -257,13 +274,14 @@ def get_standard_tools(prompt_backend=None, policy_file="command_policy.txt") ->
         prompt_backend: Optional callable(question: str) -> str replacing input().
         policy_file: Path to the command policy file for run_command.
     """
-    global _prompt_backend, _policy_file
+    global _prompt_backend, _policy_file, _finish_score
     if prompt_backend is not None:
         _prompt_backend = prompt_backend
     _policy_file = policy_file
 
     # Reset per-rollout state
     _backups.clear()
+    _finish_score = 0.0
 
     # Configure shell_tools (sets its own prompt/policy globals, resets _jobs)
     shell_tools.configure(prompt_backend=prompt_backend, policy_file=policy_file)

@@ -13,10 +13,11 @@
 - Working semi-basic agent: rollout loop, tool use, reasoning, MCP connections, standard
   tools, deferred tool loading, auto-triggered RAG, skills + instruction files, `@path`
   references, persistent memory, and a CLI app (`roger`).
-- The reward interface is in place (`training/reward_utils.py`). NOT yet built: the LoRA RL
-  trainer, conversation resume after `finish`, federated hives, docker sandboxing, and
-  account/hive/scheduling setup. The authoritative TODO list is in `readme.md`
-  ("Progress & contributing").
+- The reward interface is in place (`training/reward_utils.py`). Conversation resume after `finish`
+  is built: one rollout owns the session, awaiting each user turn and injecting it onto the live
+  context so the KV-cache is reused across tasks. NOT yet built: the LoRA RL trainer, federated
+  hives, docker sandboxing, and account/hive/scheduling setup. The authoritative TODO list is in
+  `readme.md` ("Progress & contributing").
 
 ## Confirmed design decisions
 - RL algorithm = **REINFORCE++**, not GRPO. Flat episode return broadcast over all generated
@@ -26,7 +27,8 @@
   Injected `state_embeds` have no token IDs, so their log-probs can't be recomputed during
   the policy-gradient update — text is the model's native, RL-safe interface.
 - Rewards = implicit user signals + verifiable signals via `auto_signal` (nonzero exit codes,
-  error strings, rejections). No LLM-as-judge yet.
+  error strings, rejections), plus the model's own `finish(score=...)` self-evaluation in [-1,1]
+  as each task's terminal reward (broadcast over that task's steps). No external LLM-as-judge.
 - Constrained decoding via lm-format-enforcer with a name-enum schema (prevents misspelled
   tool names). Raw *pre-constraint* logits plus per-token allowed-set masks are recorded so
   the trainer can recompute constrained log-probs.

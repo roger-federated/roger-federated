@@ -17,7 +17,6 @@ from roger.apps import config, ui
 import roger.serving.model_setup as model_setup
 from roger.serving.model_setup import fetch_model
 from roger.agency.rollout_utils import rollout
-from roger.agency import recording
 
 console = Console(highlight=False)
 
@@ -25,9 +24,9 @@ _BANNER = """[bold cyan]
   Roger Federated:[/bold cyan] [dim] local agentic RL[/dim]
   Config: [cyan]{cfg_path}[/cyan]  |  Model: [cyan]{model}[/cyan]
   Change your configuration any time by editing [cyan]{cfg_path}[/cyan].
-  Type your task and press Enter. Ctrl-C cancels the current run. Ctrl-D to quit.
-  Tip: Plug in your computer before starting a long-running task and disable sleep in your system settings. 
-  Tip: It's best to start a new session for each task, to avoid polluting the model's KV-cache.
+  Type your task and press Enter. Ctrl-D to quit the session.
+  Tip: Plug in your computer before starting a long-running task and disable sleep in your system settings.
+  Tip: Follow-up tasks reuse the model's context (KV-cache), so keep related tasks in one session.
 """
 
 # ---------------------------------------------------------------------------
@@ -93,52 +92,48 @@ async def _repl(cfg: dict, root: str) -> None:
     console.print(f"[bold {style}]{msg}[/bold {style}]\n")
 
     # Prompt toolkit session (history + styled input)
-    session   = ui.make_session()
+    session    = ui.make_session()
     pt_backend = ui.make_prompt_backend(session)
+    renderer   = ui.StreamRenderer(verbose=cfg["verbose"],
+                                   think_delims=think_delims, tool_delims=tool_delims)
 
+    async def read_turn(preamble: str = "") -> str | None:
+        """Next user turn for the rollout. Surfaces any pending revert notice first; None on Ctrl-D."""
+        if preamble:
+            console.print()
+            console.print(preamble, style="dim", markup=False)  # paths may contain []; don't parse markup
+        return await ui.read_prompt(session)
+
+    # First task: read until a non-empty prompt (or quit on Ctrl-D)
     while True:
-        text = await ui.read_prompt(session)
+        text = await read_turn()
         if text is None:         # Ctrl-D
             console.print("\n[dim]Goodbye.[/dim]")
+            return
+        if text:
             break
-        if not text:             # empty or Ctrl-C at prompt
-            continue
 
-        renderer = ui.StreamRenderer(verbose=cfg["verbose"],
-                                     think_delims=think_delims,
-                                     tool_delims=tool_delims)
-        console.print()  # blank line before output
-
-        # Wrap rollout in a Task so Ctrl-C aborts only this turn
-        loop = asyncio.get_event_loop()
-        task = loop.create_task(rollout(
-            model, tokenizer, text,
-            max_steps      = cfg["max_steps"],
-            max_new_tokens = cfg["max_new_tokens"],
-            on_token       = renderer.feed,
-            on_tool_call   = ui.render_tool_call,
-            on_tool_result = ui.render_tool_result,
-            prompt_backend = pt_backend,
-            root           = root,
-            enable_rag     = cfg["enable_rag"],
-            rag_k          = cfg["rag_k"],
-            enable_skills  = cfg["enable_skills"],
-            enable_memory  = cfg["enable_memory"],
-            draft_kwargs    = draft_kwargs,
-        ))
-
-        try:
-            trajectory = await task
-        except asyncio.CancelledError:
-            console.print("\n[yellow]Run cancelled.[/yellow]\n")
-            continue
-        except KeyboardInterrupt:
-            task.cancel()
-            console.print("\n[yellow]Run cancelled.[/yellow]\n")
-            continue
-
-        console.print()  # blank line after streamed output
-        recording.save_run(trajectory, text)
+    console.print()  # blank line before output
+    # A single rollout owns the whole session: it awaits each subsequent user turn itself (via
+    # read_turn) and injects it onto the live context, so the KV-cache is reused across tasks rather
+    # than rebuilt per message. It returns only when the user quits (Ctrl-D).
+    await rollout(
+        model, tokenizer, text,
+        max_steps      = cfg["max_steps"],
+        max_new_tokens = cfg["max_new_tokens"],
+        on_token       = renderer.feed,
+        on_tool_call   = ui.render_tool_call,
+        on_tool_result = ui.render_tool_result,
+        prompt_backend = pt_backend,
+        read_turn      = read_turn,
+        root           = root,
+        enable_rag     = cfg["enable_rag"],
+        rag_k          = cfg["rag_k"],
+        enable_skills  = cfg["enable_skills"],
+        enable_memory  = cfg["enable_memory"],
+        draft_kwargs   = draft_kwargs,
+    )
+    console.print("\n[dim]Goodbye.[/dim]")
 
 
 # ---------------------------------------------------------------------------

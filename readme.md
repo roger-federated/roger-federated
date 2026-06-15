@@ -117,7 +117,7 @@ This software is still in development. Below is a non-exhaustive list of to-do i
 - [x] *Congrats, you now have a semi-basic agent.*
 - [x] Implement what the finetuning framework considers as rewards.
 - [ ] Implement automatic LoRA RL execution.
-- [ ] Allow resuming conversation after finish.
+- [x] Allow resuming conversation after finish.
 - [ ] Implement federated learning-style hives.
 - [ ] Sandboxed docker environments.
 - [ ] Implement account setup, hives selection, finetuning scheduling, gradient sharing setup, as well as (background/execution) autonomy setup.

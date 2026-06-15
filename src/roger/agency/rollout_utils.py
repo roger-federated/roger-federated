@@ -11,9 +11,10 @@ if not hasattr(_tu, "PreTrainedTokenizerBase"):
     _tu.PreTrainedTokenizerBase = transformers.PreTrainedTokenizerBase
 from lmformatenforcer.integrations.transformers import build_transformers_prefix_allowed_tokens_fn
 from collections.abc import Callable
-from roger.tools.std_tools import get_standard_tools, prompt_user, offer_revert, maxsteps_checkin
+from roger.tools.std_tools import get_standard_tools, finish_score, pending_backups, apply_revert, maxsteps_checkin
 from roger.tools.shell_tools import drain_finished_jobs, pending_jobs, terminate_jobs, shell_idioms
 from roger.serving.model_setup import find_gen_prompt, find_tool_res_id, find_tool_call_tokens
+from roger.agency import recording
 
 def _make_tool_loader(tools):
     """Build a terse catalog string + load_tools closure for deferred schema loading.
@@ -181,6 +182,65 @@ def _parse_result(result):
     return [{"type": "text", "text": str(result)}]
 
 
+def _result_to_ids(call_results, tokenizer, tool_res_id, device) -> torch.Tensor:
+    "Tokenize N (name, result) tool results → token IDs from the <|tool_response> boundary."
+    dummy_asst = [{"role": "assistant", "tool_calls": [
+        {"id": str(k), "type": "function", "function": {"name": name, "arguments": {}}}
+        for k, (name, _) in enumerate(call_results)]}]
+    tool_msgs = [{"role": "tool", "tool_call_id": str(k), "content": _parse_result(res)}
+                 for k, (_, res) in enumerate(call_results)]
+    ids = tokenizer.apply_chat_template(
+        dummy_asst + tool_msgs, tokenize=True, add_generation_prompt=False)["input_ids"]
+    return torch.tensor([ids[ids.index(tool_res_id):]], device=device, dtype=torch.long)
+
+
+def _bg_msgs(tokenizer, tool_res_id, device):
+    """Finished background jobs as tool-result token deltas (empty list if none)."""
+    finished = drain_finished_jobs()
+    if not finished:
+        return []
+    parts = [_result_to_ids([("run_command", f"[background] {jid} finished: {out}")],
+                           tokenizer, tool_res_id, device) for jid, out in finished]
+    return torch.cat(parts, dim=1)
+
+
+def _user_turn_delta(tokenizer, asst_msg, text, device) -> torch.Tensor:
+    """Clean user-turn token delta. Suffix-diff (asst_msg vs asst_msg+[user]) avoids the stray
+    <|tool_response> that slicing on tool_res_id would wrongly inject before a user turn."""
+    base = tokenizer.apply_chat_template(asst_msg, tokenize=True, add_generation_prompt=False)["input_ids"]
+    full = tokenizer.apply_chat_template(
+        asst_msg + [{"role": "user", "content": text}], tokenize=True, add_generation_prompt=False)["input_ids"]
+    return torch.tensor([full[len(base):]], device=device, dtype=torch.long)
+
+
+async def _await_user_turn(read_turn, trajectory, seg_start) -> str | None:
+    """Next user turn (None on Ctrl-D). Non-obstructing revert: list changed files; the user types
+    'revert'/'revert 1,3' (penalised -n*W_REVERT over trajectory[seg_start:]) or just their next task."""
+    backups = pending_backups()
+    preamble = ""
+    if backups:
+        listing  = "\n".join(f"  {k+1}. {orig}" for k, (orig, _b) in enumerate(backups))
+        preamble = ("Files changed this task:\n" + listing +
+                    "\nType 'revert' (or 'revert 1,3') to undo, or just enter your next task.")
+    while True:
+        nxt = await read_turn(preamble)
+        preamble = ""                       # show the revert notice only once
+        if nxt is None:                     # Ctrl-D → end session
+            return None
+        nxt = nxt.strip()
+        if not nxt:                         # empty line → re-prompt
+            continue
+        if backups and nxt.lower().startswith("revert"):
+            n = apply_revert(nxt[len("revert"):].strip() or "all")
+            for entry in trajectory[seg_start:]:
+                entry["reward"] -= n * reward_utils.W_REVERT
+            backups = []
+            continue
+        if backups:                         # moved on without reverting → drop backups
+            apply_revert("none")
+        return nxt
+
+
 async def rollout(model: transformers.modeling_utils.PreTrainedModel,
                   tokenizer: transformers.PreTrainedTokenizer,
                   text: str,
@@ -191,6 +251,7 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
                   on_tool_call: Callable = None,   # (name, args) → None; fired before each call
                   on_tool_result: Callable = None, # (name, result, args) → None; fired after
                   prompt_backend: Callable = None, # replaces input() for all user prompts
+                  read_turn: Callable = None,      # async (preamble="") -> next user turn | None (Ctrl-D)
                   root: str = None,                # project root; defaults to os.getcwd()
                   enable_rag: bool = True, rag_k: int = 3,
                   rag_root: str = None,
@@ -213,6 +274,9 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
     gen_prompt = torch.tensor([_gp], device=model.device, dtype=torch.long)
 
     trajectory = []
+    first_prompt = text          # session-origin prompt, used as the saved transcript header
+    seg_start = 0                # index into trajectory where the current task's steps begin
+    run_dir = None               # set on first finish; reused so the session checkpoints one dir
 
     # Deferred tool loading: when >15 tools, keep only their names in context; full schemas
     # fetched on demand via load_tools(names=[...]).
@@ -257,10 +321,11 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
     _shell = "PowerShell" if os.name == "nt" else "/bin/sh"
     sys_content = (
         f"Environment: cwd={os.getcwd()}, platform={sys.platform}, shell={_shell}\n"
-        "You are an agentic assistant called 'Roger Federated'. Given a task, use the provided tools to accomplish it.\n"
+        "You are an agentic assistant named 'Roger Federated'. Given a task, use the provided tools to accomplish it.\n"
         "You may issue multiple tool calls in one turn by emitting them back-to-back in JSON. "
         "They will be executed sequentially, unless `background=True. "
-        "Call finish() when the task is complete, or simply stop emitting calls.\n\n"
+        "Call finish(...) when the task is complete, grading your own work with "
+        "an honest self-evaluation score in [-1, 1]; the user will then give you their next turn.\n\n"
         + shell_idioms()
     )
     # Project instructions: AGENTS.md or CLAUDE.md from cwd (first-found-wins)
@@ -303,28 +368,6 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
         enable_thinking=True, tools=tools
     ).to(model.device)
     input_ids = inputs["input_ids"]
-
-    def result_to_ids(call_results: list[tuple[str, any]]) -> torch.Tensor:
-        "Tokenize N (name, result) tool results → token IDs starting from the delta boundary."
-        # N-call assistant message so the template renders tool responses in the right format
-        dummy_asst = [{"role": "assistant", "tool_calls": [
-            {"id": str(k), "type": "function", "function": {"name": name, "arguments": {}}}
-            for k, (name, _) in enumerate(call_results)
-        ]}]
-        tool_msgs = [{"role": "tool", "tool_call_id": str(k), "content": _parse_result(res)}
-                     for k, (_, res) in enumerate(call_results)]
-        ids = tokenizer.apply_chat_template(
-            dummy_asst + tool_msgs, tokenize=True, add_generation_prompt=False)["input_ids"]
-        return torch.tensor([ids[ids.index(tool_res_id):]], device=model.device, dtype=torch.long)
-
-    def bg_msgs():
-        """Inject finished background jobs as tool result messages."""
-        finished = drain_finished_jobs()
-        if not finished:
-            return []
-        parts = [result_to_ids([("run_command", f"[background] {jid} finished: {out}")])
-                 for jid, out in finished]
-        return torch.cat(parts, dim=1)
 
     while True:
         # Prepend generation prompt once per turn; every delta is prompt-free
@@ -389,22 +432,34 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
             "reward": step_reward,
         })
 
+        # finish checkpoints this task: broadcast its self-eval grade over the task's steps
+        # (since the last user turn), then save the running episode.
+        if any(name == "finish" for name, _ in results):
+            grade = finish_score()
+            for entry in trajectory[seg_start:]:
+                entry["reward"] += grade
+            run_dir = recording.save_run(trajectory, first_prompt, run_dir)
+        # Mutually exclusive: bg-wait (another model turn) | task done (await user) | tool results.
         if not results and (pending := pending_jobs()):
-            # No tool call: wait for any pending background job, then grant another turn
             await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
-            bg = bg_msgs()
+            bg = _bg_msgs(tokenizer, tool_res_id, model.device)
             input_ids = torch.cat([gen_ids, bg], dim=1) if isinstance(bg, torch.Tensor) else gen_ids
         elif not results or any(name == "finish" for name, _ in results):
-            # Task done. Enter memory turn or break
-            if enable_memory and not saving_mem:
-                saving_mem = True
-                input_ids = gen_ids
-                continue
-            break
+            next_text = await _await_user_turn(read_turn, trajectory, seg_start) if read_turn else None
+            if next_text is None:                 # Ctrl-D → one memory turn (if any), then end
+                if enable_memory and not saving_mem:
+                    saving_mem = True
+                    input_ids = gen_ids
+                    continue
+                break
+            # Inject the user's turn as a prompt-free delta, retaining the KV-cache across tasks.
+            input_ids = torch.cat([gen_ids, _user_turn_delta(tokenizer, asst_msg, next_text, model.device)], dim=1)
+            seg_start = len(trajectory)           # next finish grades only this fresh segment
+            i = 0                                 # fresh max-steps budget per task
+            continue
         else:
-            # Append tool results and any finished bg jobs
-            tool_ids = result_to_ids(results)
-            bg = bg_msgs()
+            tool_ids = _result_to_ids(results, tokenizer, tool_res_id, model.device)
+            bg = _bg_msgs(tokenizer, tool_res_id, model.device)
             parts = [gen_ids, tool_ids] + ([bg] if isinstance(bg, torch.Tensor) else [])
             input_ids = torch.cat(parts, dim=1)
 
@@ -418,26 +473,11 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
             max_steps += max_steps
             if action == "feedback":
                 trajectory[-1]["reward"] -= reward_utils.W_FEEDBACK
-                fb_ids = tokenizer.apply_chat_template(
-                    asst_msg + [{"role": "user", "content": feedback_text}],
-                    tokenize=True, add_generation_prompt=False
-                )["input_ids"]
-                fb_delta = torch.tensor(
-                    [fb_ids[fb_ids.index(tool_res_id):]], device=model.device, dtype=torch.long)
+                fb_delta = _user_turn_delta(tokenizer, asst_msg, feedback_text, model.device)
                 input_ids = torch.cat([input_ids, fb_delta], dim=1)
             else: # continue
                 trajectory[-1]["reward"] += reward_utils.W_CONTINUE
 
     terminate_jobs()  # for safety, kill any still-running background commands
-
-    # Terminal reward: revert penalty (if files were changed) or explicit outcome grade
-    revert_prompted, n_reverted = offer_revert(prompt_user)
-    if not revert_prompted:
-        answer = prompt_user("Was the outcome good? [y/n]").strip().lower()
-        terminal_r = reward_utils.W_TERMINAL if answer in ("y", "yes") else -reward_utils.W_TERMINAL
-    else:
-        terminal_r = -n_reverted * reward_utils.W_REVERT
-    for entry in trajectory:
-        entry["reward"] += terminal_r
 
     return trajectory

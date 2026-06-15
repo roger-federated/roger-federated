@@ -346,16 +346,16 @@ def make_session() -> PromptSession:
 
 
 async def read_prompt(session: PromptSession) -> str | None:
-    """Read a user prompt. Returns None on EOF (Ctrl-D → quit).
+    """Read a user prompt. Returns None only on EOF (Ctrl-D → quit); "" on empty input or Ctrl-C
+    so the caller can re-prompt without quitting.
 
     Async because the REPL runs inside asyncio.run(_repl): prompt_toolkit's sync
     .prompt() would call asyncio.run() again and fail on the running loop. prompt_async
     is the supported in-loop entry point.
     """
     try:
-        text = (await session.prompt_async(HTML("<ansicyan><b>❯ </b></ansicyan>"))).strip()
-        return text if text else None
+        return (await session.prompt_async(HTML("<ansicyan><b>❯ </b></ansicyan>"))).strip()
     except EOFError:
-        return None   # Ctrl-D
+        return None   # Ctrl-D → quit
     except KeyboardInterrupt:
-        return ""     # Ctrl-C at prompt — caller can handle (abort current turn)
+        return ""     # Ctrl-C at prompt → treat as empty, re-prompt
