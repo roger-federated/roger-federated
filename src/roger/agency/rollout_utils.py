@@ -15,7 +15,7 @@ from roger.tools.std_tools import get_standard_tools, prompt_user, offer_revert,
 from roger.tools.shell_tools import drain_finished_jobs, pending_jobs, terminate_jobs, shell_idioms
 from roger.serving.model_setup import find_gen_prompt, find_tool_res_id
 
-def make_tool_loader(tools):
+def _make_tool_loader(tools):
     """Build a terse catalog string + load_tools closure for deferred schema loading.
 
     Returns (catalog_text, load_tools) where catalog_text lists every tool as
@@ -107,7 +107,7 @@ def _make_prefix_fn(inner, tokenizer: transformers.PreTrainedTokenizer,
     return prefix_fn, mask_log
 
 
-async def execute_tools(sequences: torch.Tensor, tokenizer: transformers.PreTrainedTokenizer,
+async def _execute_tools(sequences: torch.Tensor, tokenizer: transformers.PreTrainedTokenizer,
                         tool_handlers: dict,
                         tool_tokens: tuple[int, int],
                         on_tool_call: Callable = None,
@@ -155,7 +155,7 @@ async def execute_tools(sequences: torch.Tensor, tokenizer: transformers.PreTrai
     return results
 
 
-def parse_result(result):
+def _parse_result(result):
     """Convert a tool result to an HF content list (list of typed dicts)."""
     if isinstance(result, Image.Image):
         return [{"type": "image", "image": result}]
@@ -205,7 +205,7 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
     # Deferred tool loading: when >15 tools, keep only their names in context; full schemas
     # fetched on demand via load_tools(names=[...]).
     if len(tools) > 15:
-        catalog_text, load_tools_fn = make_tool_loader(tools)
+        catalog_text, load_tools_fn = _make_tool_loader(tools)
         tool_handlers["load_tools"] = load_tools_fn
         tools = [load_tools_fn]
     else:
@@ -299,7 +299,7 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
             {"id": str(k), "type": "function", "function": {"name": name, "arguments": {}}}
             for k, (name, _) in enumerate(call_results)
         ]}]
-        tool_msgs = [{"role": "tool", "tool_call_id": str(k), "content": parse_result(res)}
+        tool_msgs = [{"role": "tool", "tool_call_id": str(k), "content": _parse_result(res)}
                      for k, (_, res) in enumerate(call_results)]
         ids = tokenizer.apply_chat_template(
             dummy_asst + tool_msgs, tokenize=True, add_generation_prompt=False)["input_ids"]
@@ -358,7 +358,7 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
         past_key_values = outputs.past_key_values
 
         # Parse and execute all tool calls from the newly generated tokens only
-        results = await execute_tools(new_ids, tokenizer, tool_handlers, tool_tokens,
+        results = await _execute_tools(new_ids, tokenizer, tool_handlers, tool_tokens,
                                       on_tool_call=on_tool_call, on_tool_result=on_tool_result)
         if saving_mem:
             break   # memory is now written; end
