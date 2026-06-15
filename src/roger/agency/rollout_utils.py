@@ -13,7 +13,7 @@ from lmformatenforcer.integrations.transformers import build_transformers_prefix
 from collections.abc import Callable
 from roger.tools.std_tools import get_standard_tools, prompt_user, offer_revert, maxsteps_checkin
 from roger.tools.shell_tools import drain_finished_jobs, pending_jobs, terminate_jobs, shell_idioms
-from roger.serving.model_setup import find_gen_prompt, find_tool_res_id
+from roger.serving.model_setup import find_gen_prompt, find_tool_res_id, find_tool_call_tokens
 
 def _make_tool_loader(tools):
     """Build a terse catalog string + load_tools closure for deferred schema loading.
@@ -174,7 +174,7 @@ def _parse_result(result):
 
 async def rollout(model: transformers.modeling_utils.PreTrainedModel,
                   tokenizer: transformers.PreTrainedTokenizer,
-                  text: str, tool_tokens: tuple[int, int],
+                  text: str,
                   image: str | Image.Image = None, tools: list = [],
                   tool_handlers: dict = {}, max_steps: int = 10,
                   max_new_tokens: int | None = 4096,
@@ -188,6 +188,8 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
                   enable_skills: bool = True, skills_root: str = None,
                   enable_memory: bool = True) -> list:
 
+    # tool_tokens: (open, close) ids bracketing a tool call; probed from the chat template.
+    tool_tokens = find_tool_call_tokens(tokenizer)
     # tool_res_id: <|tool_response> boundary; used to slice prompt-free deltas.
     tool_res_id = find_tool_res_id(tokenizer)
     asst_msg = [{"role": "assistant", "tool_calls": [   # reused in feedback injection below
