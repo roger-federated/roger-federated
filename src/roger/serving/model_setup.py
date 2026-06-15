@@ -1,7 +1,7 @@
 from transformers import AutoProcessor, AutoModelForImageTextToText, BitsAndBytesConfig
 from huggingface_hub import get_safetensors_metadata
 import os, torch
-
+import psutil
 from roger.agency.path_utils import state_dir
 
 VRAM_UTIL     = 0.9   # fraction of total VRAM we aim to fill; the rest absorbs activations/KV
@@ -93,50 +93,66 @@ def _param_count(model_id: str) -> int | None:
     except Exception:
         return None    # offline / gated / no safetensors → caller falls back to 4-bit
 
+def _vram_budget() -> dict[int, int]:
+    """Per-GPU usable byte budget from *free* (not total) VRAM.
+
+    Free memory is what Accelerate can actually place weights into; sizing tiers against the
+    same number we hand Accelerate as max_memory keeps the two from disagreeing.
+    """
+    return {i: int(torch.cuda.mem_get_info(i)[0] * VRAM_UTIL)
+            for i in range(torch.cuda.device_count())}
+
 def _4bit(compute_dtype) -> BitsAndBytesConfig:
     return BitsAndBytesConfig(
         load_in_4bit=True, bnb_4bit_quant_type="nf4", bnb_4bit_use_double_quant=True,
         bnb_4bit_compute_dtype=compute_dtype, llm_int8_enable_fp32_cpu_offload=True)
 
-def _select_quant(model_id, gpu_available, for_training):
-    """Pick the highest-precision tier that fits VRAM: (quantization_config | None, dtype).
+def _select_quant(model_id, gpu_available, for_training): 
+    """Pick the highest-precision tier that fits VRAM: (quantization_config | None, dtype, fits).
 
     Estimates the model footprint from its param count and compares each tier
-    (bf16 → int8 → nf4) against ~VRAM_UTIL of total VRAM, inflated by TRAIN_HEADROOM when
-    loading for RL. The 4-bit tier is also the fallback; any overflow is offloaded by
-    device_map="auto". bitsandbytes needs CUDA, so the no-GPU path loads unquantized.
+    (bf16 → int8 → nf4) against ~VRAM_UTIL of *free* VRAM, inflated by TRAIN_HEADROOM when
+    loading for RL. `fits` is True when the chosen tier's weights sit within that budget, so
+    the caller can pin the whole model to the GPU; it's False for the unknown-size fallback
+    and the 4-bit-still-too-big case, where Accelerate must place + offload the remainder.
+    bitsandbytes needs CUDA, so the no-GPU path loads unquantized.
     """
     if not gpu_available:
-        return None, torch.float32
+        return None, torch.float32, False
     compute_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
     P = _param_count(model_id)
     if P is None:
-        return _4bit(compute_dtype), compute_dtype     # safe default when size is unknown
-    budget = sum(torch.cuda.get_device_properties(i).total_memory
-                 for i in range(torch.cuda.device_count())) * VRAM_UTIL
+        return _4bit(compute_dtype), compute_dtype, False   # unknown size → let auto offload
+    budget = sum(_vram_budget().values())              # free VRAM (matches the pin/offload budget)
     factor = TRAIN_HEADROOM if for_training else 1.0
     if 2.0 * P * factor <= budget:                     # bf16 weights fit → no quant
-        return None, compute_dtype
+        return None, compute_dtype, True
     if 1.0 * P * factor <= budget:                     # int8 fits
-        return BitsAndBytesConfig(load_in_8bit=True, llm_int8_enable_fp32_cpu_offload=True), compute_dtype
-    return _4bit(compute_dtype), compute_dtype          # nf4 (offload remainder if still tight)
+        return BitsAndBytesConfig(load_in_8bit=True, llm_int8_enable_fp32_cpu_offload=True), compute_dtype, True
+    return _4bit(compute_dtype), compute_dtype, 0.5 * P * factor <= budget   # nf4; fits unless still too big
 
 def fetch_model(model_id="google/gemma-4-E2B-it", for_training: bool = False) -> tuple[AutoModelForImageTextToText, AutoProcessor, tuple[int, int]]:
     # VRAM-aware quantization: choose tier from model size vs available VRAM
     gpu_available = torch.cuda.is_available()
-    quant_cfg, dtype = _select_quant(model_id, gpu_available, for_training)
-    # device_map="auto" shards across GPUs and offloads overflow to CPU/disk (offload_folder)
-    offload_dir = os.path.join(state_dir(), "scratch", "offload")
-    os.makedirs(offload_dir, exist_ok=True)
-    model = AutoModelForImageTextToText.from_pretrained(
-        model_id,
-        quantization_config=quant_cfg,
-        dtype=dtype,
-        device_map="auto",
-        low_cpu_mem_usage=True,
-        offload_buffers=True,
-        offload_folder=offload_dir,
-    )
+    quant_cfg, dtype, fits = _select_quant(model_id, gpu_available, for_training)
+    n_gpu = torch.cuda.device_count() if gpu_available else 0
+    # device_map="auto" is unreliable; thus if model fits, we manually pin to gpu
+    kwargs = dict(quantization_config=quant_cfg, dtype=dtype, low_cpu_mem_usage=True)
+    if not gpu_available: # CPU
+        kwargs["device_map"] = "auto"
+    elif n_gpu == 1 and fits: # Fits on one GPU
+        kwargs["device_map"] = {"": 0}
+    elif fits: # Fits on multiple GPUs
+        kwargs["device_map"] = "auto"
+        kwargs["max_memory"] = _vram_budget()
+    else: # Doesn't fit on GPU
+        offload_dir = os.path.join(state_dir(), "scratch", "offload")
+        os.makedirs(offload_dir, exist_ok=True)
+        kwargs["device_map"]      = "auto"
+        kwargs["max_memory"]      = {**_vram_budget(), "cpu": psutil.virtual_memory().available}
+        kwargs["offload_buffers"] = True
+        kwargs["offload_folder"]  = offload_dir
+    model = AutoModelForImageTextToText.from_pretrained(model_id, **kwargs)
     processor = AutoProcessor.from_pretrained(model_id)
     # Find tool call tokens
     tool_tokens = find_tool_call_tokens(processor.tokenizer)
