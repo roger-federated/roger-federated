@@ -71,40 +71,49 @@ def _build_inner_fn(tokenizer: transformers.PreTrainedTokenizer, tool_names: lis
     return build_transformers_prefix_allowed_tokens_fn(tokenizer, JsonSchemaParser(schema))
 
 
-def _make_prefix_fn(inner, tokenizer: transformers.PreTrainedTokenizer,
-                    tool_tokens: tuple[int, int], new_idx: int) -> tuple[Callable, list]:
-    """Wrap inner constrained-decoding fn for one generation turn.
+def _allowed_tokens(inner, tokenizer, tool_tokens, sent_tokens: torch.Tensor, new_idx: int):
+    """Returns allowed token IDs at current step, conditioned on sent_tokens, or return None when unconstrained.
 
-    Returns (prefix_fn, mask_log).  mask_log accumulates per-generated-token constraint info:
-    None = full vocab (unconstrained step); list = allowed token IDs for that step.
-    The REINFORCE++ trainer must renormalize log π(a|s) over the allowed set at each step.
-
-    Balanced open/close counting enables multiple tool calls per turn:
-    - opens == closes: free generation (EOS, plain text, or open another call)
-    - opens == closes+1: inside a block — constrain to valid JSON, force-close instead of EOS
+    Count open/close tokens to determine constraints:
+    - num open tokens == num close tokens: free generation → None (full vocab; nothing built on the hot path)
+    - num open tokens == num close tokens + 1: inside a block → constrain to valid JSON, force-close instead of EOS
     """
-    mask_log: list = []
+    tokens = sent_tokens.squeeze()[new_idx:].tolist()
+    if tokens.count(tool_tokens[0]) == tokens.count(tool_tokens[1]):
+        return None
+    # Inside a block: find last open token, constrain JSON content after it
+    last_open_idx = len(tokens) - 1 - tokens[::-1].index(tool_tokens[0])
+    allowed = list(inner(0, sent_tokens.squeeze()[last_open_idx + 1:]))  # copy: don't mutate enforcer state
+    # Force close token instead of EOS so the block is always well-formed
+    if tokenizer.eos_token_id in allowed:
+        allowed.remove(tokenizer.eos_token_id)
+        allowed.append(tool_tokens[1])
+    return allowed
 
-    def prefix_fn(batch_id, sent_tokens: torch.Tensor):
-        tokens = sent_tokens.squeeze()[new_idx:].tolist()
-        opens = tokens.count(tool_tokens[0])
-        closes = tokens.count(tool_tokens[1])
-        if opens == closes:
-            # Not inside any block — free generation
-            allowed = list(range(tokenizer.vocab_size))
-        else:
-            # Inside a block: find last open token, constrain JSON content after it
-            last_open = len(tokens) - 1 - tokens[::-1].index(tool_tokens[0])
-            allowed = inner(batch_id, sent_tokens[last_open + 1:])
-            # Force close token instead of EOS so the block is always well-formed
-            if tokenizer.eos_token_id in allowed:
-                allowed.remove(tokenizer.eos_token_id)
-                allowed.append(tool_tokens[1])
-        # None for full vocab avoids storing range(vocab_size) per unconstrained step
-        mask_log.append(None if len(allowed) == tokenizer.vocab_size else allowed)
-        return allowed
 
-    return prefix_fn, mask_log
+def _make_constraint_processor(inner, tokenizer, tool_tokens, new_idx):
+    """Logits processor enforcing the tool-call grammar, plus a position-keyed mask log.
+
+    Returns (processor, mask_by_pos). Scores pass through untouched on unconstrained steps (the hot
+    path); inside a block they're -inf-masked to the allowed set. The allowed set (or None) is
+    recorded into mask_by_pos keyed by the predicted position (input_ids.shape[1]) — keying by
+    position, not call order, keeps masks aligned under speculative decoding.
+    """
+    mask_by_pos: dict = {}
+
+    def processor(input_ids: torch.Tensor, scores: torch.Tensor) -> torch.Tensor:
+        allowed = _allowed_tokens(inner, tokenizer, tool_tokens, input_ids, new_idx)
+        # Record None for near-full-vocab steps too (free JSON-string positions): avoids storing
+        # ~vocab-sized lists, and ~full vocab ≈ unconstrained. Enforcement still uses the precise set.
+        mask_by_pos[input_ids.shape[1]] = (None if allowed is None or len(allowed) > tokenizer.vocab_size // 2
+                                           else allowed)
+        if allowed is None:
+            return scores
+        mask = torch.full_like(scores, float("-inf"))
+        mask[:, allowed] = 0.0
+        return scores + mask
+
+    return processor, mask_by_pos
 
 
 async def _execute_tools(sequences: torch.Tensor, tokenizer: transformers.PreTrainedTokenizer,
@@ -186,7 +195,8 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
                   enable_rag: bool = True, rag_k: int = 3,
                   rag_root: str = None,
                   enable_skills: bool = True, skills_root: str = None,
-                  enable_memory: bool = True) -> list:
+                  enable_memory: bool = True,
+                  draft_kwargs: dict = {}) -> list: # speculative-decoding generate kwargs (drafter / n-gram)
 
     # tool_tokens: (open, close) ids bracketing a tool call; probed from the chat template.
     tool_tokens = find_tool_call_tokens(tokenizer)
@@ -331,7 +341,7 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
             active_fn = inner_fn
         # Attention mask covers the full sequence; kv cache accounts for the already-processed prefix
         attn_mask = torch.ones(1, input_ids.shape[1], device=model.device, dtype=torch.long)
-        prefix_fn, mask_log = _make_prefix_fn(active_fn, tokenizer, tool_tokens, new_idx)
+        processor, mask_by_pos = _make_constraint_processor(active_fn, tokenizer, tool_tokens, new_idx)
         # Prepare inputs; model.generate slices the new tokens internally via past_key_values length
         kwargs = {
             "input_ids": input_ids,
@@ -340,8 +350,9 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
             "use_cache": True,
             "output_logits": True,
             "return_dict_in_generate": True,
-            "prefix_allowed_tokens_fn": prefix_fn,
-            "max_new_tokens": max_new_tokens
+            "logits_processor": transformers.LogitsProcessorList([processor]),
+            "max_new_tokens": max_new_tokens,
+            **draft_kwargs,   # assistant_model (drafter) or prompt_lookup_num_tokens (n-gram)
         }
         # Generate with a fresh streamer; _drain() forwards tokens to on_token concurrently
         streamer = transformers.AsyncTextIteratorStreamer(tokenizer, skip_prompt=True)
@@ -368,9 +379,12 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
         # Step reward: sum auto_signal over all results in this turn, clamped to [-1, 1]
         step_reward = max(-1.0, min(1.0,
             sum(reward_utils.auto_signal(r) for _, r in results)))
+        # Read the grammar masks the processor recorded by absolute position; one entry per
+        # recorded logit step (accepted token), so masks/logits/tokens line up under any decoding.
+        mask_log = [mask_by_pos.get(new_idx + t) for t in range(len(outputs.logits))]
         trajectory.append({
             "gen_token_ids": new_ids,
-            "logits": torch.stack(outputs.logits).detach(),
+            "logits": torch.stack(outputs.logits).detach().cpu(),
             "masks": mask_log,
             "reward": step_reward,
         })
