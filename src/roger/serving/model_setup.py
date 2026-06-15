@@ -131,7 +131,7 @@ def _select_quant(model_id, gpu_available, for_training):
         return BitsAndBytesConfig(load_in_8bit=True, llm_int8_enable_fp32_cpu_offload=True), compute_dtype, True
     return _4bit(compute_dtype), compute_dtype, 0.5 * P * factor <= budget   # nf4; fits unless still too big
 
-def fetch_model(model_id="google/gemma-4-E2B-it", for_training: bool = False) -> tuple[AutoModelForImageTextToText, AutoProcessor, tuple[int, int]]:
+def fetch_model(model_id="google/gemma-4-E2B-it", for_training: bool = False) -> tuple[AutoModelForImageTextToText, AutoProcessor]:
     # VRAM-aware quantization: choose tier from model size vs available VRAM
     gpu_available = torch.cuda.is_available()
     quant_cfg, dtype, fits = _select_quant(model_id, gpu_available, for_training)
@@ -154,6 +154,4 @@ def fetch_model(model_id="google/gemma-4-E2B-it", for_training: bool = False) ->
         kwargs["offload_folder"]  = offload_dir
     model = AutoModelForImageTextToText.from_pretrained(model_id, **kwargs)
     processor = AutoProcessor.from_pretrained(model_id)
-    # Find tool call tokens
-    tool_tokens = find_tool_call_tokens(processor.tokenizer)
-    return model, processor, tool_tokens
+    return model, processor

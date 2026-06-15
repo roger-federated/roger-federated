@@ -70,10 +70,10 @@ async def _repl(cfg: dict, root: str) -> None:
     """Load model once, then loop: read prompt → rollout → record."""
     # Spinner while loading
     with console.status("[bold]Loading model…[/bold]", spinner="dots"):
-        model, processor, tool_tokens = fetch_model(cfg["model_id"])
+        model, processor = fetch_model(cfg["model_id"])
     tokenizer    = processor.tokenizer
     # Decode delimiter token-ids back to strings for the text renderer; derive think-channel once
-    tool_delims  = tuple(tokenizer.decode([t]) for t in tool_tokens)
+    tool_delims  = tuple(tokenizer.decode([t]) for t in model_setup.find_tool_call_tokens(tokenizer))
     think_delims = model_setup.find_think_delims(tokenizer)
     console.print("[bold green]Model loaded.[/bold green]\n")
 
@@ -97,7 +97,7 @@ async def _repl(cfg: dict, root: str) -> None:
         # Wrap rollout in a Task so Ctrl-C aborts only this turn
         loop = asyncio.get_event_loop()
         task = loop.create_task(rollout(
-            model, tokenizer, text, tool_tokens,
+            model, tokenizer, text,
             max_steps      = cfg["max_steps"],
             max_new_tokens = cfg["max_new_tokens"],
             on_token       = renderer.feed,
