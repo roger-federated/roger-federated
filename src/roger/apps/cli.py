@@ -76,7 +76,7 @@ async def _repl(cfg: dict, root: str) -> None:
         # as the assistant model; otherwise fall back to model-free n-gram prompt-lookup.
         draft_id = cfg.get("draft_model")
         drafter = model_setup.load_drafter(draft_id, processor.tokenizer) if draft_id else None
-        draft_kwargs = ({"assistant_model": drafter} if drafter
+        gen_kwargs = ({"assistant_model": drafter} if drafter
                         else {"prompt_lookup_num_tokens": 10})
     tokenizer    = processor.tokenizer
     if not draft_id:
@@ -131,7 +131,7 @@ async def _repl(cfg: dict, root: str) -> None:
         rag_k          = cfg["rag_k"],
         enable_skills  = cfg["enable_skills"],
         enable_memory  = cfg["enable_memory"],
-        draft_kwargs   = draft_kwargs,
+        gen_kwargs     = gen_kwargs,
     )
     console.print("\n[dim]Goodbye.[/dim]")
 

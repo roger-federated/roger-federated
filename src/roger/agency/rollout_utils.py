@@ -106,7 +106,7 @@ def _make_constraint_processor(inner, tokenizer, tool_tokens, new_idx):
         allowed = _allowed_tokens(inner, tokenizer, tool_tokens, input_ids, new_idx)
         # Record None for near-full-vocab steps too (free JSON-string positions): avoids storing
         # ~vocab-sized lists, and ~full vocab ≈ unconstrained. Enforcement still uses the precise set.
-        mask_by_pos[input_ids.shape[1]] = (None if allowed is None or len(allowed) > tokenizer.vocab_size // 2
+        mask_by_pos[input_ids.shape[1]] = (None if allowed is None or len(allowed) > tokenizer.vocab_size * 0.9
                                            else allowed)
         if allowed is None:
             return scores
@@ -257,7 +257,7 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
                   rag_root: str = None,
                   enable_skills: bool = True, skills_root: str = None,
                   enable_memory: bool = True,
-                  draft_kwargs: dict = {}) -> list: # speculative-decoding generate kwargs (drafter / n-gram)
+                  gen_kwargs: dict = {}) -> list: # extra generate() kwargs (e.g. speculative-decoding: drafter / n-gram)
 
     # tool_tokens: (open, close) ids bracketing a tool call; probed from the chat template.
     tool_tokens = find_tool_call_tokens(tokenizer)
@@ -395,7 +395,7 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
             "return_dict_in_generate": True,
             "logits_processor": transformers.LogitsProcessorList([processor]),
             "max_new_tokens": max_new_tokens,
-            **draft_kwargs,   # assistant_model (drafter) or prompt_lookup_num_tokens (n-gram)
+            **gen_kwargs,   # assistant_model (drafter) or prompt_lookup_num_tokens (n-gram)
         }
         # Generate with a fresh streamer; _drain() forwards tokens to on_token concurrently
         streamer = transformers.AsyncTextIteratorStreamer(tokenizer, skip_prompt=True)
