@@ -131,6 +131,29 @@ def _select_quant(model_id, gpu_available, for_training):
         return BitsAndBytesConfig(load_in_8bit=True, llm_int8_enable_fp32_cpu_offload=True), compute_dtype, True
     return _4bit(compute_dtype), compute_dtype, 0.5 * P * factor <= budget   # nf4; fits unless still too big
 
+def placement_summary(model) -> tuple[str, str]:
+    """Where did the weights land? Returns (message, rich_style), derived from hf_device_map.
+    CPU/disk placement means no/partial GPU acceleration, so flag it as a warning."""
+    devmap = getattr(model, "hf_device_map", None)
+    if not devmap:                             # no device_map (e.g. plain .to(device)) → probe a param
+        try:
+            dev = str(next(model.parameters()).device)
+        except StopIteration:
+            return "Model loaded.", "green"     # no params to probe; stay silent on placement
+        return ("Model loaded; fully on GPU.", "green") if dev.startswith("cuda") \
+            else ("Model loaded on CPU; no GPU acceleration (slow).", "yellow")
+    devices = set(devmap.values())
+    on_gpu  = any(isinstance(d, int) or (isinstance(d, str) and d.startswith("cuda"))
+                  for d in devices)
+    on_cpu  = "cpu"  in devices
+    on_disk = "disk" in devices
+    if on_gpu and (on_cpu or on_disk):
+        where = "disk" if on_disk else "CPU"
+        return f"Model loaded; partly offloaded to {where} (slower; weights didn't all fit in VRAM).", "yellow"
+    if on_cpu or on_disk:                      # no GPU at all
+        return "Model loaded on CPU; no GPU acceleration (slow).", "yellow"
+    return "Model loaded; fully on GPU.", "green"
+
 def fetch_model(model_id="google/gemma-4-E2B-it", for_training: bool = False) -> tuple[AutoModelForImageTextToText, AutoProcessor]:
     # VRAM-aware quantization: choose tier from model size vs available VRAM
     gpu_available = torch.cuda.is_available()

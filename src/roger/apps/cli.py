@@ -77,7 +77,8 @@ async def _repl(cfg: dict, root: str) -> None:
     # Decode delimiter token-ids back to strings for the text renderer; derive think-channel once
     tool_delims  = tuple(tokenizer.decode([t]) for t in model_setup.find_tool_call_tokens(tokenizer))
     think_delims = model_setup.find_think_delims(tokenizer)
-    console.print("[bold green]Model loaded.[/bold green]\n")
+    msg, style = model_setup.placement_summary(model)
+    console.print(f"[bold {style}]{msg}[/bold {style}]\n")
 
     # Prompt toolkit session (history + styled input)
     session   = ui.make_session()
