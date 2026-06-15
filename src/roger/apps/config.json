@@ -6,5 +6,6 @@
   "rag_k": 3,
   "enable_skills": true,
   "enable_memory": true,
-  "verbose": false
+  "verbose": false,
+  "draft_model": ""
 }
