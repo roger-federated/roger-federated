@@ -1,7 +1,7 @@
 import asyncio, os, sys, torch, transformers, json, inspect, numpy as np
 import roger.training.reward_utils as reward_utils
 from roger.agency.retrieval import build_index, retrieve, format_context
-from roger.agency.skill_utils import load_instructions, load_memory, discover_skills, make_skill_loader, project_mem_dir
+from roger.agency.skill_utils import load_instructions, load_memory, discover_skills, make_skill_loader, project_mem_file
 from roger.agency.path_utils import expand_at_references, state_dir
 from PIL import Image
 from lmformatenforcer import JsonSchemaParser
@@ -308,8 +308,8 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
     inner_fn = _build_inner_fn(tokenizer, tool_names)
     # Forced side-effect-only memory turn: one extra loop iteration after task completion with the
     # name-enum restricted to file ops. Not recorded to trajectory (avoids policy-gradient bias).
-    _glob_mem = os.path.join(state_dir(), "memory.md")
-    _proj_mem = os.path.join(project_mem_dir(root or os.getcwd()), "memory.md")
+    _glob_mem = os.path.join(state_dir(), "memory", "memory.md")
+    _proj_mem = project_mem_file(root or os.getcwd())
     _MEM_SEED = (f"Okay.\nLet me update my memory with what I learned. User-level facts (preferences, identity) "
                  f"go in {_glob_mem}; project-specific facts go in {_proj_mem}. I will be concise, update "
                  f"whichever file(s) changed, and format under the headings 'Project'/'User'/'Conventions'.")
