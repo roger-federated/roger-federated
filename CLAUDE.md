@@ -46,7 +46,7 @@
 - `tests/`    — e.g. `tests/test_rewards.py`
 
 Runtime artifacts all live under the global `~/.roger/` (never in the project): `config.json`,
-global `memory.md` + per-project `projects/<dashed-abspath>/memory.md`, `runs/`, `backups/`,
+global `memory/memory.md` + per-project `memory/<dashed-abspath>.md`, `runs/`, `backups/`,
 `scratch/`, `history`, and user `skills/`. Project-level skill dirs (`.agents/`, `.claude/`)
 and instruction files (`AGENTS.md`/`CLAUDE.md`) are still read from the project. `build/` and
 `*.egg-info/` are build output — ignore them; edit only under `src/`.
