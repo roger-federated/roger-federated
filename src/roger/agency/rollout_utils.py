@@ -448,7 +448,8 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
         if not results and not (pending := pending_jobs()):
             import warnings; warnings.warn("Task ended without calling finish(); no self-eval reward assigned to this segment.")
         # Mutually exclusive: bg-wait (another model turn) | task done (await user) | tool results.
-        if not results and pending:
+        if not results and pending: 
+            # Note: branch not immediately activated when a command is emitted with background=True, because it returns job id
             await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
             bg = _bg_msgs(tokenizer, tool_res_id, model.device)
             input_ids = torch.cat([gen_ids, bg], dim=1) if isinstance(bg, torch.Tensor) else gen_ids
