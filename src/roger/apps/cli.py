@@ -17,6 +17,7 @@ from roger.apps import config, ui
 import roger.serving.model_setup as model_setup
 from roger.serving.model_setup import fetch_model
 from roger.agency.rollout_utils import rollout
+from roger.tools import mcp_utils
 
 console = Console(highlight=False)
 
@@ -152,28 +153,44 @@ async def _repl(cfg: dict, root: str) -> None:
         if text:
             break
 
-    console.print()  # blank line before output
+    # Connect any MCP servers declared in ~/.roger/mcp.json (stdio or remote). 
+    # The stack stays open for the whole session and is closed in the finally below. 
+    mcp_servers = mcp_utils.load_mcp_config()
+    mcp_stack, mcp_tools, mcp_handlers = None, [], {}
+    if mcp_servers:
+        with console.status("[bold]Connecting MCP servers…[/bold]", spinner="dots"):
+            mcp_stack, mcp_tools, mcp_handlers = await mcp_utils.connect_servers(mcp_servers)
+        console.print(f"[dim]MCP: {len(mcp_handlers)} tool(s) from "
+                      f"{len(mcp_servers)} server(s).[/dim]")
+
+    console.print()  # blank line
     # A single rollout owns the whole session: it awaits each subsequent user turn itself (via
     # read_turn) and injects it onto the live context, so the KV-cache is reused across tasks rather
     # than rebuilt per message. It returns only when the user quits (Ctrl-D).
-    await rollout(
-        model, tokenizer, text,
-        max_steps      = cfg["max_steps"],
-        max_new_tokens = cfg["max_new_tokens"],
-        on_token       = renderer.feed,
-        on_gen_start   = renderer.reset,   # per-turn renderer lifecycle: reset at start, flush tail at end
-        on_gen_end     = renderer.flush,
-        on_tool_call   = ui.render_tool_call,
-        on_tool_result = ui.render_tool_result,
-        prompt_backend = pt_backend,
-        read_turn      = read_turn,
-        root           = root,
-        enable_rag     = cfg["enable_rag"],
-        rag_k          = cfg["rag_k"],
-        enable_skills  = cfg["enable_skills"],
-        enable_memory  = cfg["enable_memory"],
-        gen_kwargs     = gen_kwargs,
-    )
+    try:
+        await rollout(
+            model, tokenizer, text,
+            tools          = mcp_tools,
+            tool_handlers  = mcp_handlers,
+            max_steps      = cfg["max_steps"],
+            max_new_tokens = cfg["max_new_tokens"],
+            on_token       = renderer.feed,
+            on_gen_start   = renderer.reset,   # per-turn renderer lifecycle: reset at start, flush tail at end
+            on_gen_end     = renderer.flush,
+            on_tool_call   = ui.render_tool_call,
+            on_tool_result = ui.render_tool_result,
+            prompt_backend = pt_backend,
+            read_turn      = read_turn,
+            root           = root,
+            enable_rag     = cfg["enable_rag"],
+            rag_k          = cfg["rag_k"],
+            enable_skills  = cfg["enable_skills"],
+            enable_memory  = cfg["enable_memory"],
+            gen_kwargs     = gen_kwargs,
+        )
+    finally:
+        if mcp_stack is not None:
+            await mcp_stack.aclose()
     console.print("\n[dim]Goodbye.[/dim]")
 
 

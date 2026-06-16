@@ -1,12 +1,12 @@
 <div align="center">
     <h1>Roger Federated</h1>
-    <p><strong>Building the world's first <i>true</i> agent together with the community, using <font color="#818cf8">federated</font> <font color="#4ade80">local</font> <font color="#fb923c">reinforcement learning</font></strong></p>
+    <p><strong>Building the world's first <i>true</i> agent together with the community, using <b>federated</b> <u>local</u> <i>reinforcement learning</font></i></p>
 </div>
 
 ---
 
 ### Overview
-The limitations of the AI transition are coming to light by [far-fetched financial suppositions](https://open.spotify.com/clip/5HzODEnWAegI2Z3NGmu7UV?si=wz0K4G-NSIyTcnPK_1lbBw), [closed models we cannot inspect or steer](https://blog.mozilla.org/en/mozilla/mozilla-open-source-ai-strategy/), generic promises that remain unattained. _Luckily, we are at a point where there's no reason [consumers can't do better with your own hardware, software, and tiny models](https://newsletter.semianalysis.com/p/google-we-have-no-moat-and-neither)._
+The limitations of the AI transition are surfacing as a result of [far-fetched financial assumptions](https://open.spotify.com/clip/5HzODEnWAegI2Z3NGmu7UV?si=wz0K4G-NSIyTcnPK_1lbBw), [closed models we cannot inspect nor steer](https://blog.mozilla.org/en/mozilla/mozilla-open-source-ai-strategy/), and generic promises that remain unattained. _Luckily, we are at a crossroads where you, the consumer can do better [with tiny models on your own hardware](https://newsletter.semianalysis.com/p/google-we-have-no-moat-and-neither)._
 
 You and the community can now contribute to the next generation of AI. Not just an LLM with tools, but a purpose-trained agent that is inherently omni-modal. How? By *locally* finetuning a selected *open-source* foundation model on *agentic rollout data*, and subsequently *aggregating* the resulting encrypted model updates (not the data itself) securely with your selected *federations*.
 
@@ -26,7 +26,7 @@ You and the community can now contribute to the next generation of AI. Not just 
 First, download the repo and navigate to the folder:
 
 ```bash
-git clone git@github.com:thijs-vanweezel/roger-federated.git # or extract [this ZIP](https://github.com/thijs-vanweezel/roger-federated/archive/refs/heads/main.zip)
+git clone git@github.com:thijs-vanweezel/roger-federated.git # or extract from https://github.com/thijs-vanweezel/roger-federated/archive/refs/heads/main.zip
 cd roger-federated
 ```
 
@@ -65,6 +65,30 @@ python -m venv .venv && source .venv/bin/activate && pip install -e .
 - **Run:**
 
 After installing, run `roger` from any terminal. First launch walks you through initial setup. Settings (including the model selection) can subsequently be adjusted in `~/.roger/config.json`.
+
+- **MCP servers:**
+
+To give Roger additional functionality, include MCP servers in `~/.roger/mcp.json`. It uses the standard `mcpServers`-format, and the exact schema can therefore be found at your MCP server's provider.
+
+<details>
+<summary>Example</summary>
+
+```json
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "."]
+    },
+    "sentry": {
+      "type": "http",
+      "url": "https://mcp.sentry.dev/mcp",
+      "headers": {"Authorization": "Bearer <token>"}
+    }
+  }
+}
+```
+</details>
 
 ---
 
@@ -105,7 +129,7 @@ This software is still in development. Below is a non-exhaustive list of to-do i
 - [x] Set up automatic model loading.
 - [x] Write code to handle and record agentic rollouts using HF models.
 - [x] Give the model agency, i.e., integrate tool use, reasoning, etc., with the LLM as foundation.
-- [ ] Enable connecting to MCP servers.
+- [x] Enable connecting to MCP servers (local stdio + remote SSE/streamable-HTTP; declared in `~/.roger/mcp.json` using the standard `mcpServers` schema; tools namespaced `mcp__<server>__<tool>`).
 - [x] Implement standard tools (e.g., run_command, write_file, prompt_user).
 - [x] Replace tool searcher with catalog+load_tools deferred loading (no embedding model needed).
 - [x] Implement auto-triggered RAG.
