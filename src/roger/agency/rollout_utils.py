@@ -310,9 +310,9 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
     # name-enum restricted to file ops. Not recorded to trajectory (avoids policy-gradient bias).
     _glob_mem = os.path.join(state_dir(), "memory", "memory.md")
     _proj_mem = project_mem_file(root or os.getcwd())
-    _MEM_SEED = (f"Okay.\nLet me update my memory with what I learned. User-level facts (preferences, identity) "
-                 f"go in {_glob_mem}; project-specific facts go in {_proj_mem}. I will be concise, update "
-                 f"whichever file(s) changed, and format under the headings 'Project'/'User'/'Conventions'.")
+    _MEM_SEED = (f"Okay.\nLet me very concisely update my memory with what I learned during our entire conversation. "
+                 f"User-level facts (e.g., preferences, identity) go in {_glob_mem}; "
+                 f"Project-specific facts (e.g., conventions, overview) go in {_proj_mem}.")
     mem_inner  = _build_inner_fn(tokenizer, ["write_file", "edit_file"]) if enable_memory else None
     saving_mem = False
 
@@ -326,8 +326,9 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
         "You are an agentic assistant named 'Roger Federated'. Given a task, use the provided tools to accomplish it.\n"
         "You may issue multiple tool calls in one turn by emitting them back-to-back in JSON. "
         "They will be executed sequentially, unless `background=True. "
-        "Call finish(...) when the task is complete, grading your own work with "
-        "an honest self-evaluation score in [-1, 1]; the user will then give you their next turn.\n\n"
+        "Call finish(...) whenever you complete an identified task, grading your own work with "
+        "an honest self-evaluation score in [-1, 1], i.e., negative if the execution was inaccurate or suboptimal."
+        "The user will then give you their next turn.\n\n"
         + shell_idioms()
     )
     # Project instructions: AGENTS.md or CLAUDE.md from cwd (first-found-wins)
