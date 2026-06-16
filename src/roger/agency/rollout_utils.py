@@ -248,6 +248,8 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
                   tool_handlers: dict = {}, max_steps: int = 10,
                   max_new_tokens: int | None = 4096,
                   on_token: Callable = None,
+                  on_gen_start: Callable = None,   # (suppress: bool) → None; fired before each generation turn
+                  on_gen_end: Callable = None,     # () → None; fired after the turn's tokens are drained
                   on_tool_call: Callable = None,   # (name, args) → None; fired before each call
                   on_tool_result: Callable = None, # (name, result, args) → None; fired after
                   prompt_backend: Callable = None, # replaces input() for all user prompts
@@ -397,7 +399,9 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
             "max_new_tokens": max_new_tokens,
             **gen_kwargs,   # assistant_model (drafter) or prompt_lookup_num_tokens (n-gram)
         }
-        # Generate with a fresh streamer; _drain() forwards tokens to on_token concurrently
+        # Generate with a fresh streamer; _drain() forwards tokens to on_token concurrently.
+        # suppress=saving_mem: that turn's open delim is seeded into the prompt (never streamed).
+        if on_gen_start: on_gen_start(suppress=saving_mem)
         streamer = transformers.AsyncTextIteratorStreamer(tokenizer, skip_prompt=True)
         loop = asyncio.get_event_loop()
         async def _drain():
@@ -407,6 +411,7 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
             loop.run_in_executor(None, lambda: model.generate(**kwargs, streamer=streamer)),
             _drain()
         )
+        if on_gen_end: on_gen_end()
         gen_ids = (outputs.sequences[:, :-1]
                    if outputs.sequences[0, -1] == tokenizer.eos_token_id
                    else outputs.sequences)
@@ -439,8 +444,11 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
             for entry in trajectory[seg_start:]:
                 entry["reward"] += grade
             run_dir = recording.save_run(trajectory, first_prompt, run_dir)
+        # task ended on a plain answer, no finish() → no self-eval grade for this segment
+        if not results and not (pending := pending_jobs()):
+            import warnings; warnings.warn("Task ended without calling finish(); no self-eval reward assigned to this segment.")
         # Mutually exclusive: bg-wait (another model turn) | task done (await user) | tool results.
-        if not results and (pending := pending_jobs()):
+        if not results and pending:
             await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
             bg = _bg_msgs(tokenizer, tool_res_id, model.device)
             input_ids = torch.cat([gen_ids, bg], dim=1) if isinstance(bg, torch.Tensor) else gen_ids

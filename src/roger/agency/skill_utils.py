@@ -136,7 +136,7 @@ def discover_skills(root: str) -> list[dict]:
 
 
 def make_skill_loader(skills: list[dict]) -> tuple[str, callable]:
-    """Build a terse catalog string + load_skill closure (mirrors make_tool_loader).
+    """Build a terse catalog string + load_skill closure (mirrors _make_tool_loader).
 
     Returns (catalog_text, load_skill) where:
       catalog_text  — one '- name: description' line per skill
