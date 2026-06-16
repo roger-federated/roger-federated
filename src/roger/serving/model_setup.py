@@ -188,3 +188,12 @@ def load_drafter(draft_id: str, target_tokenizer):
     if AutoTokenizer.from_pretrained(draft_id).get_vocab() != target_tokenizer.get_vocab():
         return None
     return fetch_model(draft_id)[0]
+
+
+def uses_sliding_window(model) -> bool:
+    cfg = model.config
+    cfg = cfg.get_text_config() if hasattr(cfg, "get_text_config") else cfg
+    if not getattr(cfg, "sliding_window", None):
+        return False
+    lt = getattr(cfg, "layer_types", None)
+    return lt is None or any("sliding" in str(t) for t in lt)

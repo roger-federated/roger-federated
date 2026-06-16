@@ -8,7 +8,7 @@ Usage:
 
 Config lives at ~/.roger/config.json; CLI flags override per-run only.
 """
-import argparse, asyncio, os, sys, ctypes
+import argparse, asyncio, os, sys, ctypes, warnings
 from typing import Callable
 
 from rich.console import Console
@@ -28,6 +28,34 @@ _BANNER = """[bold cyan]
   Tip: Plug in your computer before starting a long-running task and disable sleep in your system settings.
   Tip: Follow-up tasks reuse the model's context (KV-cache), so keep related tasks in one session.
 """
+
+# ---------------------------------------------------------------------------
+# Console output policy — clean by default, raw under --verbose
+# ---------------------------------------------------------------------------
+
+def _configure_output(verbose: bool) -> None:
+    """Quiet third-party noise unless --verbose. Our own warnings are always shown, pretty-printed."""
+    warnings.simplefilter("always")  # no per-location dedup — recurring notices fire every time
+    if verbose:
+        return  # leave defaults: raw warnings + tqdm bars visible for debugging
+    # Match the real package dir, not the substring "roger" (the uv tool dir is itself named
+    # roger, so third-party packages live under …/roger/.../site-packages/torch/… too).
+    import roger
+    pkg = os.path.dirname(os.path.abspath(roger.__file__))
+    def _show(message, category, filename, lineno, file=None, line=None):
+        if filename and os.path.abspath(filename).startswith(pkg):
+            console.print(f"[yellow]⚠ {category.__name__}: {message}[/yellow]")
+    warnings.showwarning = _show
+    # Silence hub download bars, the transformers weight-loading bar + advisory logging, and
+    # torch's "triton not found" log. These take effect for the later fetch.
+    from huggingface_hub.utils import disable_progress_bars
+    disable_progress_bars()
+    import transformers
+    transformers.logging.set_verbosity_error()
+    transformers.logging.disable_progress_bar()
+    import logging
+    logging.getLogger("torch").setLevel(logging.ERROR)
+
 
 # ---------------------------------------------------------------------------
 # Keep-awake — prevent OS sleep during a long rollout
@@ -76,26 +104,37 @@ async def _repl(cfg: dict, root: str) -> None:
         # as the assistant model; otherwise fall back to model-free n-gram prompt-lookup.
         draft_id = cfg.get("draft_model")
         drafter = model_setup.load_drafter(draft_id, processor.tokenizer) if draft_id else None
-        gen_kwargs = ({"assistant_model": drafter} if drafter
+        sliding = model_setup.uses_sliding_window(model)
+        # n-gram crashes on sliding-window models because it crops KV-cache
+        gen_kwargs = ({"assistant_model": drafter} if drafter # TODO: may still crash due to sliding window
+                        else {} if sliding
                         else {"prompt_lookup_num_tokens": 10})
-    tokenizer    = processor.tokenizer
-    if not draft_id:
-        console.print("[yellow]No draft_model set; using n-gram prompt-lookup. Pass --draft-model "
-                      "(saved to config) for faster speculative decoding.[/yellow]")
-    elif drafter is None:
+    tokenizer = processor.tokenizer
+    if drafter:
+        pass  # user's draft model in use
+    elif draft_id:
         console.print(f"[yellow]draft_model '{draft_id}' has a different tokenizer than the target; "
-                      "ignoring it and using n-gram prompt-lookup.[/yellow]")
+                      "ignoring it.[/yellow]")
+    elif sliding:
+        console.print("[yellow]n-gram speculative decoding disabled: model uses sliding-window "
+                      "attention (its KV-cache can't be cropped). Pass --draft-model for a drafter.[/yellow]")
+    else:
+        console.print("[yellow]No draft_model set; using n-gram prompt-lookup. Pass --draft-model "
+                      "(auto-saved to config) for faster speculative decoding.[/yellow]")
     # Decode delimiter token-ids back to strings for the text renderer; derive think-channel once
     tool_delims  = tuple(tokenizer.decode([t]) for t in model_setup.find_tool_call_tokens(tokenizer))
     think_delims = model_setup.find_think_delims(tokenizer)
+    # All special-token strings: the renderer drops any that surface in answer text (turn close,
+    # tool_response, eos, …) — the model emits them structurally but they must not be printed.
+    specials = [tokenizer.decode([t]) for t in tokenizer.all_special_ids]
     msg, style = model_setup.placement_summary(model)
     console.print(f"[bold {style}]{msg}[/bold {style}]\n")
 
     # Prompt toolkit session (history + styled input)
     session    = ui.make_session()
     pt_backend = ui.make_prompt_backend(session)
-    renderer   = ui.StreamRenderer(verbose=cfg["verbose"],
-                                   think_delims=think_delims, tool_delims=tool_delims)
+    renderer   = ui.StreamRenderer(verbose=cfg["verbose"], think_delims=think_delims,
+                                   tool_delims=tool_delims, specials=specials)
 
     async def read_turn(preamble: str = "") -> str | None:
         """Next user turn for the rollout. Surfaces any pending revert notice first; None on Ctrl-D."""
@@ -122,6 +161,8 @@ async def _repl(cfg: dict, root: str) -> None:
         max_steps      = cfg["max_steps"],
         max_new_tokens = cfg["max_new_tokens"],
         on_token       = renderer.feed,
+        on_gen_start   = renderer.reset,   # per-turn renderer lifecycle: reset at start, flush tail at end
+        on_gen_end     = renderer.flush,
         on_tool_call   = ui.render_tool_call,
         on_tool_result = ui.render_tool_result,
         prompt_backend = pt_backend,
@@ -169,6 +210,12 @@ def main() -> None:
     if args.no_skills:      cfg["enable_skills"]  = False
     if args.no_memory:      cfg["enable_memory"]  = False
     if args.verbose:        cfg["verbose"]         = True
+
+    # Console output policy (before any model fetch so download bars are suppressed)
+    _configure_output(cfg["verbose"])
+
+    # Wipe any leftover terminal content before the session (after output config so it isn't garbled)
+    console.clear()
 
     # Banner
     console.print(_BANNER.format(cfg_path=config.path(), model=cfg["model_id"]))
