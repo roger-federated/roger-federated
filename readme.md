@@ -1,6 +1,8 @@
 <div align="center">
     <h1>Roger Federated</h1>
-    <p><strong>Building the world's first <i>true</i> agent together with the community, using <b>federated</b> <u>local</u> <i>reinforcement learning</font></i></p>
+
+<strong>Building the world's first <i>true</i> agent together with the community, using $\textcolor{#58a6ff}{\textsf{\textbf{federated}}}$ $\textcolor{#f0883e}{\textsf{\textbf{local}}}$ $\textcolor{#a371f7}{\textsf{\textbf{reinforcement learning}}}$</strong>
+
 </div>
 
 ---
@@ -129,7 +131,7 @@ This software is still in development. Below is a non-exhaustive list of to-do i
 - [x] Set up automatic model loading.
 - [x] Write code to handle and record agentic rollouts using HF models.
 - [x] Give the model agency, i.e., integrate tool use, reasoning, etc., with the LLM as foundation.
-- [x] Enable connecting to MCP servers (local stdio + remote SSE/streamable-HTTP; declared in `~/.roger/mcp.json` using the standard `mcpServers` schema; tools namespaced `mcp__<server>__<tool>`).
+- [x] Enable connecting to MCP servers.
 - [x] Implement standard tools (e.g., run_command, write_file, prompt_user).
 - [x] Replace tool searcher with catalog+load_tools deferred loading (no embedding model needed).
 - [x] Implement auto-triggered RAG.
@@ -139,10 +141,11 @@ This software is still in development. Below is a non-exhaustive list of to-do i
 - [x] Prettify CLI application.
 - [x] Auto read/write memory and create agent folder for temp files.
 - [x] Integrate web search and fetch by default.
+- [x] Allow resuming conversation after finish.
 - [x] *Congrats, you now have a semi-basic agent.*
 - [x] Implement what the finetuning framework considers as rewards.
+- [x] LLM-as-judge (self-evaluation inspired by RLSR, SRT, Co-rewarding, meta-evaluation; requires a portion of ground truth).
 - [ ] Implement automatic LoRA RL execution.
-- [x] Allow resuming conversation after finish.
 - [ ] Implement federated learning-style hives.
 - [ ] Sandboxed docker environments.
 - [ ] Implement account setup, hives selection, finetuning scheduling, gradient sharing setup, as well as (background/execution) autonomy setup.
@@ -151,7 +154,6 @@ This software is still in development. Below is a non-exhaustive list of to-do i
 Further into the future:
 - [ ] Native support for agent loops.
 - [ ] Automatic subagent spawning and automatic git worktrees.
-- [ ] LLM-as-judge.
 - [ ] Dynalang-style world model for embedded state roll-forward.
 - [ ] Remote control: copy a session code, enter it on our website, continue interacting encrypted through the browser.
 - [ ] Always-on mode: always listen, look, and read, and when a keyboard shortcut is entered, automatically infer and continue the user's task using e.g. Touchpoint.
