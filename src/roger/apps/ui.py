@@ -190,6 +190,10 @@ class StreamRenderer:
                         # Animated spinner so a collapsed reasoning block doesn't look frozen.
                         self._status = console.status("[dim]Thinking…[/dim]", spinner="dots")
                         self._status.start()
+                elif state == "tool":
+                    # Tool-call block is suppressed; show a spinner so the call doesn't look frozen.
+                    self._status = console.status("[dim]Invoking tool…[/dim]", spinner="dots")
+                    self._status.start()
                 continue
 
             elif self._state == "thinking":
@@ -221,6 +225,7 @@ class StreamRenderer:
                 # Suppress until the close delimiter; discard the whole span.
                 idx = self._buf.find(self._tool_close) if self._tool_close else -1
                 if idx != -1:
+                    self._stop_status()   # tool block done decoding; drop the spinner
                     self._buf   = self._buf[idx + len(self._tool_close):]
                     self._state = "answer"
                     continue

@@ -2,10 +2,10 @@
 
 Conventions:
   AGENTS.md / CLAUDE.md              — freeform project instructions, prepended to system prompt
-  Memory (two tiers, both under the global ~/.roger tree, never in the project):
-    ~/.roger/memory.md                — user-level facts (preferences, identity), cross-project
-    ~/.roger/projects/<key>/memory.md — facts specific to the current project (key = its
-                                        abspath with separators dashed, like Claude Code)
+  Memory (two tiers, both under ~/.roger/memory/, never in the project):
+    ~/.roger/memory/memory.md  — user-level facts (preferences, identity), cross-project
+    ~/.roger/memory/<key>.md   — facts specific to the current project (key = its abspath
+                                 with separators dashed, like Claude Code)
   Skills (per-skill .md with YAML frontmatter + body; only the catalog is shown up front,
   body fetched on demand via load_skill(name)) are discovered in ~/.roger/skills (global) and
   the project's .agents/skills and .claude/skills.
@@ -36,11 +36,11 @@ def load_instructions(root: str) -> str:
     return ""
 
 
-def project_mem_dir(root: str) -> str:
-    """Per-project memory dir under the global tree, keyed by the project's abspath with path
-    separators dashed out (e.g. C:\\…\\newventure → C--…-newventure), mirroring Claude Code."""
+def project_mem_file(root: str) -> str:
+    """Per-project memory file under ~/.roger/memory/, named by the project's abspath with path
+    separators dashed out (e.g. C:\\…\\newventure → C--…-newventure.md), mirroring Claude Code."""
     key = re.sub(r"[\\/:]", "-", os.path.abspath(root))
-    return os.path.join(state_dir(), "projects", key)
+    return os.path.join(state_dir(), "memory", f"{key}.md")
 
 
 def _read(path: str) -> str:
@@ -52,8 +52,8 @@ def _read(path: str) -> str:
 
 def load_memory(root: str) -> str:
     """Write protocol + current contents of both memory tiers (global + this project)."""
-    g = os.path.join(state_dir(), "memory.md")
-    p = os.path.join(project_mem_dir(root), "memory.md")
+    g = os.path.join(state_dir(), "memory", "memory.md")
+    p = project_mem_file(root)
     block = ("## Persistent memory\nUpdate at the end of each task: user-level facts "
              f"(preferences, identity) → {g}; facts specific to this project → {p}.")
     return (block
