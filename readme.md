@@ -23,10 +23,10 @@ You and the community can now contribute to the next generation of AI. Not just 
 
 ### Installation
 
-First:
+First, download the repo and navigate to the folder:
 
 ```bash
-git clone git@github.com:thijs-vanweezel/roger-federated.git
+git clone git@github.com:thijs-vanweezel/roger-federated.git # or extract [this ZIP](https://github.com/thijs-vanweezel/roger-federated/archive/refs/heads/main.zip)
 cd roger-federated
 ```
 
@@ -103,15 +103,16 @@ This software is still in development. Below is a non-exhaustive list of to-do i
 
 - [x] Investigate framework and open-source models.
 - [x] Set up automatic model loading.
-- [x] Write code to handle and record agentic rollouts using HF models and vLLM inference.
+- [x] Write code to handle and record agentic rollouts using HF models.
 - [x] Give the model agency, i.e., integrate tool use, reasoning, etc., with the LLM as foundation.
-- [x] Enable connecting to MCP servers.
-- [x] Implement standard tools (e.g., run_command, read_file, write_file, search_file, search_dir, prompt_user).
+- [ ] Enable connecting to MCP servers.
+- [x] Implement standard tools (e.g., run_command, write_file, prompt_user).
 - [x] Replace tool searcher with catalog+load_tools deferred loading (no embedding model needed).
 - [x] Implement auto-triggered RAG.
 - [x] Allow importing skills and agent.md files.
 - [x] Add @path ability.
 - [x] Integrate into a CLI application.
+- [x] Prettify CLI application.
 - [x] Auto read/write memory and create agent folder for temp files.
 - [x] Integrate web search and fetch by default.
 - [x] *Congrats, you now have a semi-basic agent.*
@@ -126,7 +127,6 @@ This software is still in development. Below is a non-exhaustive list of to-do i
 Further into the future:
 - [ ] Native support for agent loops.
 - [ ] Automatic subagent spawning and automatic git worktrees.
-- [ ] Accelerate using vLLM.
 - [ ] LLM-as-judge.
 - [ ] Dynalang-style world model for embedded state roll-forward.
 - [ ] Remote control: copy a session code, enter it on our website, continue interacting encrypted through the browser.
