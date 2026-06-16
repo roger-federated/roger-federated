@@ -16,6 +16,8 @@ from rich.panel import Panel
 from rich.text import Text
 from rich.style import Style
 from rich.syntax import Syntax
+from rich.live import Live
+from rich.markdown import Markdown
 from prompt_toolkit import PromptSession
 from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.history import FileHistory
@@ -30,6 +32,46 @@ console = Console(highlight=False)
 
 
 # ---------------------------------------------------------------------------
+# Compact LaTeX → Unicode (terminals can't render real math; approximate it)
+# ---------------------------------------------------------------------------
+
+_LATEX_SYMBOLS = {
+    r"\times": "×", r"\cdot": "·", r"\div": "÷", r"\pm": "±", r"\mp": "∓",
+    r"\leq": "≤", r"\geq": "≥", r"\neq": "≠", r"\approx": "≈", r"\equiv": "≡",
+    r"\infty": "∞", r"\partial": "∂", r"\nabla": "∇", r"\sum": "∑", r"\prod": "∏",
+    r"\int": "∫", r"\sqrt": "√", r"\rightarrow": "→", r"\leftarrow": "←",
+    r"\Rightarrow": "⇒", r"\to": "→", r"\in": "∈", r"\notin": "∉", r"\forall": "∀",
+    r"\exists": "∃", r"\propto": "∝", r"\ldots": "…", r"\cdots": "⋯",
+    r"\alpha": "α", r"\beta": "β", r"\gamma": "γ", r"\delta": "δ", r"\epsilon": "ε",
+    r"\zeta": "ζ", r"\eta": "η", r"\theta": "θ", r"\iota": "ι", r"\kappa": "κ",
+    r"\lambda": "λ", r"\mu": "μ", r"\nu": "ν", r"\xi": "ξ", r"\pi": "π", r"\rho": "ρ",
+    r"\sigma": "σ", r"\tau": "τ", r"\phi": "φ", r"\chi": "χ", r"\psi": "ψ", r"\omega": "ω",
+    r"\Gamma": "Γ", r"\Delta": "Δ", r"\Theta": "Θ", r"\Lambda": "Λ", r"\Pi": "Π",
+    r"\Sigma": "Σ", r"\Phi": "Φ", r"\Psi": "Ψ", r"\Omega": "Ω",
+}
+_SUP = str.maketrans("0123456789+-=()n", "⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾ⁿ")
+_SUB = str.maketrans("0123456789+-=()", "₀₁₂₃₄₅₆₇₈₉₊₋₌₍₎")
+
+def _convert_math(m: str) -> str:
+    for k, v in _LATEX_SYMBOLS.items():
+        m = m.replace(k, v)
+    m = re.sub(r"\\frac\s*\{([^{}]*)\}\s*\{([^{}]*)\}", r"(\1)/(\2)", m)
+    m = re.sub(r"\^\{([^{}]*)\}", lambda g: g.group(1).translate(_SUP), m)
+    m = re.sub(r"\^(.)", lambda g: g.group(1).translate(_SUP), m)
+    m = re.sub(r"_\{([^{}]*)\}", lambda g: g.group(1).translate(_SUB), m)
+    m = re.sub(r"_(.)", lambda g: g.group(1).translate(_SUB), m)
+    m = re.sub(r"\\[a-zA-Z]+", "", m)          # drop leftover commands
+    return m.replace("{", "").replace("}", "")
+
+def _latex_to_unicode(text: str) -> str:
+    text = re.sub(r"\$\$(.+?)\$\$", lambda m: _convert_math(m.group(1)), text, flags=re.S)
+    text = re.sub(r"\\\[(.+?)\\\]", lambda m: _convert_math(m.group(1)), text, flags=re.S)
+    text = re.sub(r"\\\((.+?)\\\)", lambda m: _convert_math(m.group(1)), text, flags=re.S)
+    text = re.sub(r"\$(.+?)\$", lambda m: _convert_math(m.group(1)), text, flags=re.S)
+    return text
+
+
+# ---------------------------------------------------------------------------
 # StreamRenderer — state machine for one agent turn
 # ---------------------------------------------------------------------------
 
@@ -41,23 +83,79 @@ class StreamRenderer:
                   for Gemma-4. None → skip thinking detection (stream raw).
     tool_delims:  (open_str, close_str) decoded from tool_tokens — e.g.
                   ("<|tool_call>", "<tool_call|>"). None → skip suppression.
+    specials:     all decoded special-token strings; any that surface in answer text (turn close,
+                  tool_response, eos, …) are dropped — the model emits them but they aren't content.
     Stateful because a delimiter can arrive split across chunks.
-    One instance per rollout turn; do not reuse.
+    Reused across the whole session. reset(suppress=) at each turn start, and flush() at turn
+    end. This gives it an explicit per-turn lifecycle (see those methods).
     """
 
     def __init__(self, verbose: bool = False,
                  think_delims: tuple[str, str] | None = None,
-                 tool_delims:  tuple[str, str] | None = None):
+                 tool_delims:  tuple[str, str] | None = None,
+                 specials: list[str] | None = None):
         self._verbose     = verbose
         self._think_open  = think_delims[0] if think_delims else None
         self._think_close = think_delims[1] if think_delims else None
         self._tool_open   = tool_delims[0]  if tool_delims  else None
         self._tool_close  = tool_delims[1]  if tool_delims  else None
+        # Answer-state delimiters: think/tool opens switch into a block; every *other* special
+        # token (turn close, tool_response, eos, the close delims …) is structural noise the model
+        # emits but should never be printed → dropped. specials = all decoded special-token strings.
+        opens = {self._think_open, self._tool_open}
+        drops = [s for s in dict.fromkeys(list(specials or []) + [self._think_close, self._tool_close])
+                 if s and s not in opens]
+        self._answer_delims = [(d, k) for d, k in
+                               [(self._think_open, "thinking"), (self._tool_open, "tool")]
+                               + [(s, "drop") for s in drops] if d]
+        self._guard = max((len(d) for d, _ in self._answer_delims), default=1) - 1
         # States: "answer" | "thinking" | "tool"
         self._state       = "answer"
         self._buf         = ""          # cross-chunk accumulator
+        self._answer      = ""          # visible answer text, re-rendered as live Markdown
         self._think_start = None
+        self._status      = None        # live "Thinking…" spinner while collapsed
+        self._live        = None        # live Markdown of the streaming answer
         import time; self._time = time
+
+    def reset(self, suppress: bool = False) -> None:
+        """Start a fresh turn. suppress=True begins in tool-suppression (memory turn: open delim seeded into the prompt, never streamed)."""
+        self._stop_status()
+        self._finalize_live()
+        self._buf         = ""
+        self._state       = "tool" if suppress else "answer"
+        self._think_start = None
+        if suppress:  # memory-write turn (Ctrl-D): show a spinner since its output is suppressed
+            self._status = console.status("[dim]Updating memory…[/dim]", spinner="dots")
+            self._status.start()
+
+    def flush(self) -> None:
+        """End of turn: stop the spinner, render the withheld answer tail, finalize the Markdown."""
+        self._stop_status()
+        if self._state == "answer" and self._buf:
+            self._answer += self._buf
+        self._buf = ""
+        self._finalize_live()   # commits the rendered Markdown (its trailing newline frees the prompt)
+
+    def _stop_status(self) -> None:
+        if self._status is not None:
+            self._status.stop()
+            self._status = None
+
+    def _render_live(self) -> None:
+        md = Markdown(_latex_to_unicode(self._answer))
+        if self._live is None:   # only one live display allowed at once; thinking spinner is stopped by now
+            self._live = Live(md, console=console, refresh_per_second=8, vertical_overflow="visible")
+            self._live.start()
+        else:
+            self._live.update(md)
+
+    def _finalize_live(self) -> None:
+        if self._live is not None:
+            self._live.update(Markdown(_latex_to_unicode(self._answer)))
+            self._live.stop()
+            self._live = None
+        self._answer = ""
 
     def feed(self, chunk: str) -> None:
         self._buf += chunk
@@ -67,34 +165,31 @@ class StreamRenderer:
         """Process buf until no more complete transitions can be resolved."""
         while True:
             if self._state == "answer":
-                # Candidate transition points; pick the earliest
-                t_idx = self._buf.find(self._think_open) if self._think_open else -1
-                c_idx = self._buf.find(self._tool_open)  if self._tool_open  else -1
-                # Earliest positive hit
-                if t_idx == -1 and c_idx == -1:
-                    # No delimiter starting — safe to flush up to a potential partial at tail.
-                    # Guard length = longest possible delimiter prefix we might be mid-stream on.
-                    guard = max((len(self._think_open) if self._think_open else 0),
-                                (len(self._tool_open)  if self._tool_open  else 0)) - 1
-                    safe  = self._buf[:max(0, len(self._buf) - guard)]
+                hits = [(p, d, k) for d, k in self._answer_delims
+                        if (p := self._buf.find(d)) != -1]
+                if not hits:
+                    # No delimiter present — render up to a possible partial delimiter at the tail.
+                    safe = self._buf[:max(0, len(self._buf) - self._guard)]
                     if safe:
-                        console.print(safe, end="", markup=False)
+                        self._answer += safe
+                        self._render_live()
                         self._buf = self._buf[len(safe):]
                     return
-                # Determine which delimiter fires first
-                if   t_idx == -1: first, state = c_idx, "tool"
-                elif c_idx == -1: first, state = t_idx, "thinking"
-                else:             first, state = (t_idx, "thinking") if t_idx <= c_idx else (c_idx, "tool")
-                # Flush text before the delimiter
-                if first > 0:
-                    console.print(self._buf[:first], end="", markup=False)
-                delim = self._think_open if state == "thinking" else self._tool_open
+                first, delim, state = min(hits, key=lambda h: h[0])
+                if first > 0:                      # render text before the delimiter
+                    self._answer += self._buf[:first]
+                    self._render_live()
                 self._buf   = self._buf[first + len(delim):]
+                if state == "drop":
+                    continue                      # swallow structural special tokens
+                self._finalize_live()             # leaving the answer block → commit its Markdown
                 self._state = state
                 if state == "thinking":
                     self._think_start = self._time.monotonic()
                     if not self._verbose:
-                        console.print("\n[dim]● Thinking…[/dim]", end="", markup=True)
+                        # Animated spinner so a collapsed reasoning block doesn't look frozen.
+                        self._status = console.status("[dim]Thinking…[/dim]", spinner="dots")
+                        self._status.start()
                 continue
 
             elif self._state == "thinking":
@@ -118,7 +213,8 @@ class StreamRenderer:
                                       style=Style(color="grey50", italic=True))
                     console.print(f"\n[dim]● Thought for {elapsed:.1f}s[/dim]\n", markup=True)
                 else:
-                    console.print(f"\r[dim]● Thought for {elapsed:.1f}s[/dim]   \n", markup=True)
+                    self._stop_status()
+                    console.print(f"[dim]● Thought for {elapsed:.1f}s[/dim]\n", markup=True)
                 continue
 
             elif self._state == "tool":
@@ -152,6 +248,10 @@ _DEFAULT_ICON = "⚙"
 # Each entry: (regex matching the command verb/prefix, icon, past_label, detail_fn)
 # detail_fn receives the remainder of the command string after the verb.
 _CMD_PATTERNS: list[tuple] = [
+    # calculate: PowerShell math / common math funcs / python -c / bc — show the whole expression
+    (re.compile(r"^\s*(?=.*(?:\[math\]::|::(?:Sqrt|Pow|Abs|Round|Floor|Ceiling|Log|Exp|Sin|Cos|Tan|Min|Max|PI|E)\b|\bpython3?\s+-c|\bbc\b))", re.I),
+     "🧮", "Calculated",
+     lambda rest: rest.strip()[:80] or "…"),
     # read: Get-Content/gc/cat/type — extract first non-flag token as filename
     (re.compile(r"^\s*(?:Get-Content|gc|cat|type)\s+", re.I),
      "📄", "Read",
@@ -236,6 +336,9 @@ def render_tool_result(name: str, result, args: dict = None) -> None:
                 if label == "Read":  # append line count for reads, suppress content
                     n = result_str.count("\n")
                     suffix = f" [dim]— {n} line{'s' if n != 1 else ''}[/dim]"
+                elif label == "Calculated":  # show the computed value (drop the "exit 0" prefix)
+                    value = result_str.split("\n", 1)[-1].strip()
+                    suffix = f" [dim]= {value}[/dim]"
                 console.print(f"[bold]{icon} {label}:[/bold] {detail}{suffix}")
             return
 
@@ -302,8 +405,11 @@ def select_root(default: str) -> str:
         import tkinter as tk
         from tkinter import filedialog
         root_win = tk.Tk(); root_win.withdraw()
+        # Force to the foreground; else it opens behind a backgrounded terminal and looks hung.
+        root_win.attributes("-topmost", True)
+        root_win.update()
         picked = filedialog.askdirectory(initialdir=default,
-                                         title="Select project root")
+                                         title="Select project root", parent=root_win)
         root_win.destroy()
         dialog_shown = True
         path = picked or default  # Cancel returns "" → fall back to the default (cwd)
