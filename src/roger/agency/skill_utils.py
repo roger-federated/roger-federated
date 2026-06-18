@@ -28,7 +28,8 @@ def load_instructions(root: str) -> str:
         path = os.path.join(root, name)
         if os.path.isfile(path):
             try:
-                text = open(path, encoding="utf-8").read().strip()
+                with open(path, encoding="utf-8") as f:
+                    text = f.read().strip()
             except OSError:
                 continue
             if text:
@@ -45,7 +46,8 @@ def project_mem_file(root: str) -> str:
 
 def _read(path: str) -> str:
     try:
-        return open(path, encoding="utf-8").read().strip()
+        with open(path, encoding="utf-8") as f:
+            return f.read().strip()
     except OSError:
         return ""
 
@@ -116,7 +118,8 @@ def discover_skills(root: str) -> list[dict]:
                     continue
                 seen.add(real)
                 try:
-                    text = open(path, encoding="utf-8").read()
+                    with open(path, encoding="utf-8") as f:
+                        text = f.read()
                 except OSError:
                     continue
                 meta, body = _parse_frontmatter(text)
