@@ -182,25 +182,35 @@ def _parse_result(result):
     return [{"type": "text", "text": str(result)}]
 
 
-def _result_to_ids(call_results, tokenizer, tool_res_id, device) -> torch.Tensor:
-    "Tokenize N (name, result) tool results → token IDs from the <|tool_response> boundary."
+def _result_to_ids(call_results, processor, tool_res_id, device):
+    "Tool results → (token-id delta from the <|tool_response> boundary, mm kwargs | None)."
     dummy_asst = [{"role": "assistant", "tool_calls": [
         {"id": str(k), "type": "function", "function": {"name": name, "arguments": {}}}
         for k, (name, _) in enumerate(call_results)]}]
     tool_msgs = [{"role": "tool", "tool_call_id": str(k), "content": _parse_result(res)}
                  for k, (_, res) in enumerate(call_results)]
-    ids = tokenizer.apply_chat_template(
-        dummy_asst + tool_msgs, tokenize=True, add_generation_prompt=False)["input_ids"]
-    return torch.tensor([ids[ids.index(tool_res_id):]], device=device, dtype=torch.long)
+    # processor.apply_chat_template delegates to the tokenizer for pure text
+    enc = processor.apply_chat_template(dummy_asst + tool_msgs, tokenize=True,
+        add_generation_prompt=False, return_dict=True, return_tensors="pt").to(device)
+    ids = enc.pop("input_ids")
+    # Drop the synthetic asst tool-call prefix
+    s = (ids[0] == tool_res_id).nonzero()[0].item()
+    if all(c["type"] == "text" for m in tool_msgs for c in m["content"]):
+        return ids[:, s:], None
+    # Slice token-aligned tensors (token_type_ids) to the delta; leave per-image tensors whole.
+    full = ids.shape[1]
+    mm_extra = {k: (v[:, s:] if torch.is_tensor(v) and v.dim() >= 2 and v.shape[1] == full else v)
+             for k, v in enc.items() if k!="attention_mask"}
+    return ids[:, s:], mm_extra
 
 
-def _bg_msgs(tokenizer, tool_res_id, device):
-    """Finished background jobs as tool-result token deltas (empty list if none)."""
+def _bg_msgs(processor, tool_res_id, device):
+    """Finished background commands, as tool-result token deltas (empty list if none)."""
     finished = drain_finished_jobs()
     if not finished:
         return []
     parts = [_result_to_ids([("run_command", f"[background] {jid} finished: {out}")],
-                           tokenizer, tool_res_id, device) for jid, out in finished]
+                            processor, tool_res_id, device)[0] for jid, out in finished]
     return torch.cat(parts, dim=1)
 
 
@@ -242,7 +252,7 @@ async def _await_user_turn(read_turn, trajectory, seg_start) -> str | None:
 
 
 async def rollout(model: transformers.modeling_utils.PreTrainedModel,
-                  tokenizer: transformers.PreTrainedTokenizer,
+                  processor,                       # multimodal processor; .tokenizer is the text path
                   text: str,
                   image: str | Image.Image = None, tools: list = [],
                   tool_handlers: dict = {}, max_steps: int = 10,
@@ -262,15 +272,15 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
                   gen_kwargs: dict = {}) -> list: # extra generate() kwargs (e.g. speculative-decoding: drafter / n-gram)
 
     # tool_tokens: (open, close) ids bracketing a tool call; probed from the chat template.
-    tool_tokens = find_tool_call_tokens(tokenizer)
+    tool_tokens = find_tool_call_tokens(processor.tokenizer)
     # tool_res_id: <|tool_response> boundary; used to slice prompt-free deltas.
-    tool_res_id = find_tool_res_id(tokenizer)
+    tool_res_id = find_tool_res_id(processor.tokenizer)
     asst_msg = [{"role": "assistant", "tool_calls": [   # reused in feedback injection below
         {"id": "0", "type": "function", "function": {"name": "_", "arguments": {}}}]}]
     # gen_prompt: assistant-turn cue (e.g. <start_of_turn>model\n). MUST be derived from a
     # user-terminated diff — after a tool_call, Gemma-4's template suppresses the cue even with
     # add_generation_prompt=True (the asst_msg diff yields an empty tensor; verified).
-    _gp = find_gen_prompt(tokenizer)
+    _gp = find_gen_prompt(processor.tokenizer)
     if not _gp:
         import warnings; warnings.warn("gen_prompt is empty — chat template did not append a model-turn cue; model may emit immediate <eos>")
     gen_prompt = torch.tensor([_gp], device=model.device, dtype=torch.long)
@@ -305,7 +315,7 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
 
     # Build constrained-decoding inner fn once for this rollout (schema uses full name list)
     tool_names = [t["function"]["name"] if isinstance(t, dict) else t.__name__ for t in tools]
-    inner_fn = _build_inner_fn(tokenizer, tool_names)
+    inner_fn = _build_inner_fn(processor.tokenizer, tool_names)
     # Forced side-effect-only memory turn: one extra loop iteration after task completion with the
     # name-enum restricted to file ops. Not recorded to trajectory (avoids policy-gradient bias).
     _glob_mem = os.path.join(state_dir(), "memory", "memory.md")
@@ -313,7 +323,7 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
     _MEM_SEED = (f"Okay.\nLet me very concisely update my memory with what I learned during our entire conversation. "
                  f"User-level facts (e.g., preferences, identity) go in {_glob_mem}; "
                  f"Project-specific facts (e.g., conventions, overview) go in {_proj_mem}.")
-    mem_inner  = _build_inner_fn(tokenizer, ["write_file", "edit_file"]) if enable_memory else None
+    mem_inner  = _build_inner_fn(processor.tokenizer, ["write_file", "edit_file"]) if enable_memory else None
     saving_mem = False
 
     # RAG: build corpus index once (deterministic; no re-indexing on mid-rollout edits)
@@ -362,22 +372,26 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
     # Expand @path refs in the user prompt; RAG query stays on original text
     messages[1]["content"] += [{"type": "text", "text": expand_at_references(text, os.getcwd())}]
 
-    # Tokenize the prompt once; input_ids grows by concatenation each turn
+    # Tokenize the prompt once; input_ids grows by concatenation each turn. With an image the
+    # processor emits the mm tensors; pre-fill them into the cache so the first generate sees them.
     i = 0
     past_key_values = None
-    inputs = tokenizer.apply_chat_template(
+    pending_mm = None # mm kwargs
+    inputs = processor.apply_chat_template(
         messages, add_generation_prompt=False, tokenize=True,
         return_tensors="pt", return_dict=True,
         enable_thinking=True, tools=tools
     ).to(model.device)
     input_ids = inputs["input_ids"]
+    if image is not None:   # feed the image to the first generate (empty cache → its prefill honors it)
+        pending_mm = {k: v for k, v in inputs.items() if k not in ("input_ids", "attention_mask")}
 
     while True:
         # Prepend generation prompt once per turn; every delta is prompt-free
         input_ids = torch.cat([input_ids, gen_prompt], dim=1)
         if saving_mem:
             # Seed preamble + open token so the turn drives straight into a (restricted) file call
-            _seed = tokenizer.encode(_MEM_SEED, add_special_tokens=False) + [tool_tokens[0]]
+            _seed = processor.tokenizer.encode(_MEM_SEED, add_special_tokens=False) + [tool_tokens[0]]
             input_ids = torch.cat(
                 [input_ids, torch.tensor([_seed], device=model.device, dtype=torch.long)], dim=1)
             new_idx = input_ids.shape[1] - 1    # slice from the open token; constraint engages immediately
@@ -387,7 +401,7 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
             active_fn = inner_fn
         # Attention mask covers the full sequence; kv cache accounts for the already-processed prefix
         attn_mask = torch.ones(1, input_ids.shape[1], device=model.device, dtype=torch.long)
-        processor, mask_by_pos = _make_constraint_processor(active_fn, tokenizer, tool_tokens, new_idx)
+        logits_proc, mask_by_pos = _make_constraint_processor(active_fn, processor.tokenizer, tool_tokens, new_idx)
         # Prepare inputs; model.generate slices the new tokens internally via past_key_values length
         kwargs = {
             "input_ids": input_ids,
@@ -396,14 +410,22 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
             "use_cache": True,
             "output_logits": True,
             "return_dict_in_generate": True,
-            "logits_processor": transformers.LogitsProcessorList([processor]),
+            "logits_processor": transformers.LogitsProcessorList([logits_proc]),
             "max_new_tokens": max_new_tokens,
             **gen_kwargs,   # assistant_model (drafter) or prompt_lookup_num_tokens (n-gram)
         }
+        # Zero-pad token_type_ids to match the length of the appended messages
+        if pending_mm is not None:
+            mm = dict(pending_mm)
+            if "token_type_ids" in mm:
+                win = input_ids.shape[1] - (past_key_values.get_seq_length() if past_key_values is not None else 0)
+                t = mm["token_type_ids"]
+                mm["token_type_ids"] = torch.cat([t, t.new_zeros(1, win - t.shape[1])], dim=1)
+            kwargs.update(mm)
         # Generate with a fresh streamer; _drain() forwards tokens to on_token concurrently.
         # suppress=saving_mem: that turn's open delim is seeded into the prompt (never streamed).
         if on_gen_start: on_gen_start(suppress=saving_mem)
-        streamer = transformers.AsyncTextIteratorStreamer(tokenizer, skip_prompt=True)
+        streamer = transformers.AsyncTextIteratorStreamer(processor.tokenizer, skip_prompt=True)
         loop = asyncio.get_event_loop()
         async def _drain():
             async for chunk in streamer:
@@ -414,13 +436,13 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
         )
         if on_gen_end: on_gen_end()
         gen_ids = (outputs.sequences[:, :-1]
-                   if outputs.sequences[0, -1] == tokenizer.eos_token_id
+                   if outputs.sequences[0, -1] == processor.tokenizer.eos_token_id
                    else outputs.sequences)
-        new_ids = gen_ids.squeeze()[new_idx:].detach()
+        new_ids = gen_ids.squeeze()[new_idx:].detach().cpu()
         past_key_values = outputs.past_key_values
 
         # Parse and execute all tool calls from the newly generated tokens only
-        results = await _execute_tools(new_ids, tokenizer, tool_handlers, tool_tokens,
+        results = await _execute_tools(new_ids, processor.tokenizer, tool_handlers, tool_tokens,
                                       on_tool_call=on_tool_call, on_tool_result=on_tool_result)
         if saving_mem:
             break   # memory is now written; end
@@ -431,12 +453,16 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
         # Read the grammar masks the processor recorded by absolute position; one entry per
         # recorded logit step (accepted token), so masks/logits/tokens line up under any decoding.
         mask_log = [mask_by_pos.get(new_idx + t) for t in range(len(outputs.logits))]
-        trajectory.append({
+        entry = {
             "gen_token_ids": new_ids,
             "logits": torch.stack(outputs.logits).detach().cpu(),
             "masks": mask_log,
             "reward": step_reward,
-        })
+        }
+        if pending_mm is not None:   # store the mm tensors for RL replay
+            entry["input_mm"] = {k: (v.detach().cpu() if torch.is_tensor(v) else v) for k, v in pending_mm.items()}
+            pending_mm = None
+        trajectory.append(entry)
 
         # finish checkpoints this task: broadcast its self-eval grade over the task's steps
         # (since the last user turn), then save the running episode.
@@ -452,7 +478,7 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
         if not results and pending: 
             # Note: branch not immediately activated when a command is emitted with background=True, because it returns job id
             await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
-            bg = _bg_msgs(tokenizer, tool_res_id, model.device)
+            bg = _bg_msgs(processor, tool_res_id, model.device)
             input_ids = torch.cat([gen_ids, bg], dim=1) if isinstance(bg, torch.Tensor) else gen_ids
         elif not results or any(name == "finish" for name, _ in results):
             next_text = await _await_user_turn(read_turn, trajectory, seg_start) if read_turn else None
@@ -463,13 +489,13 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
                     continue
                 break
             # Inject the user's turn as a prompt-free delta, retaining the KV-cache across tasks.
-            input_ids = torch.cat([gen_ids, _user_turn_delta(tokenizer, asst_msg, next_text, model.device)], dim=1)
+            input_ids = torch.cat([gen_ids, _user_turn_delta(processor.tokenizer, asst_msg, next_text, model.device)], dim=1)
             seg_start = len(trajectory)           # next finish grades only this fresh segment
             i = 0                                 # fresh max-steps budget per task
             continue
         else:
-            tool_ids = _result_to_ids(results, tokenizer, tool_res_id, model.device)
-            bg = _bg_msgs(tokenizer, tool_res_id, model.device)
+            tool_ids, pending_mm = _result_to_ids(results, processor, tool_res_id, model.device)  # mm (or None) → next generate
+            bg = _bg_msgs(processor, tool_res_id, model.device)
             parts = [gen_ids, tool_ids] + ([bg] if isinstance(bg, torch.Tensor) else [])
             input_ids = torch.cat(parts, dim=1)
 
@@ -483,7 +509,7 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
             max_steps += max_steps
             if action == "feedback":
                 trajectory[-1]["reward"] -= reward_utils.W_FEEDBACK
-                fb_delta = _user_turn_delta(tokenizer, asst_msg, feedback_text, model.device)
+                fb_delta = _user_turn_delta(processor.tokenizer, asst_msg, feedback_text, model.device)
                 input_ids = torch.cat([input_ids, fb_delta], dim=1)
             else: # continue
                 trajectory[-1]["reward"] += reward_utils.W_CONTINUE

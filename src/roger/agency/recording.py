@@ -3,7 +3,9 @@
 Each run is saved to:
   ~/.roger/runs/<ISO-timestamp>/
     trajectory.pt       — torch.save of per-step tensors (gen_token_ids, logits,
-                          masks, reward); consumed by the REINFORCE++ trainer.
+                          masks, reward; optional input_mm = mm kwargs dict
+                          (pixel_values, token_type_ids, …) when that turn's
+                          input carried an image); consumed by the REINFORCE++ trainer.
     transcript.jsonl    — human-readable prompt + per-step events.
 
 Public API:
@@ -44,6 +46,8 @@ def save_run(trajectory: list, prompt: str, run_dir: str | None = None) -> str:
         f.write(json.dumps({"type": "prompt", "text": prompt}) + "\n")
         for i, step in enumerate(trajectory):
             entry = {"type": "step", "step": i, "reward": float(step.get("reward", 0))}
+            if "input_mm" in step:
+                entry["has_image"] = True
             # Include decoded token IDs as text if a tokenizer is not available here;
             # raw token IDs are more useful for debugging than silence.
             ids = step.get("gen_token_ids")

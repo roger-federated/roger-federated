@@ -169,7 +169,7 @@ async def _repl(cfg: dict, root: str) -> None:
     # than rebuilt per message. It returns only when the user quits (Ctrl-D).
     try:
         await rollout(
-            model, tokenizer, text,
+            model, processor, text,
             tools          = mcp_tools,
             tool_handlers  = mcp_handlers,
             max_steps      = cfg["max_steps"],
