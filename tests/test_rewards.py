@@ -72,6 +72,21 @@ def test_apply_revert_all_restores():
     assert open(orig).read() == "OLD" and std_tools.pending_backups() == []
     print("PASS test_apply_revert_all_restores")
 
+def test_apply_revert_partial_keeps_rest():
+    import os, tempfile
+    import roger.tools.std_tools as std_tools
+    d = tempfile.mkdtemp()
+    o1, b1 = os.path.join(d, "a.txt"), os.path.join(d, "a.bak")
+    o2, b2 = os.path.join(d, "b.txt"), os.path.join(d, "b.bak")
+    open(o1, "w").write("NEW1"); open(b1, "w").write("OLD1")
+    open(o2, "w").write("NEW2"); open(b2, "w").write("OLD2")
+    std_tools._backups = [(o1, b1), (o2, b2)]
+    assert std_tools.apply_revert("1") == 1                 # revert only file 1
+    assert open(o1).read() == "OLD1"                        # file 1 restored
+    assert open(o2).read() == "NEW2"                        # file 2 untouched
+    assert std_tools.pending_backups() == [(o2, b2)]        # rest still pending, not discarded
+    print("PASS test_apply_revert_partial_keeps_rest")
+
 # ---------------------------------------------------------------------------
 # std_tools: maxsteps_checkin
 # ---------------------------------------------------------------------------
@@ -102,6 +117,7 @@ if __name__ == "__main__":
         test_apply_revert_no_backups,
         test_apply_revert_none_clears,
         test_apply_revert_all_restores,
+        test_apply_revert_partial_keeps_rest,
         test_maxsteps_checkin_options,
     ]
     failed = 0

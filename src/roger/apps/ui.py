@@ -19,6 +19,7 @@ from rich.syntax import Syntax
 from rich.live import Live
 from rich.markdown import Markdown
 from prompt_toolkit import PromptSession
+from prompt_toolkit.auto_suggest import AutoSuggest, Suggestion
 from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.styles import Style as PTStyle
@@ -456,16 +457,50 @@ def make_session() -> PromptSession:
     )
 
 
-async def read_prompt(session: PromptSession) -> str | None:
+class _RevertSuggest(AutoSuggest):
+    """Inline ghost text for the `/revert` command: once the user starts typing it, show the
+    numbered list of files that can be reverted (e.g. `vert all  ·  1=cli.py 2=ui.py`). The hint is
+    read-only guidance — accepting it is harmless since apply_revert ignores non-numeric tokens.
+
+    get_files() returns the live (orig, bak) backup pairs; an empty list means nothing to suggest.
+    """
+    def __init__(self, get_files: Callable[[], list]):
+        self._get_files = get_files
+
+    def get_suggestion(self, buffer, document):
+        text = document.text
+        cmd = "/revert"
+        # Only fire while typing the bare command (a prefix of "/revert", no args yet). The empty
+        # buffer is left to the placeholder; once args are typed the user knows what they want.
+        if not text or not cmd.startswith(text.lower()):
+            return None
+        files = self._get_files() or []
+        if not files:
+            return None
+        hint = "  ".join(f"{k+1}={os.path.basename(orig)}" for k, (orig, _b) in enumerate(files))
+        return Suggestion(cmd[len(text):] + f" all  ·  {hint}")
+
+
+async def read_prompt(session: PromptSession, suggest_revert: Callable[[], list] | None = None,
+                      placeholder: str | None = None) -> str | None:
     """Read a user prompt. Returns None only on EOF (Ctrl-D → quit); "" on empty input or Ctrl-C
     so the caller can re-prompt without quitting.
+
+    suggest_revert / placeholder are passed per-call (not stored on the session) so the agent-facing
+    tool prompts that reuse `session` stay clean: placeholder = gray dummy text shown while the box
+    is empty; suggest_revert = provider of revertable files for the /revert ghost text.
 
     Async because the REPL runs inside asyncio.run(_repl): prompt_toolkit's sync
     .prompt() would call asyncio.run() again and fail on the running loop. prompt_async
     is the supported in-loop entry point.
     """
+    kwargs = {}
+    if suggest_revert is not None:
+        kwargs["auto_suggest"] = _RevertSuggest(suggest_revert)
+    if placeholder:
+        kwargs["placeholder"] = HTML(f"<ansibrightblack>{placeholder}</ansibrightblack>")
     try:
-        return (await session.prompt_async(HTML("<ansicyan><b>❯ </b></ansicyan>"))).strip()
+        return (await session.prompt_async(HTML("<ansicyan><b>❯ </b></ansicyan>"), **kwargs)).strip()
     except EOFError:
         return None   # Ctrl-D → quit
     except KeyboardInterrupt:

@@ -17,7 +17,7 @@ from roger.apps import config, ui
 import roger.serving.model_setup as model_setup
 from roger.serving.model_setup import fetch_model
 from roger.agency.rollout_utils import rollout
-from roger.tools import mcp_utils
+from roger.tools import mcp_utils, std_tools
 
 console = Console(highlight=False)
 
@@ -137,12 +137,16 @@ async def _repl(cfg: dict, root: str) -> None:
     renderer   = ui.StreamRenderer(verbose=cfg["verbose"], think_delims=think_delims,
                                    tool_delims=tool_delims, specials=specials)
 
+    # Gray dummy task shown as ghost text while the input box is empty (startup + idle turns).
+    placeholder = "Ask Roger to do something…"
+
     async def read_turn(preamble: str = "") -> str | None:
         """Next user turn for the rollout. Surfaces any pending revert notice first; None on Ctrl-D."""
         if preamble:
             console.print()
             console.print(preamble, style="dim", markup=False)  # paths may contain []; don't parse markup
-        return await ui.read_prompt(session)
+        return await ui.read_prompt(session, suggest_revert=std_tools.pending_backups,
+                                    placeholder=placeholder)
 
     # First task: read until a non-empty prompt (or quit on Ctrl-D)
     while True:

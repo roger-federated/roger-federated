@@ -225,32 +225,36 @@ def _user_turn_delta(tokenizer, asst_msg, text, device) -> torch.Tensor:
     return torch.tensor([full[len(base):]], device=device, dtype=torch.long)
 
 
+def _revert_preamble(backups) -> str:
+    """Numbered listing of every file still changed this session + the /revert hint (empty if none)."""
+    if not backups:
+        return ""
+    listing = "\n".join(f"  {k+1}. {orig}" for k, (orig, _b) in enumerate(backups))
+    return ("Files changed this session:\n" + listing +
+            "\nType '/revert' (or '/revert 1,3') to undo, or just enter your next task.")
+
+
 async def _await_user_turn(read_turn, trajectory, seg_start) -> str | None:
-    """Next user turn (None on Ctrl-D). Non-obstructing revert: list changed files; the user types
-    'revert'/'revert 1,3' (penalised -n*W_REVERT over trajectory[seg_start:]) or just their next task."""
-    backups = pending_backups()
-    preamble = ""
-    if backups:
-        listing  = "\n".join(f"  {k+1}. {orig}" for k, (orig, _b) in enumerate(backups))
-        preamble = ("Files changed this task:\n" + listing +
-                    "\nType 'revert' (or 'revert 1,3') to undo, or just enter your next task.")
+    """Next user turn (None on Ctrl-D). Non-obstructing revert: list every file still changed this
+    session; the user types '/revert'/'/revert 1,3' (penalised -n*W_REVERT over trajectory[seg_start:])
+    or just their next task. Backups persist across tasks — a partial revert keeps the rest, so the
+    listing accumulates until each file is explicitly reverted."""
+    preamble = _revert_preamble(pending_backups())
     while True:
         nxt = await read_turn(preamble)
-        preamble = ""                       # show the revert notice only once
+        preamble = ""                       # show the revert notice only once per offer
         if nxt is None:                     # Ctrl-D → end session
             return None
         nxt = nxt.strip()
         if not nxt:                         # empty line → re-prompt
             continue
-        if backups and nxt.lower().startswith("revert"):
-            n = apply_revert(nxt[len("revert"):].strip() or "all")
+        if pending_backups() and nxt.lower().startswith("/revert"):
+            n = apply_revert(nxt[len("/revert"):].strip() or "all")
             for entry in trajectory[seg_start:]:
                 entry["reward"] -= n * reward_utils.W_REVERT
-            backups = []
+            preamble = _revert_preamble(pending_backups())   # re-offer any files left
             continue
-        if backups:                         # moved on without reverting → drop backups
-            apply_revert("none")
-        return nxt
+        return nxt                          # moved on → backups stay pending for next time
 
 
 async def rollout(model: transformers.modeling_utils.PreTrainedModel,

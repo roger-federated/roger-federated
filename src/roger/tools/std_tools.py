@@ -14,7 +14,7 @@ Usage:
     await rollout(..., tools=tools, tool_handlers=handlers)
 """
 
-import os, shutil, time, tempfile
+import os, re, shutil, time, tempfile
 from ddgs import DDGS                  # keyless DuckDuckGo search + page fetch (web_search/web_fetch)
 from roger.tools import shell_tools   # shell execution + policy machinery lives here
 from roger.agency.path_utils import state_dir
@@ -218,26 +218,30 @@ def pending_backups() -> list[tuple[str, str]]:
 
 
 def apply_revert(answer: str) -> int:
-    """Revert backed-up files per `answer` ('all' / '1,2,...' / 'none') and clear the backup list.
-    Returns the number of files reverted. Always clears _backups — the decision is final, so the
-    caller can offer revert non-blockingly (an unparseable / 'none' answer just discards backups)."""
+    """Revert backed-up files per `answer` ('all' / '1,3' / 'none'); return the count reverted.
+    Only the reverted entries are popped from _backups — a partial revert keeps the rest available
+    for a later offer (so the user can revert one file now and the others next time). 'none' discards
+    everything; an answer with no recognised index is a no-op (doesn't clear), so an accidental
+    ghost-text accept can't wipe the list."""
     answer = (answer or "").strip().lower()
-    if answer in ("none", ""):
+    if answer == "none":
         _backups.clear(); return 0
-    if answer == "all":
-        indices = list(range(len(_backups)))
+    if answer in ("", "all"):
+        indices = set(range(len(_backups)))
     else:
-        try:
-            indices = [int(x.strip()) - 1 for x in answer.split(",")]
-        except ValueError:
-            _backups.clear(); return 0
+        # Keep only integer tokens (split on commas/whitespace); ignore anything else.
+        indices = {int(t) - 1 for t in re.split(r"[,\s]+", answer) if t.isdigit()}
+        if not indices:
+            return 0
     n_reverted = 0
-    for idx in indices:
-        if 0 <= idx < len(_backups):
-            orig, bak = _backups[idx]
+    kept: list[tuple[str, str]] = []
+    for idx, (orig, bak) in enumerate(_backups):
+        if idx in indices:
             try: shutil.copy2(bak, orig); n_reverted += 1
-            except OSError: pass
-    _backups.clear()
+            except OSError: kept.append((orig, bak))   # restore failed → keep so the user can retry
+        else:
+            kept.append((orig, bak))                   # not selected → still pending
+    _backups[:] = kept
     return n_reverted
 
 
