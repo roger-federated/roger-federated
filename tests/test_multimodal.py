@@ -1,11 +1,20 @@
-"""_result_to_ids: text → no mm kwargs; image → mm kwargs passthrough (seq-aligned sliced, per-image whole)."""
+"""_result_to_ids: text → no mm kwargs; image → mm kwargs passthrough (seq-aligned sliced, per-image whole).
+Also covers media extraction: _parse_result flattening and MCP block → media/placeholder mapping."""
+import base64, io
+from types import SimpleNamespace
 import torch
 from PIL import Image
 from transformers import BatchEncoding
 
-from roger.agency.rollout_utils import _result_to_ids
+from roger.agency.rollout_utils import _result_to_ids, _parse_result
+from roger.tools.mcp_utils import _mcp_block
 
 TOOL_RES = 99  # stand-in <|tool_response> boundary id
+
+
+def _png_b64() -> str:
+    buf = io.BytesIO(); Image.new("RGB", (4, 4)).save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode()
 
 
 class _StubProcessor:
@@ -34,3 +43,18 @@ def test_image_result_passes_mm_and_slices():
     assert extra["token_type_ids"].shape == (1, 4)  # seq-aligned tensor sliced to the delta
     assert extra["pixel_values"].shape == (1, 3, 4, 4)  # per-image tensor kept whole
     assert "input_ids" not in extra and "attention_mask" not in extra
+
+
+def test_parse_result_flattens_mixed():
+    blocks = _parse_result([Image.new("RGB", (2, 2)), "caption", Image.new("RGB", (2, 2))])
+    assert [b["type"] for b in blocks] == ["image", "text", "image"]
+
+
+def test_mcp_block_extracts_image_text_resource_and_placeholder():
+    assert _mcp_block(SimpleNamespace(type="text", text="hi")) == "hi"
+    assert isinstance(_mcp_block(SimpleNamespace(type="image", data=_png_b64(), mimeType="image/png")), Image.Image)
+    res_img = SimpleNamespace(type="resource",
+        resource=SimpleNamespace(blob=_png_b64(), mimeType="image/png", uri="screen://1"))
+    assert isinstance(_mcp_block(res_img), Image.Image)
+    # unknown/link block → compact placeholder, not a base64 dump
+    assert _mcp_block(SimpleNamespace(type="resource_link", uri="http://x")).startswith("[resource_link")

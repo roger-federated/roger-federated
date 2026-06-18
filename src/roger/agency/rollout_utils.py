@@ -169,6 +169,8 @@ def _parse_result(result):
     """Convert a tool result to an HF content list (list of typed dicts)."""
     if isinstance(result, Image.Image):
         return [{"type": "image", "image": result}]
+    if isinstance(result, (list, tuple)):   # mixed/multiple blocks (e.g. MCP image + caption)
+        return [blk for item in result for blk in _parse_result(item)]
     if isinstance(result, (torch.Tensor, np.ndarray)):  # torchaudio / librosa
         return [{"type": "audio", "audio": result}]
     try:

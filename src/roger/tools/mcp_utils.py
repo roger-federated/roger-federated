@@ -29,6 +29,38 @@ from PIL import Image
 from roger.agency.path_utils import state_dir
 
 
+def _audio(b64: str):
+    "base64 audio → pydub.AudioSegment (normalised to an array downstream by _parse_result), or None."
+    try:
+        from pydub import AudioSegment
+        return AudioSegment.from_file(io.BytesIO(base64.b64decode(b64)))
+    except Exception:   # pydub/ffmpeg missing or payload not decodable
+        return None
+
+
+def _mcp_block(c):
+    """One MCP content block → PIL.Image | pydub.AudioSegment | str. Images/audio become media
+    objects that _parse_result turns into model inputs; everything else (binary resources,
+    resource_links, unknown types) degrades to a compact text placeholder, not a base64 blob."""
+    t = getattr(c, "type", None)
+    if t == "text":
+        return c.text
+    if t == "image":
+        return Image.open(io.BytesIO(base64.b64decode(c.data)))
+    if t == "audio":
+        return _audio(c.data) or f"[audio {getattr(c, 'mimeType', '') or ''}]".strip()
+    if t == "resource":   # EmbeddedResource: text or base64 blob (+ mimeType)
+        r = c.resource
+        mime, blob = str(getattr(r, "mimeType", "") or ""), getattr(r, "blob", None)
+        if blob is not None and mime.startswith("image/"):
+            return Image.open(io.BytesIO(base64.b64decode(blob)))
+        if blob is not None and mime.startswith("audio/"):
+            return _audio(blob) or f"[resource {getattr(r, 'uri', '') or ''} {mime}]".strip()
+        text = getattr(r, "text", None)
+        return text if text is not None else f"[resource {getattr(r, 'uri', '') or ''} {mime}]".strip()
+    return f"[{t} {getattr(c, 'uri', '') or ''}]".strip()   # resource_link / unknown
+
+
 def _strip_schema(schema: dict) -> dict:
     """Remove meta-fields ($schema, additionalProperties, etc.) that waste tokens
     in the prompt without helping the model produce valid tool calls."""
@@ -126,14 +158,9 @@ class MCPConnection:
         original = self._orig[prefixed]
         async def handler(**kwargs):
             result = await self._session.call_tool(original, kwargs)
-            # Single image block → PIL.Image (e.g. Playwright screenshot)
-            # Use the explicit type field rather than duck-typing .data
-            if len(result.content) == 1 and getattr(result.content[0], "type", None) == "image":
-                c = result.content[0]
-                return Image.open(io.BytesIO(base64.b64decode(c.data)))
-            # Text blocks → joined string; anything else (audio, resource) falls back to str()
-            texts = [c.text for c in result.content if getattr(c, "type", None) == "text"]
-            return "\n".join(texts) if texts else str(result.content)
+            items = [_mcp_block(c) for c in result.content]
+            # All-text (the common case) → one joined string; mixed/media → list for _parse_result.
+            return "\n".join(items) if all(isinstance(x, str) for x in items) else items
         handler.__name__ = prefixed
         return handler
 
