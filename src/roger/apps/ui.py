@@ -20,7 +20,7 @@ from rich.live import Live
 from rich.markdown import Markdown
 from prompt_toolkit import PromptSession
 from prompt_toolkit.auto_suggest import AutoSuggest, Suggestion
-from prompt_toolkit.formatted_text import HTML
+from prompt_toolkit.formatted_text import HTML, FormattedText
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.styles import Style as PTStyle
 
@@ -498,7 +498,9 @@ async def read_prompt(session: PromptSession, suggest_revert: Callable[[], list]
     if suggest_revert is not None:
         kwargs["auto_suggest"] = _RevertSuggest(suggest_revert)
     if placeholder:
-        kwargs["placeholder"] = HTML(f"<ansibrightblack>{placeholder}</ansibrightblack>")
+        # Pass as a styled (style, text) tuple, not an HTML f-string: the text is literal, so a
+        # placeholder containing XML-reserved chars (&, <, >) won't blow up minidom's parser.
+        kwargs["placeholder"] = FormattedText([("fg:ansibrightblack", placeholder)])
     try:
         return (await session.prompt_async(HTML("<ansicyan><b>❯ </b></ansicyan>"), **kwargs)).strip()
     except EOFError:
