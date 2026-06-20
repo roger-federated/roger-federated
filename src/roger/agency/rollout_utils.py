@@ -13,7 +13,7 @@ from lmformatenforcer.integrations.transformers import build_transformers_prefix
 from collections.abc import Callable
 from roger.tools.std_tools import get_standard_tools, finish_score, pending_backups, apply_revert, maxsteps_checkin
 from roger.tools.shell_tools import drain_finished_jobs, pending_jobs, terminate_jobs, shell_idioms
-from roger.serving.model_setup import find_gen_prompt, find_tool_res_id, find_tool_call_tokens
+from roger.serving.model_setup import find_gen_prompt, find_tool_res_id, find_tool_call_tokens, find_think_tokens
 from roger.agency import recording
 
 def _make_tool_loader(tools):
@@ -279,6 +279,8 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
 
     # tool_tokens: (open, close) ids bracketing a tool call; probed from the chat template.
     tool_tokens = find_tool_call_tokens(processor.tokenizer)
+    # think_tokens: (open, close) reasoning-channel ids, or None; the finish-nudge seeds the open id.
+    think_tokens = find_think_tokens(processor.tokenizer)
     # tool_res_id: <|tool_response> boundary; used to slice prompt-free deltas.
     tool_res_id = find_tool_res_id(processor.tokenizer)
     asst_msg = [{"role": "assistant", "tool_calls": [   # reused in feedback injection below
@@ -331,6 +333,14 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
                  f"Project-specific facts (e.g., conventions, overview) go in {_proj_mem}.")
     mem_inner  = _build_inner_fn(processor.tokenizer, ["write_file", "edit_file"]) if enable_memory else None
     saving_mem = False
+    # Finish-nudge: run one turn seeded with a reasoning preamble; the name-enum stays unconstrained
+    _FIN_SEED = ("Now let me decide: did I just have an interaction that I should grade? If it was merely "
+                 "a plain answer, no further action is needed. If it was a task where I emitted tool "
+                 "calls, I'll call `finish` with an honest self-eval score in [-1, 1], weighing how "
+                 "directly and efficiently I reached the goal (preferring very few wasted, wrong, or "
+                 "redundant steps), and how accurate and complete the result is. 1 for a clean, fully-"
+                 "correct solve, around 0 for partial or clumsy, negative if I largely failed.")
+    nudging_finish = False
 
     # RAG: build corpus index once (deterministic; no re-indexing on mid-rollout edits)
     rag_index = build_index(rag_root or root or os.getcwd()) if enable_rag else None
@@ -402,6 +412,14 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
                 [input_ids, torch.tensor([_seed], device=model.device, dtype=torch.long)], dim=1)
             new_idx = input_ids.shape[1] - 1    # slice from the open token; constraint engages immediately
             active_fn = mem_inner
+        elif nudging_finish:
+            # Seed the preamble inside the think channel (open id, no tool-open → finish stays optional).
+            _seed = ([think_tokens[0]] if think_tokens else []) \
+                    + processor.tokenizer.encode(_FIN_SEED, add_special_tokens=False)
+            input_ids = torch.cat(
+                [input_ids, torch.tensor([_seed], device=model.device, dtype=torch.long)], dim=1)
+            new_idx   = input_ids.shape[1]      # generate after the seed; seed is side-effect-only
+            active_fn = inner_fn                # unconstrained: finish optional
         else:
             new_idx   = input_ids.shape[1]
             active_fn = inner_fn
@@ -431,6 +449,9 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
         # Generate with a fresh streamer; _drain() forwards tokens to on_token concurrently.
         # suppress=saving_mem: that turn's open delim is seeded into the prompt (never streamed).
         if on_gen_start: on_gen_start(suppress=saving_mem)
+        # The nudge's think-open sits in the skipped prompt; feed it so its reasoning collapses.
+        if nudging_finish and think_tokens and on_token:
+            on_token(processor.tokenizer.decode([think_tokens[0]]))
         streamer = transformers.AsyncTextIteratorStreamer(processor.tokenizer, skip_prompt=True)
         loop = asyncio.get_event_loop()
         async def _drain():
@@ -453,22 +474,24 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
         if saving_mem:
             break   # memory is now written; end
 
-        # Step reward: sum auto_signal over all results in this turn, clamped to [-1, 1]
-        step_reward = max(-1.0, min(1.0,
-            sum(reward_utils.auto_signal(r) for _, r in results)))
-        # Read the grammar masks the processor recorded by absolute position; one entry per
-        # recorded logit step (accepted token), so masks/logits/tokens line up under any decoding.
-        mask_log = [mask_by_pos.get(new_idx + t) for t in range(len(outputs.logits))]
-        entry = {
-            "gen_token_ids": new_ids,
-            "logits": torch.stack(outputs.logits).detach().cpu(),
-            "masks": mask_log,
-            "reward": step_reward,
-        }
-        if pending_mm is not None:   # store the mm tensors for RL replay
-            entry["input_mm"] = {k: (v.detach().cpu() if torch.is_tensor(v) else v) for k, v in pending_mm.items()}
-            pending_mm = None
-        trajectory.append(entry)
+        # Nudge turn is side-effect-only: keep its seeded tokens out of the trajectory.
+        if not nudging_finish:
+            # Step reward: sum auto_signal over all results in this turn, clamped to [-1, 1]
+            step_reward = max(-1.0, min(1.0,
+                sum(reward_utils.auto_signal(r) for _, r in results)))
+            # Read the grammar masks the processor recorded by absolute position; one entry per
+            # recorded logit step (accepted token), so masks/logits/tokens line up under any decoding.
+            mask_log = [mask_by_pos.get(new_idx + t) for t in range(len(outputs.logits))]
+            entry = {
+                "gen_token_ids": new_ids,
+                "logits": torch.stack(outputs.logits).detach().cpu(),
+                "masks": mask_log,
+                "reward": step_reward,
+            }
+            if pending_mm is not None:   # store the mm tensors for RL replay
+                entry["input_mm"] = {k: (v.detach().cpu() if torch.is_tensor(v) else v) for k, v in pending_mm.items()}
+                pending_mm = None
+            trajectory.append(entry)
 
         # finish checkpoints this task: broadcast its self-eval grade over the task's steps
         # (since the last user turn), then save the running episode.
@@ -477,9 +500,12 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
             for entry in trajectory[seg_start:]:
                 entry["reward"] += grade
             run_dir = recording.save_run(trajectory, first_prompt, run_dir)
-        # task ended on a plain answer, no finish() → no self-eval grade for this segment
+        # Plain answer, no finish() → model thinks it's done. Nudge it once to self-evaluate
         if not results and not (pending := pending_jobs()):
-            import warnings; warnings.warn("Task ended without calling finish(); no self-eval reward assigned to this segment.")
+            if not nudging_finish:
+                nudging_finish = True
+                input_ids = gen_ids
+                continue
         # Mutually exclusive: bg-wait (another model turn) | task done (await user) | tool results.
         if not results and pending: 
             # Note: branch not immediately activated when a command is emitted with background=True, because it returns job id
@@ -487,6 +513,7 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
             bg = _bg_msgs(processor, tool_res_id, model.device)
             input_ids = torch.cat([gen_ids, bg], dim=1) if isinstance(bg, torch.Tensor) else gen_ids
         elif not results or any(name == "finish" for name, _ in results):
+            # TODO: prompt user to press ctrl-D if they want to quit
             next_text = await _await_user_turn(read_turn, trajectory, seg_start) if read_turn else None
             if next_text is None:                 # Ctrl-D → one memory turn (if any), then end
                 if enable_memory and not saving_mem:
@@ -498,6 +525,7 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
             input_ids = torch.cat([gen_ids, _user_turn_delta(processor.tokenizer, asst_msg, next_text, model.device)], dim=1)
             seg_start = len(trajectory)           # next finish grades only this fresh segment
             i = 0                                 # fresh max-steps budget per task
+            nudging_finish = False                # arm a fresh finish-nudge for the next task
             continue
         else:
             tool_ids, pending_mm = _result_to_ids(results, processor, tool_res_id, model.device)  # mm (or None) → next generate

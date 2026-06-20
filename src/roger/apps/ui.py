@@ -79,9 +79,9 @@ def _latex_to_unicode(text: str) -> str:
 class StreamRenderer:
     """Feed text chunks from on_token; collapses thinking-channel blocks inline.
 
-    think_delims: (open_str, close_str) scraped from the tokenizer by
-                  model_setup.find_think_delims — e.g. ("<|channel>", "<channel|>")
-                  for Gemma-4. None → skip thinking detection (stream raw).
+    think_delims: (open_str, close_str) decoded from model_setup.find_think_tokens —
+                  e.g. ("<|channel>", "<channel|>") for Gemma-4.
+                  None → skip thinking detection (stream raw).
     tool_delims:  (open_str, close_str) decoded from tool_tokens — e.g.
                   ("<|tool_call>", "<tool_call|>"). None → skip suppression.
     specials:     all decoded special-token strings; any that surface in answer text (turn close,

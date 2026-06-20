@@ -124,7 +124,8 @@ async def _repl(cfg: dict, root: str) -> None:
                       "(auto-saved to config) for faster speculative decoding.[/yellow]")
     # Decode delimiter token-ids back to strings for the text renderer; derive think-channel once
     tool_delims  = tuple(tokenizer.decode([t]) for t in model_setup.find_tool_call_tokens(tokenizer))
-    think_delims = model_setup.find_think_delims(tokenizer)
+    _think_ids   = model_setup.find_think_tokens(tokenizer)
+    think_delims = tuple(tokenizer.decode([t]) for t in _think_ids) if _think_ids else None
     # All special-token strings: the renderer drops any that surface in answer text (turn close,
     # tool_response, eos, …) — the model emits them structurally but they must not be printed.
     specials = [tokenizer.decode([t]) for t in tokenizer.all_special_ids]

@@ -44,14 +44,15 @@ def find_tool_call_tokens(tokenizer) -> tuple[int, int]:
         raise ValueError("find_tool_call_tokens: no close-delimiter found (Mistral-style single-token calls are unsupported).")
     return open_id, close_id
 
-def find_think_delims(tokenizer) -> tuple[str, str] | None:
-    """Probe the chat template for the thinking/reasoning channel delimiters.
+def find_think_tokens(tokenizer) -> tuple[int, int] | None:
+    """Probe the chat template for the thinking/reasoning channel delimiter token ids.
 
     Forces a message with reasoning_content through the template; the first new special
-    token (before the tool-call open) is the channel open, the next is its close.
-    Returns decoded strings (e.g. ("<|channel>", "<channel|>") for Gemma-4) so the text
-    renderer can do string matching without needing token IDs.
-    Returns None if the template renders no thinking channel (non-reasoning model).
+    token (before the tool-call open) is the channel open, the next is its close. Mirrors
+    find_tool_call_tokens but is non-fatal. Callers needing strings decode the ids (e.g.
+    the text renderer); the rollout injects the open id to seed a thought.
+    Returns None if the template renders no thinking channel (non-reasoning model) or omits
+    a close token (can't delimit without it; stream raw).
     """
     forcing  = [{"role": "user", "content": "x"},
                 {"role": "assistant", "reasoning_content": "r",
@@ -60,12 +61,9 @@ def find_think_delims(tokenizer) -> tuple[str, str] | None:
     baseline = [{"role": "user", "content": "x"},
                 {"role": "assistant", "content": "x"}]
     result = _probe_delims(tokenizer, forcing, baseline)
-    if result is None:
+    if result is None or result[1] is None:
         return None
-    open_id, close_id = result
-    if close_id is None:
-        return None     # can't delimit without a close token; stream raw
-    return tokenizer.decode([open_id]), tokenizer.decode([close_id])
+    return result
 
 def find_gen_prompt(tokenizer) -> list[int]:
     """Token ids of the assistant-turn cue (add_generation_prompt diff). Returns [] if none."""
