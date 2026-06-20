@@ -513,7 +513,7 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
             bg = _bg_msgs(processor, tool_res_id, model.device)
             input_ids = torch.cat([gen_ids, bg], dim=1) if isinstance(bg, torch.Tensor) else gen_ids
         elif not results or any(name == "finish" for name, _ in results):
-            # TODO: prompt user to press ctrl-D if they want to quit
+            # read_turn's placeholder reminds the user that Ctrl-D quits and saves memory
             next_text = await _await_user_turn(read_turn, trajectory, seg_start) if read_turn else None
             if next_text is None:                 # Ctrl-D → one memory turn (if any), then end
                 if enable_memory and not saving_mem:

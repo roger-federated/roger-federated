@@ -139,7 +139,10 @@ async def _repl(cfg: dict, root: str) -> None:
                                    tool_delims=tool_delims, specials=specials)
 
     # Gray dummy task shown as ghost text while the input box is empty (startup + idle turns).
-    placeholder = "Ask Roger to do something…"
+    # The Ctrl-D hint matters: quitting that way is what triggers the model's memory-save turn,
+    # so a user who instead kills the terminal loses what it would have remembered.
+    placeholder = ("Ask Roger to do something…  (Ctrl-D to quit & save memory)"
+                   if cfg["enable_memory"] else "Ask Roger to do something…  (Ctrl-D to quit)")
 
     async def read_turn(preamble: str = "") -> str | None:
         """Next user turn for the rollout. Surfaces any pending revert notice first; None on Ctrl-D."""
