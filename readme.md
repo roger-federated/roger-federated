@@ -39,7 +39,7 @@ cd roger-federated
 
 - **Recommended:**
 
-Additionally requires [`uv`](https://docs.astral.sh/uv/) to be installed (auto-provisions Python, isolates dependencies).
+Additionally requires [`uv`](https://docs.astral.sh/uv/getting-started/installation/) to be installed (provisions Python and isolates dependencies).
 
 ```bash
 uv tool install . --torch-backend auto   # installs `roger` globally; auto-picks CUDA/CPU torch
@@ -125,7 +125,7 @@ Roger has the potential to perform any digital task. In other words, there is no
 ---
 
 ### Progress & contributing
-This software is still in development. Below is a non-exhaustive list of to-do items. Of course we are an open-source community, so **feel free to open an issue or pull request!**
+This software is still in development. Below is a non-exhaustive list of to-do items. Of course, we are an open-source community, so **feel free to open an issue or pull request!**
 
 - [x] Investigate framework and open-source models.
 - [x] Set up automatic model loading.
@@ -145,13 +145,14 @@ This software is still in development. Below is a non-exhaustive list of to-do i
 - [x] *Congrats, you now have a semi-basic agent.*
 - [x] Implement what the finetuning framework considers as rewards.
 - [x] LLM-as-judge (self-evaluation inspired by RLSR, SRT, Co-rewarding, meta-evaluation; requires a portion of ground truth).
-- [ ] Implement automatic LoRA RL execution.
-- [ ] Implement federated learning-style hives.
-- [ ] Sandboxed docker environments.
-- [ ] Implement account setup, hives selection, finetuning scheduling, gradient sharing setup, as well as (background/execution) autonomy setup.
+- [x] Implement automatic QLoRA REINFORCE++.
+- [ ] Use privacy filter for training data.
+- [ ] Set up (differential) gradient sharing.
 - [ ] *Congrats, you now have a shippable.*
 
 Further into the future:
+- [ ] Implement federated learning-style hives.
+- [ ] Sandboxed docker environments.
 - [ ] Native support for agent loops.
 - [ ] Automatic subagent spawning and automatic git worktrees.
 - [ ] Dynalang-style world model for embedded state roll-forward.
