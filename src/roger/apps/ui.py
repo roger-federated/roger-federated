@@ -321,6 +321,10 @@ def render_tool_call(name: str, args: dict) -> None:
 
 def render_tool_result(name: str, result, args: dict = None) -> None:
     """Print a formatted panel (or concise intent line) for a tool result."""
+    # finish has no payload; the score is shown by render_tool_call
+    if name == "finish":
+        return
+
     # --- edit_file diff ---
     if name == "edit_file" and args and str(result).startswith("Replaced"):
         _render_diff(args.get("path", "?"), args.get("old", ""), args.get("new", ""))

@@ -353,11 +353,13 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
     # Finish-nudge: run one turn seeded with a reasoning preamble; the name-enum stays unconstrained
     _FIN_SEED = ("Now let me decide: did I just have an interaction that I should grade? If it was merely "
                  "a conversation, no further action is needed. Instead, if it was a task where I emitted tool "
-                 "calls, I'll call `finish` with an honest self-eval score in [-1, 1], weighing how "
-                 "directly and efficiently I reached the goal (preferring very few wasted, wrong, or "
+                 "calls, I'll call `finish` with an honest self-eval score in [-1, 1]. If this is the case, I should "
+                 "weigh how directly and efficiently I reached the goal (preferring very few wasted, wrong, or "
                  "redundant steps), and how accurate and complete the result is. 1 for a clean, fully-"
                  "correct solve, around 0 for partial or clumsy, negative if I largely failed.")
     nudging_finish = False
+    # Only a task warrants a finish-nudge
+    emitted_tool_call = False
 
     # RAG: build corpus index once (deterministic; no re-indexing on mid-rollout edits)
     rag_index = build_index(rag_root or root or os.getcwd()) if enable_rag else None
@@ -490,6 +492,8 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
                                       on_tool_call=on_tool_call, on_tool_result=on_tool_result)
         if saving_mem:
             break # memory is now written; end
+        if results:
+            emitted_tool_call = True
 
         # Nudge turn is side-effect-only: keep its seeded tokens out of the trajectory.
         if not nudging_finish:
@@ -523,7 +527,7 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
                                          seq_ids=gen_ids.squeeze(0).detach().cpu())
         # Plain answer, no finish() → model thinks it's done. Nudge it once to self-evaluate
         if not results and not (pending := pending_jobs()):
-            if not nudging_finish:
+            if not nudging_finish and emitted_tool_call:
                 nudging_finish = True
                 input_ids = gen_ids
                 continue
@@ -547,6 +551,7 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
             seg_start = len(trajectory)           # next finish grades only this fresh segment
             i = 0                                 # fresh max-steps budget per task
             nudging_finish = False                # arm a fresh finish-nudge for the next task
+            emitted_tool_call = False             # fresh segment: re-decide task-vs-conversation
             continue
         else:
             tool_ids, pending_mm = _result_to_ids(results, processor, tool_res_id, model.device)  # mm (or None) → next generate

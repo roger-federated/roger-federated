@@ -149,13 +149,12 @@ def prompt_user(question: str) -> str:
     return _prompt_backend(question)
 
 
-def finish(score: float = 0.0, message: str = "") -> str:
-    """Signal that the current task is complete, with an honest self-evaluation of how well it went.
+def finish(score: float = 0.0) -> str:
+    """Call when you have finished a task.
     Args:
         score: Your self-evaluation in [-1, 1] of how well the task was accomplished
                (1 = fully succeeded, 0 = unclear / partial, -1 = failed). This is the training
                reward for the task, so grade truthfully.
-        message: Final answer / summary to show the user. May be empty.
     """
     # The rollout loop detects this call by name, reads the grade via finish_score(), then awaits
     # the user's next turn. Coerce defensively: the decoding constraint does not type-check
@@ -165,7 +164,7 @@ def finish(score: float = 0.0, message: str = "") -> str:
         _finish_score = max(-1.0, min(1.0, float(score)))
     except (TypeError, ValueError):
         _finish_score = 0.0
-    return message or "(done)"
+    return "(done)"
 
 
 def finish_score() -> float:
