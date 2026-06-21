@@ -27,7 +27,7 @@ _BANNER = """[bold cyan]
   Config: [cyan]{cfg_path}[/cyan]  |  Model: [cyan]{model}[/cyan]
   Type your task and press Enter. Ctrl-D to quit the session.
   Tip: Plug in your computer before starting a long-running task and disable sleep in your system settings.
-  Tip: Follow-up tasks reuse the model's context (KV-cache), so start a fresh session for new tasks.
+  Tip: To avoid polluting the KV-cache, start a fresh session for new tasks.
 """
 
 # ---------------------------------------------------------------------------
