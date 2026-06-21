@@ -2,14 +2,17 @@
 
 Each run is saved to:
   ~/.roger/runs/<ISO-timestamp>/
-    trajectory.pt       — torch.save of per-step tensors (gen_token_ids, logits,
+    trajectory.pt       — torch.save of per-step dicts (gen_start, old_logp,
                           masks, reward; optional input_mm = mm kwargs dict
                           (pixel_values, token_type_ids, …) when that turn's
                           input carried an image); consumed by the REINFORCE++ trainer.
+    sequence.pt         — the cumulative token-id sequence for the episode; the trainer slices
+                          each turn's span [gen_start, gen_start+len) out of it to teacher-force
+                          a differentiable forward pass.
     transcript.jsonl    — human-readable prompt + per-step events.
 
 Public API:
-  save_run(trajectory, prompt, run_dir=None) → str  (returns the run directory path)
+  save_run(trajectory, prompt, run_dir=None, seq_ids=None) → str  (returns the run directory path)
 """
 import json, os
 from datetime import datetime, timezone
@@ -23,7 +26,8 @@ from roger.agency.path_utils import state_dir
 console = Console(highlight=False)
 
 
-def save_run(trajectory: list, prompt: str, run_dir: str | None = None) -> str:
+def save_run(trajectory: list, prompt: str, run_dir: str | None = None,
+             seq_ids: torch.Tensor | None = None) -> str:
     """Save trajectory to disk. Reuse `run_dir` if given (a continuous session checkpoints the
     same growing episode on every finish); otherwise create a fresh ~/.roger/runs/<timestamp>/
     and return it so the caller can keep checkpointing into it."""
@@ -35,9 +39,13 @@ def save_run(trajectory: list, prompt: str, run_dir: str | None = None) -> str:
         run_dir = os.path.join(state_dir(), "runs", ts)
     os.makedirs(run_dir, exist_ok=True)
 
-    # --- trajectory.pt: tensors only (RL training input) ---
-    # Each step has gen_token_ids (tensor), logits (tensor|None), masks (tensor|None), reward (float)
+    # --- trajectory.pt: per-step dicts (RL training input) ---
+    # Each step has gen_start (int), old_logp (tensor), masks (list), reward (float)
     torch.save(trajectory, os.path.join(run_dir, "trajectory.pt"))
+    # --- sequence.pt: the cumulative token ids the trainer teacher-forces over ---
+    # Re-saved (overwritten) on each checkpoint; the latest is a superset covering every gen_start.
+    if seq_ids is not None:
+        torch.save(seq_ids, os.path.join(run_dir, "sequence.pt"))
 
     # --- transcript.jsonl: human-readable, one JSON object per line ---
     transcript_path = os.path.join(run_dir, "transcript.jsonl")
@@ -48,14 +56,10 @@ def save_run(trajectory: list, prompt: str, run_dir: str | None = None) -> str:
             entry = {"type": "step", "step": i, "reward": float(step.get("reward", 0))}
             if "input_mm" in step:
                 entry["has_image"] = True
-            # Include decoded token IDs as text if a tokenizer is not available here;
-            # raw token IDs are more useful for debugging than silence.
-            ids = step.get("gen_token_ids")
-            if ids is not None:
-                if hasattr(ids, "tolist"):
-                    entry["gen_token_ids_len"] = len(ids.tolist())
-                else:
-                    entry["gen_token_ids_len"] = len(ids)
+            # One mask per generated token, so its length is the turn's generated-token count.
+            masks = step.get("masks")
+            if masks is not None:
+                entry["gen_len"] = len(masks)
             f.write(json.dumps(entry) + "\n")
 
     console.print(f"[dim]Run saved → {run_dir}[/dim]")

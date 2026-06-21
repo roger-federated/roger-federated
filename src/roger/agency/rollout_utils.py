@@ -14,7 +14,7 @@ from collections.abc import Callable
 from roger.tools.std_tools import get_standard_tools, finish_score, pending_backups, apply_revert, maxsteps_checkin
 from roger.tools.shell_tools import drain_finished_jobs, pending_jobs, terminate_jobs, shell_idioms
 from roger.serving.model_setup import find_gen_prompt, find_tool_res_id, find_tool_call_tokens, find_think_tokens
-from roger.agency import recording
+from roger.training import recording
 
 def _make_tool_loader(tools):
     """Build a terse catalog string + load_tools closure for deferred schema loading.
@@ -115,6 +115,23 @@ def _make_constraint_processor(inner, tokenizer, tool_tokens, new_idx):
         return scores + mask
 
     return processor, mask_by_pos
+
+
+def _old_logps(step_logits, masks, token_ids: torch.Tensor, device) -> torch.Tensor:
+    """Per-token behaviour log-prob, computed here where the exact allowed-set is known (so we
+    store the scalar, not the full [steps, vocab] logits). Re-imposing the decoded mask (None =
+    full vocab) makes it identical in definition to the trainer's `new_logp`. 1-D CPU, per token."""
+    toks = token_ids.to(device).long()
+    out  = torch.empty(toks.numel(), dtype=torch.float32, device=device)
+    for t in range(toks.numel()):
+        logits  = step_logits[t].squeeze(0).float()         # [vocab]; raw per-step scores
+        allowed = masks[t]
+        if allowed is not None:                             # restrict to the decoded allowed-set
+            m = torch.full_like(logits, float("-inf"))
+            m[allowed] = 0.0
+            logits = logits + m
+        out[t] = torch.log_softmax(logits, dim=-1)[toks[t]]
+    return out.detach().cpu()
 
 
 async def _execute_tools(sequences: torch.Tensor, tokenizer: transformers.PreTrainedTokenizer,
@@ -335,7 +352,7 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
     saving_mem = False
     # Finish-nudge: run one turn seeded with a reasoning preamble; the name-enum stays unconstrained
     _FIN_SEED = ("Now let me decide: did I just have an interaction that I should grade? If it was merely "
-                 "a plain answer, no further action is needed. If it was a task where I emitted tool "
+                 "a conversation, no further action is needed. Instead, if it was a task where I emitted tool "
                  "calls, I'll call `finish` with an honest self-eval score in [-1, 1], weighing how "
                  "directly and efficiently I reached the goal (preferring very few wasted, wrong, or "
                  "redundant steps), and how accurate and complete the result is. 1 for a clean, fully-"
@@ -472,19 +489,20 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
         results = await _execute_tools(new_ids, processor.tokenizer, tool_handlers, tool_tokens,
                                       on_tool_call=on_tool_call, on_tool_result=on_tool_result)
         if saving_mem:
-            break   # memory is now written; end
+            break # memory is now written; end
 
         # Nudge turn is side-effect-only: keep its seeded tokens out of the trajectory.
         if not nudging_finish:
             # Step reward: sum auto_signal over all results in this turn, clamped to [-1, 1]
             step_reward = max(-1.0, min(1.0,
                 sum(reward_utils.auto_signal(r) for _, r in results)))
-            # Read the grammar masks the processor recorded by absolute position; one entry per
-            # recorded logit step (accepted token), so masks/logits/tokens line up under any decoding.
-            mask_log = [mask_by_pos.get(new_idx + t) for t in range(len(outputs.logits))]
+            n = int(new_ids.numel())          # new_ids drops a trailing EOS; align everything to n
+            # masks keyed by absolute position (not call order: speculative-decoding safe)
+            mask_log = [mask_by_pos.get(new_idx + t) for t in range(n)]
+            # no gen_token_ids: trainer recovers them as sequence[gen_start:gen_start+len(masks)]
             entry = {
-                "gen_token_ids": new_ids,
-                "logits": torch.stack(outputs.logits).detach().cpu(),
+                "gen_start": int(new_idx),
+                "old_logp": _old_logps(outputs.logits, mask_log, new_ids, model.device),
                 "masks": mask_log,
                 "reward": step_reward,
             }
@@ -499,7 +517,10 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
             grade = finish_score()
             for entry in trajectory[seg_start:]:
                 entry["reward"] += grade
-            run_dir = recording.save_run(trajectory, first_prompt, run_dir)
+            # Pass the cumulative sequence so the trainer can teacher-force each turn's span;
+            # gen_ids grows monotonically across tasks, so it covers every recorded gen_start.
+            run_dir = recording.save_run(trajectory, first_prompt, run_dir,
+                                         seq_ids=gen_ids.squeeze(0).detach().cpu())
         # Plain answer, no finish() → model thinks it's done. Nudge it once to self-evaluate
         if not results and not (pending := pending_jobs()):
             if not nudging_finish:

@@ -7,5 +7,6 @@
   "enable_skills": true,
   "enable_memory": true,
   "verbose": false,
-  "draft_model": ""
+  "draft_model": "",
+  "train_every": 8
 }

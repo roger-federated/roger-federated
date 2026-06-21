@@ -12,6 +12,7 @@ dependencies = [
     "torchvision",   # Gemma4 image processor imports torchvision.transforms.v2
     "transformers",
     "accelerate",
+    "peft",          # LoRA adapters for the local REINFORCE++ trainer (training/lora_utils.py)
     "bitsandbytes; sys_platform != 'darwin' and (platform_machine == 'x86_64' or platform_machine == 'AMD64')",
     "lm-format-enforcer",
     "pillow",

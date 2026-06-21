@@ -34,13 +34,14 @@
   the trainer can recompute constrained log-probs.
 
 ## Package layout (src-layout; package = `roger`, console script = `roger`)
-- `agency/`   — rollout loop, tool/skill loaders, RAG retrieval, `@path` expansion, recording
-                (`rollout_utils`, `retrieval`, `skill_utils`, `path_utils`, `recording`)
+- `agency/`   — rollout loop, tool/skill loaders, RAG retrieval, `@path` expansion
+                (`rollout_utils`, `retrieval`, `skill_utils`, `path_utils`)
 - `apps/`     — CLI entry point, config, Rich/prompt_toolkit UI (`cli`, `config`, `ui`)
 - `serving/`  — model loading + VRAM-aware quantization tier selection (`model_setup`)
 - `tools/`    — standard tools, shell execution + policy guardrails, MCP bridge
                 (`std_tools`, `shell_tools`, `mcp_utils`, `command_policy.txt`)
-- `training/` — reward functions now; LoRA RL trainer to come (`reward_utils`)
+- `training/` — RL machinery: reward shaping, trajectory recording, LoRA adapter + REINFORCE++
+                trainer (`reward_utils`, `recording`, `lora_utils`, `trainer`)
 - `federated/`— placeholder for gradient aggregation / differential privacy / strategies (empty)
 - `envs/`     — not created yet (concrete shell/browser/code environments are future work)
 - `tests/`    — e.g. `tests/test_rewards.py`

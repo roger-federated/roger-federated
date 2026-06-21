@@ -18,16 +18,16 @@ import roger.serving.model_setup as model_setup
 from roger.serving.model_setup import fetch_model
 from roger.agency.rollout_utils import rollout
 from roger.tools import mcp_utils, std_tools
+from roger.training import lora_utils
 
 console = Console(highlight=False)
 
 _BANNER = """[bold cyan]
   Roger Federated:[/bold cyan] [dim] local agentic RL[/dim]
   Config: [cyan]{cfg_path}[/cyan]  |  Model: [cyan]{model}[/cyan]
-  Change your configuration any time by editing [cyan]{cfg_path}[/cyan].
   Type your task and press Enter. Ctrl-D to quit the session.
   Tip: Plug in your computer before starting a long-running task and disable sleep in your system settings.
-  Tip: Follow-up tasks reuse the model's context (KV-cache), so keep related tasks in one session.
+  Tip: Follow-up tasks reuse the model's context (KV-cache), so start a fresh session for new tasks.
 """
 
 # ---------------------------------------------------------------------------
@@ -101,6 +101,10 @@ async def _repl(cfg: dict, root: str) -> None:
     # Spinner while loading
     with console.status("[bold]Loading model…[/bold]", spinner="dots"):
         model, processor = fetch_model(cfg["model_id"])
+        # Apply any self-trained adapter over the frozen base (returns a wrapper, so reassign).
+        adapter_loaded = lora_utils.adapter_exists()
+        if adapter_loaded:
+            model = lora_utils.load_adapter_for_inference(model)
         # Speculative decoding: a user-set draft_model (must share the target's tokenizer) is used
         # as the assistant model; otherwise fall back to model-free n-gram prompt-lookup.
         draft_id = cfg.get("draft_model")
@@ -131,6 +135,8 @@ async def _repl(cfg: dict, root: str) -> None:
     specials = [tokenizer.decode([t]) for t in tokenizer.all_special_ids]
     msg, style = model_setup.placement_summary(model)
     console.print(f"[bold {style}]{msg}[/bold {style}]\n")
+    if adapter_loaded:
+        console.print("[dim]Loaded adapter from ~/.roger/adapter[/dim]")
 
     # Prompt toolkit session (history + styled input)
     session    = ui.make_session()
@@ -198,6 +204,15 @@ async def _repl(cfg: dict, root: str) -> None:
     finally:
         if mcp_stack is not None:
             await mcp_stack.aclose()
+
+    # Gated quit-time training: inference is over, so reuse the loaded model when runs have piled up.
+    from roger.training import trainer
+    train_every = cfg.get("train_every", 8)
+    if len(trainer._list_unconsumed(train_every)) >= train_every:
+        with console.status("[bold]Training on recent runs…[/bold]", spinner="dots"):
+            stats = trainer.train(model_id=cfg["model_id"], reuse=(model, processor))
+        console.print(f"[dim]Training: {stats}[/dim]")
+
     console.print("\n[dim]Goodbye.[/dim]")
 
 
@@ -216,6 +231,12 @@ def main() -> None:
     parser.add_argument("--no-skills",      action="store_true", help="Disable skills")
     parser.add_argument("--no-memory",      action="store_true", help="Disable persistent memory")
     parser.add_argument("--verbose",        action="store_true", help="Expand thinking blocks")
+    # Optional `train` subcommand; bare `roger` (cmd=None) still launches the chat REPL.
+    sub = parser.add_subparsers(dest="cmd")
+    p_train = sub.add_parser("train", help="Run a LoRA REINFORCE++ update over recorded runs")
+    p_train.add_argument("--batch",  type=int,   default=8, help="Max runs (episodes) per update")
+    p_train.add_argument("--epochs", type=int,   default=1, help="Passes over the batch")
+    p_train.add_argument("--lr",     type=float, default=1e-5, help="LoRA learning rate")
     args = parser.parse_args()
 
     # Load config; apply flag overrides
@@ -237,6 +258,15 @@ def main() -> None:
 
     # Console output policy (before any model fetch so download bars are suppressed)
     _configure_output(cfg["verbose"])
+
+    # `roger train`: standalone update over recorded runs, loading its own training model.
+    if args.cmd == "train":
+        from roger.training import trainer
+        with console.status("[bold]Training on recorded runs…[/bold]", spinner="dots"):
+            stats = trainer.train(model_id=cfg["model_id"], batch=args.batch, epochs=args.epochs,
+                                  lr=args.lr)
+        console.print(f"Training: {stats}")
+        return
 
     # Wipe any leftover terminal content before the session (after output config so it isn't garbled)
     console.clear()
