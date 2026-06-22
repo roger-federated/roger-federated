@@ -41,7 +41,8 @@
 - `tools/`    — standard tools, shell execution + policy guardrails, MCP bridge
                 (`std_tools`, `shell_tools`, `mcp_utils`, `command_policy.txt`)
 - `training/` — RL machinery: reward shaping, trajectory recording, LoRA adapter + REINFORCE++
-                trainer (`reward_utils`, `recording`, `lora_utils`, `trainer`)
+                trainer, train-time PII anonymizer
+                (`reward_utils`, `recording`, `lora_utils`, `trainer`, `privacy_filter`)
 - `federated/`— placeholder for gradient aggregation / differential privacy / strategies (empty)
 - `envs/`     — not created yet (concrete shell/browser/code environments are future work)
 - `tests/`    — e.g. `tests/test_rewards.py`

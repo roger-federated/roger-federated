@@ -13,7 +13,7 @@ from contextlib import nullcontext
 import torch
 
 from roger.agency.path_utils import state_dir
-from roger.training import lora_utils
+from roger.training import lora_utils, privacy_filter
 
 
 def _runs_dir() -> str:
@@ -112,7 +112,20 @@ def train(model_id: str | None = None, *, batch: int = 8, epochs: int = 1, lr: f
         return {"trained": False, "reason": "zero-variance returns", "n_ready": len(eps), "skipped_mm": skipped_mm}
     adv = centered / centered.std().clamp_min(1e-6) # z-norm; one scalar per episode
 
-    model, _processor = reuse if reuse is not None else fetch_model(model_id, for_training=True)
+    model, processor = reuse if reuse is not None else fetch_model(model_id, for_training=True)
+
+    # Rewrite PII to surrogates before any gradient sees it; free the filter before training so it
+    # doesn't hold VRAM. Detect/load failures propagate rather than train on raw PII.
+    tokenizer = getattr(processor, "tokenizer", processor)
+    for ep in eps:
+        new_seq, pii_pos = privacy_filter.anonymize_sequence(ep["seq"], tokenizer)
+        ep["seq"] = new_seq
+        # keep mask, in _new_logps' per-step generated-token order; 0 = a rewritten PII token.
+        keep = [0.0 if (int(e["gen_start"]) + j) in pii_pos else 1.0
+                for e in ep["traj"] for j in range(len(e["masks"]))]
+        ep["keep"] = torch.tensor(keep)
+    privacy_filter.free_filter()
+
     model = lora_utils.attach_lora(model, targets=targets)
     model.train()
     device = next(model.parameters()).device
@@ -120,12 +133,20 @@ def train(model_id: str | None = None, *, batch: int = 8, epochs: int = 1, lr: f
     opt = bnb.optim.Adam8bit(trainable, lr=lr)
 
     # 1/total_tokens scaling + per-episode backward() accumulation = exact token-mean, no padding.
-    total_tokens = sum(len(e["masks"]) for ep in eps for e in ep["traj"])
+    # total_tokens counts only kept tokens, so dropped PII positions don't skew the token-mean.
+    gen_tokens   = sum(len(e["masks"]) for ep in eps for e in ep["traj"])
+    total_tokens = int(sum(float(ep["keep"].sum()) for ep in eps))
+    if total_tokens == 0: # every generated token was PII → nothing to learn from
+        return {"trained": False, "reason": "all tokens masked", "n_ready": len(eps),
+                "skipped_mm": skipped_mm}
     last_loss = 0.0
     for _ in range(max(1, epochs)):
         opt.zero_grad(set_to_none=True)
         for i, ep in enumerate(eps):
             new_lp, old_lp = _new_logps(model, ep, device)
+            # Drop rewritten PII tokens before the ratio; zeroing post-hoc risks 0*inf=nan grads.
+            keep      = ep["keep"].to(device).bool()
+            new_lp, old_lp = new_lp[keep], old_lp[keep]
             ratio     = torch.exp(new_lp - old_lp)            # ~1 on fresh data; clip bites at epochs>1
             a         = adv[i].to(device)
             unclipped = ratio * a
@@ -142,4 +163,5 @@ def train(model_id: str | None = None, *, batch: int = 8, epochs: int = 1, lr: f
         shutil.rmtree(ep["dir"], ignore_errors=True)
 
     return {"trained": True, "n_episodes": len(eps), "n_tokens": total_tokens,
+            "n_pii_dropped": gen_tokens - total_tokens,
             "mean_return": float(returns.mean()), "loss": last_loss, "skipped_mm": skipped_mm}

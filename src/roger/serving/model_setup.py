@@ -1,4 +1,4 @@
-from transformers import AutoProcessor, AutoModelForImageTextToText, BitsAndBytesConfig
+from transformers import AutoProcessor, AutoTokenizer, AutoModelForImageTextToText, BitsAndBytesConfig
 from huggingface_hub import get_safetensors_metadata
 import os, torch
 import psutil
@@ -149,7 +149,10 @@ def placement_summary(model) -> tuple[str, str]:
         return "Model loaded on CPU; no GPU acceleration (slow).", "yellow"
     return "Model loaded; fully on GPU.", "green"
 
-def fetch_model(model_id="google/gemma-4-E2B-it", for_training: bool = False) -> tuple[AutoModelForImageTextToText, AutoProcessor]:
+def fetch_model(model_id="google/gemma-4-E2B-it", for_training: bool = False,
+                model_cls=AutoModelForImageTextToText) -> tuple[AutoModelForImageTextToText, AutoProcessor]:
+    # `model_cls` lets non-generative models reuse this loader (e.g. the privacy filter's
+    # AutoModelForTokenClassification) so they get the same VRAM-aware quant/placement.
     # VRAM-aware quantization: choose tier from model size vs available VRAM
     gpu_available = torch.cuda.is_available()
     quant_cfg, dtype, fits = _select_quant(model_id, gpu_available, for_training)
@@ -171,8 +174,13 @@ def fetch_model(model_id="google/gemma-4-E2B-it", for_training: bool = False) ->
         kwargs["max_memory"]      = {**_vram_budget(), "cpu": psutil.virtual_memory().available}
         kwargs["offload_buffers"] = True
         kwargs["offload_folder"]  = offload_dir
-    model = AutoModelForImageTextToText.from_pretrained(model_id, **kwargs)
-    processor = AutoProcessor.from_pretrained(model_id)
+    model = model_cls.from_pretrained(model_id, **kwargs)
+    # Text-only classifiers (e.g. token-classification) ship no processor config; fall back to the
+    # plain tokenizer so callers always get a usable text front-end.
+    try:
+        processor = AutoProcessor.from_pretrained(model_id)
+    except (ValueError, OSError, KeyError):
+        processor = AutoTokenizer.from_pretrained(model_id)
     return model, processor
 
 
