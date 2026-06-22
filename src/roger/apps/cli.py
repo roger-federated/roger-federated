@@ -22,12 +22,11 @@ from roger.training import lora_utils
 
 console = Console(highlight=False)
 
-_BANNER = """[bold cyan]
-  Roger Federated:[/bold cyan] [dim] local agentic RL[/dim]
-  Config: [cyan]{cfg_path}[/cyan]  |  Model: [cyan]{model}[/cyan]
-  Type your task and press Enter. Ctrl-D to quit the session.
-  Tip: Plug in your computer before starting a long-running task and disable sleep in your system settings.
-  Tip: To avoid polluting the KV-cache, start a fresh session for new tasks.
+_BANNER = """
+[bold cyan]Roger Federated:[/bold cyan] [dim] local agentic RL[/dim]
+Config: [cyan]{cfg_path}[/cyan]  |  Model: [cyan]{model}[/cyan]
+Tip 1: Before starting a long-running task, plug in your computer and disable sleep in your system settings.
+Tip 2: To avoid polluting the KV-cache, provide instructions incrementally and start a fresh session for new tasks.
 """
 
 # ---------------------------------------------------------------------------

@@ -22,7 +22,13 @@ from prompt_toolkit import PromptSession
 from prompt_toolkit.auto_suggest import AutoSuggest, Suggestion
 from prompt_toolkit.formatted_text import HTML, FormattedText
 from prompt_toolkit.history import FileHistory
+from prompt_toolkit.lexers import SimpleLexer
 from prompt_toolkit.styles import Style as PTStyle
+
+# Background highlight for the user's typed turn. SimpleLexer paints this style over every
+# character of the buffer, so the tint hugs the typed text (not the whole line) and persists
+# in the scrollback after submit — visually marking each user turn.
+_USER_TURN_STYLE = "bg:#1e1e1e #f5f5f5"
 
 from roger.agency.path_utils import state_dir
 
@@ -405,8 +411,7 @@ def select_root(default: str) -> str:
     to a text prompt if no display is available (headless/SSH).
     """
     console.print(
-        f"\n[bold]Select the folder from which the agent will be working.[/bold]\n"
-        f"Currently on: [cyan]{default}[/cyan]"
+        f"\n[bold]Select the folder from which the agent will be working.[/bold]"
     )
     # Try native folder dialog
     path = None
@@ -498,7 +503,8 @@ async def read_prompt(session: PromptSession, suggest_revert: Callable[[], list]
     .prompt() would call asyncio.run() again and fail on the running loop. prompt_async
     is the supported in-loop entry point.
     """
-    kwargs = {}
+    # Tint the typed text so a submitted user turn stays visually distinct in the scrollback.
+    kwargs = {"lexer": SimpleLexer(style=_USER_TURN_STYLE)}
     if suggest_revert is not None:
         kwargs["auto_suggest"] = _RevertSuggest(suggest_revert)
     if placeholder:
