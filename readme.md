@@ -73,16 +73,48 @@ After installing, run `roger` from any terminal. First launch walks you through 
 To give Roger additional functionality, include MCP servers in `~/.roger/mcp.json`. It uses the standard `mcpServers`-format, and the exact schema can therefore be found at your MCP server's provider.
 
 <details>
-<summary>Example</summary>
+<summary>Popular servers to get you started</summary>
+
+Drop any of the entries below or more into `~/.roger/mcp.json` and restart Roger. Replace any `<token>`/`<api-key>` placeholder with your own credential, attained from the respective MCP server. Some stdio servers need a one-off install first. Note that the `_comment` field is ignored.
 
 ```json
 {
   "mcpServers": {
-    "filesystem": {
+    "github": {
+      "_comment": "Repos, issues, PRs, code search; create a fine-grained PAT for the token",
+      "type": "http",
+      "url": "https://api.githubcopilot.com/mcp/",
+      "headers": {"Authorization": "Bearer <token>"}
+    },
+    "context7": {
+      "_comment": "Up-to-date, version-correct docs and snippets for any library; free <api-key> at context7.com raises rate limits",
+      "type": "http",
+      "url": "https://mcp.context7.com/mcp",
+      "headers": {"CONTEXT7_API_KEY": "<api-key>"}
+    },
+    "ms-365": {
+      "_comment": "Outlook, Excel, Word, OneDrive, Calendar via Microsoft Graph; opens a browser login on first use",
       "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-filesystem", "."]
+      "args": ["-y", "@softeria/ms-365-mcp-server"]
+    },
+    "notion": {
+      "_comment": "Search, read and edit your Notion pages and databases; <token> = an internal-integration secret",
+      "command": "npx",
+      "args": ["-y", "@notionhq/notion-mcp-server"],
+      "env": {"NOTION_TOKEN": "<token>"}
+    },
+    "linear": {
+      "_comment": "Create and manage Linear issues, projects and cycles; <token> = a Linear API key",
+      "type": "http",
+      "url": "https://mcp.linear.app/mcp",
+      "headers": {"Authorization": "Bearer <token>"}
+    },
+    "touchpoint": {
+      "_comment": "Interact with your desktop UI. Note: first run `pip install touchpoint-py`",
+      "command": "touchpoint-mcp"
     },
     "sentry": {
+      "_comment": "Inspect and triage your Sentry errors and issues",
       "type": "http",
       "url": "https://mcp.sentry.dev/mcp",
       "headers": {"Authorization": "Bearer <token>"}
@@ -146,11 +178,12 @@ This software is still in development. Below is a non-exhaustive list of to-do i
 - [x] Implement what the finetuning framework considers as rewards.
 - [x] LLM-as-judge (self-evaluation inspired by RLSR, SRT, Co-rewarding, meta-evaluation; requires a portion of ground truth).
 - [x] Implement automatic QLoRA REINFORCE++.
-- [ ] Use privacy filter for training data.
+- [x] Use privacy filter for training data.
 - [ ] Set up (differential) gradient sharing.
 - [ ] *Congrats, you now have a shippable.*
 
 Further into the future:
+- [ ] Remote SSH execution.
 - [ ] Implement federated learning-style hives.
 - [ ] Sandboxed docker environments.
 - [ ] Native support for agent loops.
