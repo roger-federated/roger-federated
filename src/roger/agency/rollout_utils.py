@@ -11,7 +11,8 @@ if not hasattr(_tu, "PreTrainedTokenizerBase"):
     _tu.PreTrainedTokenizerBase = transformers.PreTrainedTokenizerBase
 from lmformatenforcer.integrations.transformers import build_transformers_prefix_allowed_tokens_fn
 from collections.abc import Callable
-from roger.tools.std_tools import get_standard_tools, finish_score, pending_backups, apply_revert, maxsteps_checkin
+from roger.tools.std_tools import (get_standard_tools, finish_score, pending_grade, set_user_grade, clear_grade,
+                                    pending_backups, apply_revert, maxsteps_checkin)
 from roger.tools.shell_tools import drain_finished_jobs, pending_jobs, terminate_jobs, shell_idioms
 from roger.serving.model_setup import find_gen_prompt, find_tool_res_id, find_tool_call_tokens, find_think_tokens
 from roger.training import recording
@@ -353,9 +354,9 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
     # Finish-nudge: run one turn seeded with a reasoning preamble; the name-enum stays unconstrained
     _FIN_SEED = ("Now let me decide: did I just have an interaction that I should grade? If it was merely "
                  "a conversation, no further action is needed. Instead, if it was a task where I emitted tool "
-                 "calls, I'll call `finish` with an honest self-eval score in [-1, 1]. If this is the case, I should "
-                 "weigh how directly and efficiently I reached the goal (preferring very few wasted, wrong, or "
-                 "redundant steps), and how accurate and complete the result is. 1 for a clean, fully-"
+                 "calls, I'll call `finish` with an honest self-eval score in the range [-1, 1]. In the latter case, "
+                 "I should weigh how directly and efficiently I reached the goal (preferring very few wasted, wrong, "
+                 "or redundant steps), and how accurate and complete the result is. 1 for a clean, fully-"
                  "correct solve, around 0 for partial or clumsy, negative if I largely failed.")
     nudging_finish = False
     # Only a task warrants a finish-nudge
