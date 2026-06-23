@@ -12,12 +12,12 @@
 ## Current state (read before assuming)
 - Working semi-basic agent: rollout loop, tool use, reasoning, MCP connections, standard
   tools, deferred tool loading, auto-triggered RAG, skills + instruction files, `@path`
-  references, persistent memory, and a CLI app (`roger`).
-- The reward interface is in place (`training/reward_utils.py`). Conversation resume after `finish`
-  is built: one rollout owns the session, awaiting each user turn and injecting it onto the live
-  context so the KV-cache is reused across tasks. NOT yet built: the LoRA RL trainer, federated
-  hives, docker sandboxing, and account/hive/scheduling setup. The authoritative TODO list is in
-  `readme.md` ("Progress & contributing").
+  references, persistent memory, web search/fetch, and a CLI app (`roger`).
+- LoRA REINFORCE++ trainer is built and wired (`training/trainer.py`, `lora_utils.py`); train-time
+  PII anonymisation via `privacy_filter.py`. Gated Ctrl-D auto-train + `roger train` subcommand.
+  `/grade` user override of `finish()` self-eval score + 10%-user-graded training gate.
+- NOT yet built: federated gradient sharing, docker sandboxing, account/hive/scheduling setup.
+  The authoritative TODO list is in `readme.md` ("Progress & contributing").
 
 ## Confirmed design decisions
 - RL algorithm = **REINFORCE++**, not GRPO. Flat episode return broadcast over all generated
@@ -45,7 +45,8 @@
                 (`reward_utils`, `recording`, `lora_utils`, `trainer`, `privacy_filter`)
 - `federated/`— placeholder for gradient aggregation / differential privacy / strategies (empty)
 - `envs/`     — not created yet (concrete shell/browser/code environments are future work)
-- `tests/`    — e.g. `tests/test_rewards.py`
+- `tests/`    — `test_rewards.py`, `test_trainer.py`, `test_grade.py`, `test_privacy_filter.py`,
+                `test_mcp.py`, `test_multimodal.py`
 
 Runtime artifacts all live under the global `~/.roger/` (never in the project): `config.json`,
 global `memory/memory.md` + per-project `memory/<dashed-abspath>.md`, `runs/`, `backups/`,

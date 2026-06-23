@@ -92,10 +92,28 @@ Drop any of the entries below or more into `~/.roger/mcp.json` and restart Roger
       "url": "https://mcp.context7.com/mcp",
       "headers": {"CONTEXT7_API_KEY": "<api-key>"}
     },
-    "ms-365": {
-      "_comment": "Outlook, Excel, Word, OneDrive, Calendar via Microsoft Graph; opens a browser login on first use",
-      "command": "npx",
-      "args": ["-y", "@softeria/ms-365-mcp-server"]
+    "gmail": {
+      "_comment": "Read and send Gmail; OAuth token obtained via Google Cloud Console",
+      "type": "http",
+      "url": "https://gmailmcp.googleapis.com/mcp/v1",
+      "headers": {"Authorization": "Bearer <oauth-token>"}
+    },
+    "markitdown": {
+      "_comment": "Convert PDFs, Office docs, images and URLs to markdown",
+      "command": "uvx",
+      "args": ["markitdown-mcp"]
+    },
+    "ms-word": {
+      "_comment": "Read/create/edit Word documents; M365 tenant account required",
+      "type": "http",
+      "url": "https://agent365.svc.cloud.microsoft/agents/tenants/<tenant-id>/servers/mcp_WordServer",
+      "headers": {"Authorization": "Bearer <entra-token>"}
+    },
+    "ms-teams": {
+      "_comment": "Teams chats, channels and messages; M365 tenant account required",
+      "type": "http",
+      "url": "https://agent365.svc.cloud.microsoft/agents/tenants/<tenant-id>/servers/mcp_TeamsServer",
+      "headers": {"Authorization": "Bearer <entra-token>"}
     },
     "notion": {
       "_comment": "Search, read and edit your Notion pages and databases; <token> = an internal-integration secret",
@@ -110,14 +128,51 @@ Drop any of the entries below or more into `~/.roger/mcp.json` and restart Roger
       "headers": {"Authorization": "Bearer <token>"}
     },
     "touchpoint": {
-      "_comment": "Interact with your desktop UI. Note: first run `pip install touchpoint-py`",
-      "command": "touchpoint-mcp"
+      "_comment": "Interact with your desktop UI",
+      "command": "uvx",
+      "args": ["--from", "touchpoint-py", "touchpoint-mcp"]
     },
     "sentry": {
       "_comment": "Inspect and triage your Sentry errors and issues",
       "type": "http",
       "url": "https://mcp.sentry.dev/mcp",
       "headers": {"Authorization": "Bearer <token>"}
+    },
+    "aws": {
+      "_comment": "AWS services (EC2, S3, IAM, etc.); requires AWS CLI configured (`aws configure`)",
+      "command": "uvx",
+      "args": ["mcp-proxy-for-aws@latest", "https://aws-mcp.us-east-1.api.aws/mcp"]
+    },
+    "azure": {
+      "_comment": "Azure Resource Manager — manage and query Azure resources; get token via `az account get-access-token`",
+      "type": "http",
+      "url": "https://mcp.management.azure.com",
+      "headers": {"Authorization": "Bearer <azure-token>"}
+    },
+    "sql": {
+      "_comment": "Natural language SQL queries against any database; requires dotnet + dab CLI + dab-config.json (see aka.ms/sql/mcp)",
+      "command": "dab",
+      "args": ["start", "--mcp-stdio", "role:anonymous", "--config", "<path-to-dab-config.json>"]
+    },
+    "telegram": {
+      "_comment": "Full Telegram access (80+ tools); first clone https://github.com/chigwell/telegram-mcp and run uv sync",
+      "command": "uv",
+      "args": ["run", "--project", "<path/to/telegram-mcp>", "main.py"],
+      "env": {
+        "TELEGRAM_API_ID": "<api-id>",
+        "TELEGRAM_API_HASH": "<api-hash>",
+        "TELEGRAM_SESSION_STRING": "<session-string>"
+      }
+    },
+    "alpha-vantage": {
+      "_comment": "Stock prices, forex, crypto and economic indicators; free key at alphavantage.co",
+      "type": "http",
+      "url": "https://mcp.alphavantage.co/mcp?apikey=<api-key>"
+    },
+    "airbnb": {
+      "_comment": "Search Airbnb listings and property details; unofficial, no key needed",
+      "command": "npx",
+      "args": ["-y", "@openbnb/mcp-server-airbnb"]
     }
   }
 }
