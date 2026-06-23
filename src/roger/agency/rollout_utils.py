@@ -11,11 +11,12 @@ if not hasattr(_tu, "PreTrainedTokenizerBase"):
     _tu.PreTrainedTokenizerBase = transformers.PreTrainedTokenizerBase
 from lmformatenforcer.integrations.transformers import build_transformers_prefix_allowed_tokens_fn
 from collections.abc import Callable
-from roger.tools.std_tools import (get_standard_tools, finish_score, pending_grade, set_user_grade, clear_grade,
+from roger.tools.std_tools import (get_standard_tools, finish_score, set_user_grade, clear_grade,
                                     pending_backups, apply_revert, maxsteps_checkin)
 from roger.tools.shell_tools import drain_finished_jobs, pending_jobs, terminate_jobs, shell_idioms
 from roger.serving.model_setup import find_gen_prompt, find_tool_res_id, find_tool_call_tokens, find_think_tokens
 from roger.training import recording
+from datetime import datetime, timezone
 
 def _make_tool_loader(tools):
     """Build a terse catalog string + load_tools closure for deferred schema loading.
@@ -252,15 +253,34 @@ def _revert_preamble(backups) -> str:
             "\nType '/revert' (or '/revert 1,3') to undo, or just enter your next task.")
 
 
-async def _await_user_turn(read_turn, trajectory, seg_start) -> str | None:
-    """Next user turn (None on Ctrl-D). Non-obstructing revert: list every file still changed this
-    session; the user types '/revert'/'/revert 1,3' (penalised -n*W_REVERT over trajectory[seg_start:])
-    or just their next task. Backups persist across tasks — a partial revert keeps the rest, so the
-    listing accumulates until each file is explicitly reverted."""
-    preamble = _revert_preamble(pending_backups())
+def _grade_preamble() -> str:
+    """Encourage overriding the self-grade (empty unless a finish is overridable). Escalates to an
+    urgent warning when the 10% rule would currently block the next training pass."""
+    g = finish_score()
+    if g is None:
+        return ""
+    from roger.training.trainer import user_grade_shortfall   # lazy: don't pull the trainer stack at import
+    hint = f"Roger self-graded {g:+.2f}. Type '/grade <n>' (-1..1) to override it."
+    if user_grade_shortfall() > 0:
+        hint = "Training is blocked due to insufficient user-graded trajectories. " + hint
+    return hint
+
+
+def _user_turn_preamble() -> str:
+    """Both non-obstructing notices (revert listing + grade hint), blank-line-joined if both apply."""
+    return "\n".join(p for p in (_revert_preamble(pending_backups()), _grade_preamble()) if p)
+
+
+async def _await_user_turn(read_turn, trajectory, seg_start, checkpoint) -> str | None:
+    """Next user turn (None on Ctrl-D). Two non-obstructing commands, both staying in this loop:
+      /revert[ 1,3]  undo changed files (penalised -n*W_REVERT over trajectory[seg_start:]);
+      /grade <n>     overwrite the model's self-grade for the just-finished task.
+    Anything else is the user's next task. Backups persist across tasks (a partial revert keeps the
+    rest), so the revert listing accumulates until each file is explicitly reverted."""
+    preamble = _user_turn_preamble()
     while True:
         nxt = await read_turn(preamble)
-        preamble = ""                       # show the revert notice only once per offer
+        preamble = ""                       # show the notice only once per offer
         if nxt is None:                     # Ctrl-D → end session
             return None
         nxt = nxt.strip()
@@ -270,7 +290,18 @@ async def _await_user_turn(read_turn, trajectory, seg_start) -> str | None:
             n = apply_revert(nxt[len("/revert"):].strip() or "all")
             for entry in trajectory[seg_start:]:
                 entry["reward"] -= n * reward_utils.W_REVERT
-            preamble = _revert_preamble(pending_backups())   # re-offer any files left
+            preamble = _user_turn_preamble()                 # re-offer anything left
+            continue
+        if finish_score() is not None and nxt.lower().startswith("/grade"):
+            old = finish_score()
+            new = set_user_grade(nxt[len("/grade"):].strip())
+            if new is not None:                              # unparseable → ignore (no-op)
+                # Self-grade was already broadcast over the segment, so apply only the delta, and
+                # re-checkpoint now (Ctrl-D doesn't re-save, so a quit would else lose the override).
+                for entry in trajectory[seg_start:]:
+                    entry["reward"] += new - old
+                checkpoint(user_graded=True)
+            preamble = _user_turn_preamble()                 # reflect the new grade / urgency
             continue
         return nxt                          # moved on → backups stay pending for next time
 
@@ -315,6 +346,15 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
     first_prompt = text          # session-origin prompt, used as the saved transcript header
     seg_start = 0                # index into trajectory where the current task's steps begin
     run_dir = None               # set on first finish; reused so the session checkpoints one dir
+
+    def _checkpoint(user_graded=False):
+        """Persist the running episode (reuses run_dir across the session). On a /grade override
+        drops a zero-byte `user_graded` sentinel the trainer counts (os.path.exists) for the 10% gate."""
+        nonlocal run_dir
+        run_dir = recording.save_run(trajectory, first_prompt, run_dir,
+                                     seq_ids=gen_ids.squeeze(0).detach().cpu())
+        if user_graded:
+            open(os.path.join(run_dir, "user_graded"), "w").close()
 
     # Deferred tool loading: when >15 tools, keep only their names in context; full schemas
     # fetched on demand via load_tools(names=[...]).
@@ -368,11 +408,11 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
     # System prompt: env header + behaviour guidance + shell idioms + instructions + catalogs + RAG
     _shell = "PowerShell" if os.name == "nt" else "/bin/sh"
     sys_content = (
-        f"Environment: cwd={os.getcwd()}, platform={sys.platform}, shell={_shell}\n"
+        f"cwd: {os.getcwd()}, platform: {sys.platform}, shell: {_shell}, date/time: {datetime.now(timezone.utc).isoformat()}\n"
         "You are an agentic assistant named 'Roger Federated'. Given a task, use the provided tools to accomplish it.\n"
         "You may issue multiple tool calls in one turn by emitting them back-to-back in JSON. "
         "They will be executed sequentially, unless `background=True. "
-        "Call finish(...) whenever you complete an identified task, grading your own work with "
+        "Call finish(...) whenever you complete an identified task, grading your own execution with "
         "an honest self-evaluation score in [-1, 1], i.e., negative if the execution was inaccurate or suboptimal."
         "The user will then give you their next turn.\n\n"
         + shell_idioms()
@@ -517,15 +557,13 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
             trajectory.append(entry)
 
         # finish checkpoints this task: broadcast its self-eval grade over the task's steps
-        # (since the last user turn), then save the running episode.
+        # (since the last user turn), then save the running episode. The user may still override
+        # the grade at the upcoming turn (see _await_user_turn), which re-checkpoints.
         if any(name == "finish" for name, _ in results):
-            grade = finish_score()
+            grade = finish_score() or 0.0
             for entry in trajectory[seg_start:]:
                 entry["reward"] += grade
-            # Pass the cumulative sequence so the trainer can teacher-force each turn's span;
-            # gen_ids grows monotonically across tasks, so it covers every recorded gen_start.
-            run_dir = recording.save_run(trajectory, first_prompt, run_dir,
-                                         seq_ids=gen_ids.squeeze(0).detach().cpu())
+            _checkpoint()
         # Plain answer, no finish() → model thinks it's done. Nudge it once to self-evaluate
         if not results and not (pending := pending_jobs()):
             if not nudging_finish and emitted_tool_call:
@@ -540,7 +578,7 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
             input_ids = torch.cat([gen_ids, bg], dim=1) if isinstance(bg, torch.Tensor) else gen_ids
         elif not results or any(name == "finish" for name, _ in results):
             # read_turn's placeholder reminds the user that Ctrl-D quits and saves memory
-            next_text = await _await_user_turn(read_turn, trajectory, seg_start) if read_turn else None
+            next_text = await _await_user_turn(read_turn, trajectory, seg_start, _checkpoint) if read_turn else None
             if next_text is None:                 # Ctrl-D → one memory turn (if any), then end
                 if enable_memory and not saving_mem:
                     saving_mem = True
@@ -550,6 +588,7 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
             # Inject the user's turn as a prompt-free delta, retaining the KV-cache across tasks.
             input_ids = torch.cat([gen_ids, _user_turn_delta(processor.tokenizer, asst_msg, next_text, model.device)], dim=1)
             seg_start = len(trajectory)           # next finish grades only this fresh segment
+            clear_grade()                         # close the previous task's grade-override window
             i = 0                                 # fresh max-steps budget per task
             nudging_finish = False                # arm a fresh finish-nudge for the next task
             emitted_tool_call = False             # fresh segment: re-decide task-vs-conversation

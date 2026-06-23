@@ -39,7 +39,9 @@ _policy_file: str = "command_policy.txt"   # kept here so write_file/_is_protect
 _backups: list[tuple[str, str]] = []
 
 # Self-eval grade [-1,1] from the most recent finish(); the rollout reads it via finish_score().
-_finish_score: float = 0.0
+# None == no grade pending (no finish since the last task / override window closed), so this one
+# var doubles as the "is there a grade the user can still override?" flag (see pending_grade()).
+_finish_score: float | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -156,9 +158,7 @@ def finish(score: float = 0.0) -> str:
                (1 = fully succeeded, 0 = unclear / partial, -1 = failed). This is the training
                reward for the task, so grade truthfully.
     """
-    # The rollout loop detects this call by name, reads the grade via finish_score(), then awaits
-    # the user's next turn. Coerce defensively: the decoding constraint does not type-check
-    # arguments, so the model may emit a string / out-of-range value.
+    # Coerce defensively: the decoding constraint doesn't type-check args.
     global _finish_score
     try:
         _finish_score = max(-1.0, min(1.0, float(score)))
@@ -167,9 +167,31 @@ def finish(score: float = 0.0) -> str:
     return "(done)"
 
 
-def finish_score() -> float:
-    """Return the self-eval grade recorded by the most recent finish() call."""
+def finish_score() -> float | None:
+    """The most recent finish()'s self-eval grade, or None when no finish is overridable yet.
+    None is the 'nothing pending' flag driving the /grade ghost text; reward math reads it as
+    `finish_score() or 0.0`."""
     return _finish_score
+
+
+def set_user_grade(score) -> float | None:
+    """User override of the pending grade. No-op -> None when nothing's pending or the value is
+    unparseable (so an accidental ghost-text accept can't grade). Leaves it pending on success so
+    the hint keeps offering re-override until the next task."""
+    global _finish_score
+    if _finish_score is None:
+        return None
+    try:
+        _finish_score = max(-1.0, min(1.0, float(score)))
+    except (TypeError, ValueError):
+        return None
+    return _finish_score
+
+
+def clear_grade() -> None:
+    """Close the override window at a fresh task segment so a stale grade hint doesn't linger."""
+    global _finish_score
+    _finish_score = None
 
 
 # ---------------------------------------------------------------------------
@@ -284,7 +306,7 @@ def get_standard_tools(prompt_backend=None, policy_file="command_policy.txt") ->
 
     # Reset per-rollout state
     _backups.clear()
-    _finish_score = 0.0
+    _finish_score = None
 
     # Configure shell_tools (sets its own prompt/policy globals, resets _jobs)
     shell_tools.configure(prompt_backend=prompt_backend, policy_file=policy_file)

@@ -490,14 +490,48 @@ class _RevertSuggest(AutoSuggest):
         return Suggestion(cmd[len(text):] + f" all  ·  {hint}")
 
 
+class _GradeSuggest(AutoSuggest):
+    """Inline ghost text for `/grade`: once a finished task is overridable, completing the bare
+    command surfaces the model's current self-grade so the user can replace it (e.g. `de +0.40  ·
+    override self-grade`). get_grade() returns the pending grade, or None when nothing is overridable."""
+    def __init__(self, get_grade: Callable[[], float | None]):
+        self._get_grade = get_grade
+
+    def get_suggestion(self, buffer, document):
+        text = document.text
+        cmd = "/grade"
+        if not text or not cmd.startswith(text.lower()):
+            return None
+        g = self._get_grade()
+        if g is None:
+            return None
+        return Suggestion(cmd[len(text):] + f" {g:+.2f}  ·  override self-grade")
+
+
+class _AnySuggest(AutoSuggest):
+    """First non-None suggestion among several — prompt_toolkit accepts a single auto_suggest, but we
+    want both /revert and /grade ghost text live at once."""
+    def __init__(self, suggesters: list):
+        self._suggesters = suggesters
+
+    def get_suggestion(self, buffer, document):
+        for s in self._suggesters:
+            r = s.get_suggestion(buffer, document)
+            if r is not None:
+                return r
+        return None
+
+
 async def read_prompt(session: PromptSession, suggest_revert: Callable[[], list] | None = None,
-                      placeholder: str | None = None) -> str | None:
+                      placeholder: str | None = None,
+                      suggest_grade: Callable[[], float | None] | None = None) -> str | None:
     """Read a user prompt. Returns None only on EOF (Ctrl-D → quit); "" on empty input or Ctrl-C
     so the caller can re-prompt without quitting.
 
-    suggest_revert / placeholder are passed per-call (not stored on the session) so the agent-facing
-    tool prompts that reuse `session` stay clean: placeholder = gray dummy text shown while the box
-    is empty; suggest_revert = provider of revertable files for the /revert ghost text.
+    suggest_revert / suggest_grade / placeholder are passed per-call (not stored on the session) so
+    the agent-facing tool prompts that reuse `session` stay clean: placeholder = gray dummy text shown
+    while the box is empty; suggest_revert = revertable files for the /revert ghost text;
+    suggest_grade = the pending self-grade for the /grade ghost text.
 
     Async because the REPL runs inside asyncio.run(_repl): prompt_toolkit's sync
     .prompt() would call asyncio.run() again and fail on the running loop. prompt_async
@@ -505,8 +539,10 @@ async def read_prompt(session: PromptSession, suggest_revert: Callable[[], list]
     """
     # Tint the typed text so a submitted user turn stays visually distinct in the scrollback.
     kwargs = {"lexer": SimpleLexer(style=_USER_TURN_STYLE)}
-    if suggest_revert is not None:
-        kwargs["auto_suggest"] = _RevertSuggest(suggest_revert)
+    suggesters = ([_RevertSuggest(suggest_revert)] if suggest_revert is not None else []) + \
+                 ([_GradeSuggest(suggest_grade)] if suggest_grade is not None else [])
+    if suggesters:
+        kwargs["auto_suggest"] = _AnySuggest(suggesters)
     if placeholder:
         # Pass as a styled (style, text) tuple, not an HTML f-string: the text is literal, so a
         # placeholder containing XML-reserved chars (&, <, >) won't blow up minidom's parser.

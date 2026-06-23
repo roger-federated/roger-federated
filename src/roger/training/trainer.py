@@ -6,6 +6,7 @@ baseline, z-normed advantages, PPO-clipped ratio vs the stored behaviour log-pro
 adapter is saved to ~/.roger/adapter and consumed runs are deleted. Wants fresh (on-policy) data.
 """
 import glob
+import math
 import os
 import shutil
 from contextlib import nullcontext
@@ -28,6 +29,17 @@ def _list_unconsumed(limit: int) -> list[str]:
              if os.path.exists(os.path.join(d, "trajectory.pt"))
              and os.path.exists(os.path.join(d, "sequence.pt"))]
     return ready[-limit:]
+
+
+def user_grade_shortfall(batch: int = 8) -> int:
+    """How many more user-graded runs the next pass needs to clear the 10% rule (0 when satisfied
+    or too few runs to train). Stat-only, so cheap enough to call at every prompt for the nudge.
+    A run is user-graded iff the rollout dropped a `user_graded` sentinel on a /grade override."""
+    dirs = _list_unconsumed(batch)
+    if len(dirs) < 2:                      # a pass needs >= 2 episodes anyway; nothing to nudge yet
+        return 0
+    n_user = sum(os.path.exists(os.path.join(d, "user_graded")) for d in dirs)
+    return max(0, max(1, math.ceil(0.10 * len(dirs))) - n_user)   # 10%-or-at-least-one
 
 
 def _load_episode(run_dir: str):
@@ -105,6 +117,12 @@ def train(model_id: str | None = None, *, batch: int = 8, epochs: int = 1, lr: f
     # Batch-mean baseline + z-norm are undefined for a single sample; wait for more data.
     if len(eps) < 2:
         return {"trained": False, "reason": "need >= 2 episodes", "n_ready": len(eps), "skipped_mm": skipped_mm}
+    # Require >=10% (and >=1) user-graded runs so the signal isn't purely the model grading itself.
+    # Blocked passes delete nothing (deletion is post-update below), so runs wait for a graded batch.
+    n_user, need = sum(os.path.exists(os.path.join(ep["dir"], "user_graded")) for ep in eps), max(1, math.ceil(0.10 * len(eps)))
+    if n_user < need:
+        return {"trained": False, "reason": "10% rule: too few user-graded runs",
+                "n_user": n_user, "need": need, "n_ready": len(eps), "skipped_mm": skipped_mm}
 
     returns  = torch.tensor([sum(float(e["reward"]) for e in ep["traj"]) for ep in eps])
     centered = returns - returns.mean() # batch-mean baseline (REINFORCE++)
