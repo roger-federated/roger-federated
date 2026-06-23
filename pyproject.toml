@@ -33,5 +33,6 @@ roger = "roger.apps.cli:main"
 where = ["src"]                          # single package `roger` + its subpackages
 
 [tool.setuptools.package-data]
-"roger.tools" = ["command_policy.txt"]   # ship the run_command guardrail policy as data
-"roger.apps"  = ["config.json"]          # ship the baseline config defaults as data
+"roger.tools"  = ["command_policy.txt"]  # ship the run_command guardrail policy as data
+"roger.apps"   = ["config.json"]         # ship the baseline config defaults as data
+"roger.skills" = ["*.md"]                # ship the bundled default skills as data

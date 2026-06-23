@@ -92,15 +92,20 @@ def _parse_frontmatter(text: str) -> tuple[dict, str]:
 def discover_skills(root: str) -> list[dict]:
     """Discover skill files, deduplicating by resolved path.
 
-    Searches the global ~/.roger/skills (canonical) plus the project's .agents/skills and
-    .claude/skills (cross-agent compat), in two layouts:
+    Searches the bundled defaults shipped with roger plus the global ~/.roger/skills and the
+    project's .agents/skills and .claude/skills (cross-agent compat), in two layouts:
       nested: <base>/<name>/SKILL.md  — name from frontmatter or parent dir
       flat:   <base>/<name>.md        — name from frontmatter or file stem
 
     Each record: {name, description, body, path}.
     Skips files with no usable description (would make a useless catalog entry).
     """
+    # Bundled defaults ship as package-data under roger/skills/ (this file is roger/agency/).
+    # Listed first = lowest priority: a same-named user/project skill is later in the list and
+    # so wins in make_skill_loader's name->body index, letting users shadow a default.
+    bundled = os.path.join(os.path.dirname(os.path.dirname(__file__)), "skills")
     bases = (
+        bundled,                                      # shipped defaults (overridable)
         os.path.join(state_dir(), "skills"),          # global, canonical
         os.path.join(root, ".agents", "skills"),      # project, cross-agent
         os.path.join(root, ".claude", "skills"),      # project, cross-agent

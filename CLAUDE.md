@@ -43,6 +43,8 @@
 - `training/` — RL machinery: reward shaping, trajectory recording, LoRA adapter + REINFORCE++
                 trainer, train-time PII anonymizer
                 (`reward_utils`, `recording`, `lora_utils`, `trainer`, `privacy_filter`)
+- `skills/`   — bundled default skills shipped as package-data (`ipynb`, `skill-creator`,
+                `git-workflow`, `code`); read in place as the lowest-priority `discover_skills` base
 - `federated/`— placeholder for gradient aggregation / differential privacy / strategies (empty)
 - `envs/`     — not created yet (concrete shell/browser/code environments are future work)
 - `tests/`    — `test_rewards.py`, `test_trainer.py`, `test_grade.py`, `test_privacy_filter.py`,
