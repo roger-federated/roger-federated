@@ -174,20 +174,20 @@ This software is still in development. Below is a non-exhaustive list of to-do i
 - [x] Auto read/write memory and create agent folder for temp files.
 - [x] Integrate web search and fetch by default.
 - [x] Allow resuming conversation after finish.
-- [x] *Congrats, you now have a semi-basic agent.*
+- [x] <ins>Whoopee, that's a semi-basic agent.</ins>
 - [x] Implement what the finetuning framework considers as rewards.
 - [x] LLM-as-judge (self-evaluation inspired by RLSR, SRT, Co-rewarding, meta-evaluation; requires a portion of ground truth).
 - [x] Implement automatic QLoRA REINFORCE++.
 - [x] Use privacy filter for training data.
-- [ ] Set up (differential) gradient sharing.
-- [ ] *Congrats, you now have a shippable.*
+- [ ] Set up (differential) gradient sharing + server/p2p.
+- [ ] <ins>Huzzah, we now have a shippable.</ins>
 
 Further into the future:
 - [ ] Remote SSH execution.
-- [ ] Implement federated learning-style hives.
 - [ ] Sandboxed docker environments.
 - [ ] Native support for agent loops.
-- [ ] Automatic subagent spawning and automatic git worktrees.
-- [ ] Dynalang-style world model for embedded state roll-forward.
 - [ ] Remote control: copy a session code, enter it on our website, continue interacting encrypted through the browser.
 - [ ] Always-on mode: always listen, look, and read, and when a keyboard shortcut is entered, automatically infer and continue the user's task using e.g. Touchpoint.
+- [ ] Dynalang-style world model for embedded state roll-forward.
+- [ ] Implement federated learning-style hives.
+- [ ] Automatic subagent spawning and automatic git worktrees.
