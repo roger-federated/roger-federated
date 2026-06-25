@@ -18,7 +18,6 @@ import roger.serving.model_setup as model_setup
 from roger.serving.model_setup import fetch_model
 from roger.agency.rollout_utils import rollout
 from roger.tools import mcp_utils, std_tools
-from roger.training import lora_utils
 
 console = Console(highlight=False)
 
@@ -97,13 +96,14 @@ def _keep_awake_start() -> Callable | None:
 
 async def _repl(cfg: dict, root: str) -> None:
     """Load model once, then loop: read prompt → rollout → record."""
+    # The federation's cumulative global ΔW (if any) is folded into the base weights in bf16 before
+    # quantization — see federated/delta.fold_into + serving/model_setup. The HF cache is untouched;
+    # nothing is stored. None when no federation is configured or none has been pulled yet.
+    from roger.federated import client as fed_client
+    global_deltas = fed_client.pending_globals(cfg)
     # Spinner while loading
     with console.status("[bold]Loading model…[/bold]", spinner="dots"):
-        model, processor = fetch_model(cfg["model_id"])
-        # Apply any self-trained adapter over the frozen base (returns a wrapper, so reassign).
-        adapter_loaded = lora_utils.adapter_exists()
-        if adapter_loaded:
-            model = lora_utils.load_adapter_for_inference(model)
+        model, processor = fetch_model(cfg["model_id"], weight_deltas=global_deltas)
         # Speculative decoding: a user-set draft_model (must share the target's tokenizer) is used
         # as the assistant model; otherwise fall back to model-free n-gram prompt-lookup.
         draft_id = cfg.get("draft_model")
@@ -134,8 +134,8 @@ async def _repl(cfg: dict, root: str) -> None:
     specials = [tokenizer.decode([t]) for t in tokenizer.all_special_ids]
     msg, style = model_setup.placement_summary(model)
     console.print(f"[bold {style}]{msg}[/bold {style}]\n")
-    if adapter_loaded:
-        console.print("[dim]Loaded adapter from ~/.roger/adapter[/dim]")
+    if global_deltas:
+        console.print(f"[dim]Folded federated update into {len(global_deltas)} layers.[/dim]")
 
     # Prompt toolkit session (history + styled input)
     session    = ui.make_session()
@@ -205,12 +205,18 @@ async def _repl(cfg: dict, root: str) -> None:
             await mcp_stack.aclose()
 
     # Gated quit-time training: inference is over, so reuse the loaded model when runs have piled up.
+    # Only trains when contributing into a federation (there is no local-apply path); the resulting
+    # ΔW is densified, masked and uploaded, never written to ~/.roger/adapter.
     from roger.training import trainer
+    from roger.federated import client as fed_client
     train_every = cfg.get("train_every", 8)
-    if len(trainer._list_unconsumed(train_every)) >= train_every:
+    if fed_client.should_train(cfg) and len(trainer._list_unconsumed(train_every)) >= train_every:
         with console.status("[bold]Training on recent runs…[/bold]", spinner="dots"):
             stats = trainer.train(model_id=cfg["model_id"], reuse=(model, processor))
         console.print(f"[dim]Training: {stats}[/dim]")
+        if stats.get("delta"):
+            with console.status("[bold]Contributing your gradient…[/bold]", spinner="dots"):
+                fed_client.contribute_delta(stats["delta"], cfg)
 
     console.print("\n[dim]Goodbye.[/dim]")
 
@@ -230,6 +236,10 @@ def main() -> None:
     parser.add_argument("--no-skills",      action="store_true", help="Disable skills")
     parser.add_argument("--no-memory",      action="store_true", help="Disable persistent memory")
     parser.add_argument("--verbose",        action="store_true", help="Expand thinking blocks")
+    parser.add_argument("--no-contribute",  action="store_true",
+                        help="Leech mode: pull the federated model but share no gradients this run")
+    parser.add_argument("--federation",     action="append", metavar="URL", dest="federation",
+                        help="Add a federation base URL for this run (repeatable)")
     # Optional `train` subcommand; bare `roger` (cmd=None) still launches the chat REPL.
     sub = parser.add_subparsers(dest="cmd")
     p_train = sub.add_parser("train", help="Run a LoRA REINFORCE++ update over recorded runs")
@@ -254,17 +264,30 @@ def main() -> None:
     if args.no_skills:      cfg["enable_skills"]  = False
     if args.no_memory:      cfg["enable_memory"]  = False
     if args.verbose:        cfg["verbose"]         = True
+    if args.no_contribute:  cfg["contribute"]      = False
+    if args.federation:     cfg["federations"]     = list(cfg.get("federations", [])) + args.federation
 
     # Console output policy (before any model fetch so download bars are suppressed)
     _configure_output(cfg["verbose"])
 
-    # `roger train`: standalone update over recorded runs, loading its own training model.
+    # `roger train`: standalone update over recorded runs, loading its own training model. The ΔW is
+    # shared with the federation, never applied locally — so without a federation there's nothing to do.
     if args.cmd == "train":
         from roger.training import trainer
+        from roger.federated import client as fed_client
+        if not fed_client.should_train(cfg):
+            why = ("you're in leech mode (\"contribute\": false)" if cfg.get("federations")
+                   else "no federations are configured in ~/.roger/config.json")
+            console.print(f"[yellow]Nothing to train: {why}. Training only produces a gradient to "
+                          "contribute; it is never applied locally.[/yellow]")
+            return
         with console.status("[bold]Training on recorded runs…[/bold]", spinner="dots"):
             stats = trainer.train(model_id=cfg["model_id"], batch=args.batch, epochs=args.epochs,
                                   lr=args.lr)
         console.print(f"Training: {stats}")
+        if stats.get("delta"):
+            with console.status("[bold]Contributing your gradient to the federation…[/bold]", spinner="dots"):
+                fed_client.contribute_delta(stats["delta"], cfg)
         return
 
     # Wipe any leftover terminal content before the session (after output config so it isn't garbled)
@@ -272,6 +295,19 @@ def main() -> None:
 
     # Banner
     console.print(_BANNER.format(cfg_path=config.path(), model=cfg["model_id"]))
+
+    # Federated: nudge a leech, then download + persist the day's cumulative global once on first
+    # startup. It's folded into the base at model-load time (in _repl). Inert without a federation.
+    from roger.federated import client as fed_client
+    if fed_client.is_leeching(cfg):
+        console.print("[yellow]🪱 Leech mode: you're pulling the federation's model but contributing "
+                      "nothing back. Set \"contribute\": true in ~/.roger/config.json to pull your "
+                      "weight.[/yellow]")
+    if cfg.get("federations"):
+        with console.status("[bold]Syncing federated model…[/bold]", spinner="dots"):
+            fetched = fed_client.maybe_daily_pull(cfg)
+        if fetched:
+            console.print("[dim]Downloaded today's federation update.[/dim]")
 
     # Root selection
     root = ui.select_root(os.getcwd())

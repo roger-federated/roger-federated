@@ -8,5 +8,7 @@
   "enable_memory": true,
   "verbose": false,
   "draft_model": "",
-  "train_every": 8
+  "train_every": 8,
+  "contribute": true,
+  "federations": []
 }

@@ -144,6 +144,7 @@ def train(model_id: str | None = None, *, batch: int = 8, epochs: int = 1, lr: f
         ep["keep"] = torch.tensor(keep)
     privacy_filter.free_filter()
 
+    # Trains a fresh `local` adapter on top of the frozen global; its ΔW is what we share.
     model = lora_utils.attach_lora(model, targets=targets)
     model.train()
     device = next(model.parameters()).device
@@ -175,11 +176,18 @@ def train(model_id: str | None = None, *, batch: int = 8, epochs: int = 1, lr: f
         torch.nn.utils.clip_grad_norm_(trainable, max_grad_norm)
         opt.step()
 
-    model.save_pretrained(lora_utils.ADAPTER_DIR)
+    # No local apply: nothing is written to disk here. Instead export the adapter's factors (+ scaling)
+    # as the federated contribution; the federated client densifies B@A into a weight-space ΔW, masks
+    # it (secure aggregation), and uploads it. The local model only ever changes when the daily global
+    # is pulled and folded into the base at load time (see federated/client.py + delta.fold_into).
+    pc      = next(iter(model.peft_config.values()))   # the single adapter get_peft_model created
+    delta   = {"weights":  lora_utils.local_state_dict(model),
+               "scaling":  pc.lora_alpha / pc.r,
+               "model_id": model_id}
     # Consumed runs have no further training value (on-policy, consume-once); delete them outright.
     for ep in eps:
         shutil.rmtree(ep["dir"], ignore_errors=True)
 
     return {"trained": True, "n_episodes": len(eps), "n_tokens": total_tokens,
-            "n_pii_dropped": gen_tokens - total_tokens,
+            "n_pii_dropped": gen_tokens - total_tokens, "delta": delta,
             "mean_return": float(returns.mean()), "loss": last_loss, "skipped_mm": skipped_mm}
