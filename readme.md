@@ -234,7 +234,8 @@ This software is still in development. Below is a non-exhaustive list of to-do i
 - [x] LLM-as-judge (self-evaluation inspired by RLSR, SRT, Co-rewarding, meta-evaluation; requires a portion of ground truth).
 - [x] Implement automatic QLoRA REINFORCE++.
 - [x] Use privacy filter for training data.
-- [ ] Set up (differential) gradient sharing + server/p2p.
+- [x] Set up gradient sharing and Bonawitz secure aggregation.
+- [ ] Build the aggregation server: federated strategy, anti-poisoning, central ground-truth gradients.
 - [ ] <ins>Huzzah, we now have a shippable.</ins>
 
 Further into the future:

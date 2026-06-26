@@ -1,39 +1,18 @@
-"""lora_utils.py — LoRA adapter attach (for RL training) and load (for serving).
+"""lora_utils.py — attach a fresh LoRA adapter for an RL training round.
 
-`target_modules` is just the selection of which existing layers get the LoRA branch. 
-The trained adapter lives at ~/.roger/adapter and is resumed in place across sessions, 
-which is what makes the local RL genuinely continual.
+A round trains a brand-new adapter on top of whatever base is loaded (the HF base with the federated
+global already folded into its weights, see federated/delta.py). Because LoRA inits B=0, the adapter
+starts at ΔW=0, so after the REINFORCE++ step its ΔW = (alpha/r)·B@A is exactly the local update we
+densify and share. The adapter is never persisted: the local model only changes when the next global
+is pulled and folded at load time, so there is no inference-time adapter and no resume-in-place.
 """
-import os
-
-from peft import (LoraConfig, get_peft_model, prepare_model_for_kbit_training,
-                  PeftModel)
-
-from roger.agency.path_utils import state_dir
-
-ADAPTER_DIR = os.path.join(state_dir(), "adapter")   # ~/.roger/adapter
-
-
-def adapter_exists() -> bool:
-    # A saved PEFT adapter always carries its config alongside the weights.
-    return os.path.isdir(ADAPTER_DIR) and os.path.exists(os.path.join(ADAPTER_DIR, "adapter_config.json"))
+from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 
 
 def attach_lora(model, *, r: int = 16, alpha: int = 32, dropout: float = 0.05,
                 targets="all-linear"):
-    """Return a trainable PEFT-wrapped model. Resumes ~/.roger/adapter when present so updates
-    accumulate; otherwise starts a fresh adapter. Works for a quantized (QLoRA) or full base."""
-    # Ctrl-D reuse: model already wears the inference adapter; re-injecting would nest wrappers,
-    # so unfreeze the existing adapter in place instead.
-    if isinstance(model, PeftModel):
-        for n, p in model.named_parameters():
-            if "lora_" in n:
-                p.requires_grad_(True)
-        model.gradient_checkpointing_enable()
-        model.enable_input_require_grads()
-        model.config.use_cache = False
-        return model
-
+    """Return the model wrapped with a single trainable LoRA adapter. Works for a quantized (QLoRA)
+    or full base. The Ctrl-D reuse path passes the already-loaded (non-PeftModel) served model."""
     is_quantized = getattr(model, "is_loaded_in_4bit", False) or getattr(model, "is_loaded_in_8bit", False)
     if is_quantized:
         # casts norms to fp32, enables input grads, turns on gradient checkpointing
@@ -41,21 +20,16 @@ def attach_lora(model, *, r: int = 16, alpha: int = 32, dropout: float = 0.05,
     else:
         model.gradient_checkpointing_enable()
         model.enable_input_require_grads()   # checkpointing needs a grad-bearing input on a frozen base
-    if adapter_exists():
-        model = PeftModel.from_pretrained(model, ADAPTER_DIR, is_trainable=True)
-    else:
-        # 'all-linear' = every nn.Linear (minus head), model-agnostic; vision-tower linears get
-        # wrapped too but receive no gradient on v1's text-only episodes.
-        cfg = LoraConfig(task_type="CAUSAL_LM", r=r, lora_alpha=alpha, lora_dropout=dropout,
-                         target_modules=targets, bias="none")
-        model = get_peft_model(model, cfg)
+    # 'all-linear' = every nn.Linear (minus head), model-agnostic.
+    cfg = LoraConfig(task_type="CAUSAL_LM", r=r, lora_alpha=alpha, lora_dropout=dropout,
+                     target_modules=targets, bias="none")
+    model = get_peft_model(model, cfg)
     model.config.use_cache = False   # incompatible with gradient checkpointing
     return model
 
 
-def load_adapter_for_inference(model):
-    """Return the base wrapped with the trained adapter for serving (new wrapper, so reassign), or
-    the unchanged model when none exists."""
-    if not adapter_exists():
-        return model
-    return PeftModel.from_pretrained(model, ADAPTER_DIR)
+def local_state_dict(model):
+    """The trained adapter's LoRA factors as the canonical PEFT state dict — keys stripped of the
+    adapter name, ready to densify into the ΔW we share."""
+    from peft import get_peft_model_state_dict
+    return get_peft_model_state_dict(model)

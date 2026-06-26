@@ -149,32 +149,115 @@ def placement_summary(model) -> tuple[str, str]:
         return "Model loaded on CPU; no GPU acceleration (slow).", "yellow"
     return "Model loaded; fully on GPU.", "green"
 
-def fetch_model(model_id="google/gemma-4-E2B-it", for_training: bool = False,
-                model_cls=AutoModelForImageTextToText) -> tuple[AutoModelForImageTextToText, AutoProcessor]:
-    # `model_cls` lets non-generative models reuse this loader (e.g. the privacy filter's
-    # AutoModelForTokenClassification) so they get the same VRAM-aware quant/placement.
-    # VRAM-aware quantization: choose tier from model size vs available VRAM
-    gpu_available = torch.cuda.is_available()
-    quant_cfg, dtype, fits = _select_quant(model_id, gpu_available, for_training)
-    n_gpu = torch.cuda.device_count() if gpu_available else 0
-    # device_map="auto" is unreliable; thus if model fits, we manually pin to gpu
+def _placement_kwargs(quant_cfg, dtype, gpu_available, n_gpu, fits) -> dict:
+    """The from_pretrained kwargs for the chosen tier + placement (shared by the normal and the
+    folded temp-dir reload path)."""
     kwargs = dict(quantization_config=quant_cfg, dtype=dtype, low_cpu_mem_usage=True,
                   attn_implementation="sdpa")
-    if not gpu_available: # CPU
+    if not gpu_available:                # CPU
         kwargs["device_map"] = "auto"
-    elif n_gpu == 1 and fits: # Fits on one GPU
+    elif n_gpu == 1 and fits:            # Fits on one GPU (device_map="auto" is unreliable; pin it)
         kwargs["device_map"] = {"": 0}
-    elif fits: # Fits on multiple GPUs
+    elif fits:                           # Fits on multiple GPUs
         kwargs["device_map"] = "auto"
         kwargs["max_memory"] = _vram_budget()
-    else: # Doesn't fit on GPU
+    else:                                # Doesn't fit on GPU → offload the remainder
         offload_dir = os.path.join(state_dir(), "scratch", "offload")
         os.makedirs(offload_dir, exist_ok=True)
         kwargs["device_map"]      = "auto"
         kwargs["max_memory"]      = {**_vram_budget(), "cpu": psutil.virtual_memory().available}
         kwargs["offload_buffers"] = True
         kwargs["offload_folder"]  = offload_dir
-    model = model_cls.from_pretrained(model_id, **kwargs)
+    return kwargs
+
+
+def _quantize_inplace(model, quant_cfg) -> None:
+    """Convert every nn.Linear (minus the modules transformers keeps in full precision, e.g. lm_head)
+    into its bnb counterpart in place. The new Params hold the *current* (already ΔW-folded) bf16
+    weight unquantized; bnb quantizes them when the caller moves the model to CUDA. Verified to match
+    `from_pretrained(folded_bf16, quantization_config)` exactly — this is the no-disk fold path."""
+    import torch.nn as nn
+    import bitsandbytes as bnb
+    try:                                              # moved across transformers versions
+        from transformers.quantizers.base import get_keys_to_not_convert
+    except ImportError:
+        from transformers.integrations.bitsandbytes import get_keys_to_not_convert
+    skip = set()
+    for key in get_keys_to_not_convert(model):
+        try:
+            skip.add(model.get_submodule(key))
+        except AttributeError:
+            pass
+    is4 = getattr(quant_cfg, "load_in_4bit", False)
+
+    def convert(parent):
+        for name, child in list(parent.named_children()):
+            if isinstance(child, nn.Linear) and child not in skip:
+                if is4:
+                    new = bnb.nn.Linear4bit(child.in_features, child.out_features,
+                                            bias=child.bias is not None,
+                                            compute_dtype=quant_cfg.bnb_4bit_compute_dtype,
+                                            quant_type=quant_cfg.bnb_4bit_quant_type,
+                                            compress_statistics=quant_cfg.bnb_4bit_use_double_quant)
+                    new.weight = bnb.nn.Params4bit(child.weight.data, requires_grad=False,
+                                                   quant_type=quant_cfg.bnb_4bit_quant_type,
+                                                   compress_statistics=quant_cfg.bnb_4bit_use_double_quant)
+                else:
+                    new = bnb.nn.Linear8bitLt(child.in_features, child.out_features,
+                                              bias=child.bias is not None, has_fp16_weights=False)
+                    new.weight = bnb.nn.Int8Params(child.weight.data, requires_grad=False,
+                                                   has_fp16_weights=False)
+                if child.bias is not None:
+                    new.bias = nn.Parameter(child.bias.data, requires_grad=False)
+                setattr(parent, name, new)
+            else:
+                convert(child)
+
+    convert(model)
+    model.is_loaded_in_4bit, model.is_loaded_in_8bit = is4, not is4
+
+
+def _load_folded(model_id, deltas, model_cls, quant_cfg, dtype, fits, gpu_available, n_gpu):
+    """Load the base in bf16, fold the federated global ΔW into the *float* weights, then quantize +
+    place. The HF cache is never altered and no model is persisted. The common single-GPU-fits case
+    quantizes in memory (no disk); offload/multi-GPU fall back to a transient temp-dir reload."""
+    from roger.federated import delta as delta_mod
+    model = model_cls.from_pretrained(model_id, dtype=torch.bfloat16, low_cpu_mem_usage=True,
+                                      attn_implementation="sdpa")
+    delta_mod.fold_into(model, deltas)
+    if not gpu_available:
+        return model                                       # CPU, bf16
+    if fits and n_gpu == 1:                                 # in-memory quantize/place — no disk
+        if quant_cfg is not None:
+            _quantize_inplace(model, quant_cfg)
+        return model.to("cuda:0")
+    # Offload / multi-GPU: round-trip the folded bf16 weights through a temp dir so from_pretrained's
+    # device_map/offload machinery handles placement. Transient (deleted), not a persisted model.
+    import tempfile, shutil
+    tmp = tempfile.mkdtemp(prefix="roger_fold_")
+    try:
+        model.save_pretrained(tmp)
+        del model
+        return model_cls.from_pretrained(tmp, **_placement_kwargs(quant_cfg, dtype, gpu_available, n_gpu, fits))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def fetch_model(model_id="google/gemma-4-E2B-it", for_training: bool = False,
+                model_cls=AutoModelForImageTextToText,
+                weight_deltas: dict | None = None) -> tuple[AutoModelForImageTextToText, AutoProcessor]:
+    # `model_cls` lets non-generative models reuse this loader (e.g. the privacy filter's
+    # AutoModelForTokenClassification) so they get the same VRAM-aware quant/placement.
+    # `weight_deltas` (federated): a dense ΔW per module folded into the base before quantization.
+    # VRAM-aware quantization: choose tier from model size vs available VRAM
+    gpu_available = torch.cuda.is_available()
+    quant_cfg, dtype, fits = _select_quant(model_id, gpu_available, for_training)
+    n_gpu = torch.cuda.device_count() if gpu_available else 0
+    if weight_deltas:
+        model = _load_folded(model_id, weight_deltas, model_cls, quant_cfg, dtype, fits, gpu_available, n_gpu)
+    else:
+        model = model_cls.from_pretrained(
+            model_id, **_placement_kwargs(quant_cfg, dtype, gpu_available, n_gpu, fits))
     # Text-only classifiers (e.g. token-classification) ship no processor config; fall back to the
     # plain tokenizer so callers always get a usable text front-end.
     try:

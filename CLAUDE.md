@@ -16,7 +16,17 @@
 - LoRA REINFORCE++ trainer is built and wired (`training/trainer.py`, `lora_utils.py`); train-time
   PII anonymisation via `privacy_filter.py`. Gated Ctrl-D auto-train + `roger train` subcommand.
   `/grade` user override of `finish()` self-eval score + 10%-user-graded training gate.
-- NOT yet built: federated gradient sharing, docker sandboxing, account/hive/scheduling setup.
+- Federated gradient-sharing **client** is built (`federated/`): a training round trains a single
+  fresh LoRA adapter, exports its weight-space ΔW (=scaling·B@A) — never applied/saved locally —
+  densifies + masks it with Bonawitz secure aggregation (X25519 EC-DH), and uploads per federation.
+  The server broadcasts the **full cumulative dense global** ΔW; the client pulls it daily, persists
+  the blob under `~/.roger/federated/`, and **folds it into the base in bf16 at load, then bnb-quantizes
+  to GPU** (`delta.fold_into` + `model_setup.fetch_model(weight_deltas=…)`) — the HF cache is untouched
+  and no model is ever stored. Config: `contribute`/`federations` (the ΔW L2 clip is a fixed
+  best-effort client constant, not user config — authoritative norm-bounding is server-side). Leech
+  mode (config'd-in but not contributing) is nudged, not blocked.
+- NOT yet built: the federated aggregation **server** (FedAvg, anti-poisoning, central ground-truth
+  gradients, peer-key distribution), docker sandboxing, account/hive/scheduling setup.
   The authoritative TODO list is in `readme.md` ("Progress & contributing").
 
 ## Confirmed design decisions
@@ -45,10 +55,15 @@
                 (`reward_utils`, `recording`, `lora_utils`, `trainer`, `privacy_filter`)
 - `skills/`   — bundled default skills shipped as package-data (`ipynb`, `skill-creator`,
                 `git-workflow`, `code`); read in place as the lowest-priority `discover_skills` base
-- `federated/`— placeholder for gradient aggregation / differential privacy / strategies (empty)
+- `federated/`— gradient-sharing client: `delta` (densify ΔW + (de)serialize + `fold_into` the base
+                weights in bf16), `secure_agg` (X25519/EC-DH + SHAKE pairwise masks, quantize mod R),
+                `transport` (httpx per-federation, fail-soft, sync state + persisted global blob),
+                `client` (contribute / daily-pull / `pending_globals` / leech gating). The bf16-fold-
+                then-bnb-quantize loading lives in `serving/model_setup.fetch_model(weight_deltas=…)`.
+                Server-side aggregation is still future work.
 - `envs/`     — not created yet (concrete shell/browser/code environments are future work)
 - `tests/`    — `test_rewards.py`, `test_trainer.py`, `test_grade.py`, `test_privacy_filter.py`,
-                `test_mcp.py`, `test_multimodal.py`
+                `test_mcp.py`, `test_multimodal.py`, `test_federated.py`
 
 Runtime artifacts all live under the global `~/.roger/` (never in the project): `config.json`,
 global `memory/memory.md` + per-project `memory/<dashed-abspath>.md`, `runs/`, `backups/`,
