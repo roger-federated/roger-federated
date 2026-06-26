@@ -5,9 +5,14 @@ No real MCP server is started: MCPConnection is exercised with a stub session so
 namespacing / handler-resolution logic can be checked in isolation.
 """
 
-import json, os, types
+import asyncio, contextlib, json, os, types
 import roger.tools.mcp_utils as mcp_utils
-from roger.tools.mcp_utils import MCPConnection, load_mcp_config
+from roger.tools.mcp_utils import (
+    MCPConnection, load_mcp_config,
+    _FileTokenStorage, _remote_url, _parse_callback, _build_oauth_auth,
+)
+from mcp.client.auth import OAuthClientProvider
+from mcp.shared.auth import OAuthToken, OAuthClientInformationFull
 
 
 # ---------------------------------------------------------------------------
@@ -89,3 +94,78 @@ def test_namespacing_prevents_collision():
     merged = {**a.handlers, **b.handlers}
     assert set(merged) == {"mcp__alpha__read", "mcp__beta__read"}
     print("PASS test_namespacing_prevents_collision")
+
+
+# ---------------------------------------------------------------------------
+# OAuth 2.0 — offline (no real server, no browser, no network)
+# ---------------------------------------------------------------------------
+
+_OAUTH = {"clientId": "cid-123", "clientSecret": "secret-xyz"}
+
+def test_remote_url_accepts_serverurl_alias():
+    assert _remote_url({"url": "https://a/mcp"}) == "https://a/mcp"
+    # Google's Gmail spec uses `serverUrl`, not `url`
+    assert _remote_url({"serverUrl": "https://gmailmcp.googleapis.com/mcp/v1"}) \
+        == "https://gmailmcp.googleapis.com/mcp/v1"
+    print("PASS test_remote_url_accepts_serverurl_alias")
+
+def test_parse_callback():
+    assert _parse_callback("/callback?code=abc&state=xyz") == ("abc", "xyz")
+    # state is optional; a missing code surfaces as None so callback_handler can reject it
+    assert _parse_callback("/callback?code=abc") == ("abc", None)
+    assert _parse_callback("/callback?error=access_denied") == (None, None)
+    print("PASS test_parse_callback")
+
+def test_token_storage_roundtrip(tmp_path, monkeypatch):
+    monkeypatch.setattr(mcp_utils, "state_dir", lambda: str(tmp_path))
+    store = _FileTokenStorage("gmail", _OAUTH, "http://127.0.0.1:5000/callback")
+
+    async def go():
+        # Fresh store: no tokens yet, but client_info is seeded from the spec creds so the SDK
+        # skips Dynamic Client Registration and uses the pre-registered client.
+        assert await store.get_tokens() is None
+        seeded = await store.get_client_info()
+        assert seeded.client_id == "cid-123" and seeded.client_secret == "secret-xyz"
+        # set_tokens (called by the SDK after login and every refresh) persists to disk
+        await store.set_tokens(OAuthToken(access_token="tok", refresh_token="ref"))
+        reloaded = await store.get_tokens()
+        assert reloaded.access_token == "tok" and reloaded.refresh_token == "ref"
+
+    asyncio.run(go())
+    # Cache is keyed by server name under ~/.roger/oauth/<name>.json
+    assert (tmp_path / "oauth" / "gmail.json").exists()
+    print("PASS test_token_storage_roundtrip")
+
+def test_token_storage_keyed_per_server(tmp_path, monkeypatch):
+    monkeypatch.setattr(mcp_utils, "state_dir", lambda: str(tmp_path))
+    async def go():
+        await _FileTokenStorage("gmail", _OAUTH, "http://127.0.0.1:1/callback").set_tokens(
+            OAuthToken(access_token="a"))
+        await _FileTokenStorage("drive", _OAUTH, "http://127.0.0.1:1/callback").set_tokens(
+            OAuthToken(access_token="b"))
+    asyncio.run(go())
+    # Two servers → two distinct cache files (no cross-contamination)
+    assert (tmp_path / "oauth" / "gmail.json").exists()
+    assert (tmp_path / "oauth" / "drive.json").exists()
+    print("PASS test_token_storage_keyed_per_server")
+
+def test_build_oauth_auth(tmp_path, monkeypatch):
+    monkeypatch.setattr(mcp_utils, "state_dir", lambda: str(tmp_path))
+    async def go():
+        stack = contextlib.AsyncExitStack()
+        try:
+            # No `oauth` block → no auth provider (existing header-only path is unaffected)
+            assert _build_oauth_auth("plain", {"url": "https://a/mcp"}, stack) is None
+            # With `oauth` → an OAuthClientProvider pointed at the resolved server URL
+            prov = _build_oauth_auth(
+                "gmail",
+                {"serverUrl": "https://gmailmcp.googleapis.com/mcp/v1", "oauth": _OAUTH},
+                stack)
+            assert isinstance(prov, OAuthClientProvider)
+            assert prov.context.server_url == "https://gmailmcp.googleapis.com/mcp/v1"
+            # redirect URI is a bound loopback the OAuth client must allow
+            assert str(prov.context.client_metadata.redirect_uris[0]).startswith("http://127.0.0.1:")
+        finally:
+            await stack.aclose()   # tears down the loopback listener
+    asyncio.run(go())
+    print("PASS test_build_oauth_auth")

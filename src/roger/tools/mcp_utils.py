@@ -6,11 +6,18 @@ Servers are declared in ~/.roger/mcp.json using the standard `mcpServers` schema
     {"mcpServers": {
         "filesystem": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "."]},
         "sentry":     {"type": "http", "url": "https://mcp.sentry.dev/mcp",
-                       "headers": {"Authorization": "Bearer ..."}}
+                       "headers": {"Authorization": "Bearer ..."}},
+        "gmail":      {"serverUrl": "https://gmailmcp.googleapis.com/mcp/v1",
+                       "oauth": {"clientId": "...", "clientSecret": "..."}}
     }}
 Each entry is either a local stdio subprocess (`command`/`args`/`env`) or a remote server
-(`url` + optional `type` "sse"|"http" and `headers`). Tools are namespaced `mcp__<server>__<tool>`
-so same-named tools from different servers can't collide.
+(`url` (alias `serverUrl`) + optional `type` "sse"|"http" and `headers`). A remote server may
+also carry an `oauth` block (`{clientId, clientSecret}`, the format Google's Gmail MCP docs
+use): on first connect we run a browser-based Authorization Code + PKCE login and cache the
+resulting tokens under ~/.roger/oauth/<server>.json (auto-refreshed), so later runs don't
+re-prompt. The OAuth client must be registered with a loopback redirect URI (Google: a
+"Desktop app" client, which allows any 127.0.0.1 port). Tools are namespaced
+`mcp__<server>__<tool>` so same-named tools from different servers can't collide.
 
 Usage with rollout():
     stack, tools, handlers = await connect_servers(load_mcp_config())
@@ -21,10 +28,13 @@ Usage with rollout():
 """
 
 import contextlib, subprocess, base64, io, json, os, warnings
+import asyncio, http.server, threading, urllib.parse, webbrowser
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.client.sse import sse_client
 from mcp.client.streamable_http import streamablehttp_client
+from mcp.client.auth import OAuthClientProvider
+from mcp.shared.auth import OAuthClientInformationFull, OAuthClientMetadata, OAuthToken
 from PIL import Image
 from roger.agency.path_utils import state_dir
 
@@ -77,6 +87,153 @@ def _strip_schema(schema: dict) -> dict:
     return out
 
 
+# ---------------------------------------------------------------------------
+# OAuth 2.0 for remote servers — we wire up the mcp SDK's client-side flow
+# (mcp.client.auth.OAuthClientProvider does Authorization Code + PKCE, metadata
+# discovery and silent refresh) rather than implementing any OAuth crypto here.
+# ---------------------------------------------------------------------------
+
+def _remote_url(spec: dict) -> str:
+    "Remote server URL, accepting Google's `serverUrl` alias for `url`."
+    return spec.get("url") or spec["serverUrl"]
+
+
+def _parse_callback(path: str) -> tuple[str | None, str | None]:
+    "Pull (code, state) out of the OAuth redirect request path's query string."
+    params = urllib.parse.parse_qs(urllib.parse.urlparse(path).query)
+    return params.get("code", [None])[0], params.get("state", [None])[0]
+
+
+def _oauth_cache_path(server_name: str) -> str:
+    "Per-server token cache file ~/.roger/oauth/<name>.json (name sanitised for the filesystem)."
+    safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in server_name)
+    return os.path.join(state_dir(), "oauth", f"{safe}.json")
+
+
+def _load_cache(path: str) -> dict:
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def _save_cache(path: str, data: dict) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+
+
+class _FileTokenStorage:
+    """Thin adapter exposing the SDK's TokenStorage protocol (four awaited methods that must
+    travel together as one object, one instance per server) over the plain _load_cache/_save_cache
+    file functions. Persists to ~/.roger/oauth/<name>.json. The SDK calls set_tokens() after the
+    first login *and* after every silent refresh, so the freshest token is always on disk.
+    get_client_info() seeds the user-supplied clientId/clientSecret on first use, which makes
+    OAuthClientProvider skip Dynamic Client Registration and use those pre-registered credentials
+    (the Gmail path). Methods are async only because the protocol awaits them; the IO is sync."""
+
+    def __init__(self, server_name: str, oauth: dict, redirect_uri: str):
+        self._path = _oauth_cache_path(server_name)
+        self._oauth = oauth
+        self._redirect_uri = redirect_uri
+
+    async def get_tokens(self) -> OAuthToken | None:
+        tok = _load_cache(self._path).get("tokens")
+        return OAuthToken.model_validate(tok) if tok else None
+
+    async def set_tokens(self, tokens: OAuthToken) -> None:
+        data = _load_cache(self._path)
+        data["tokens"] = tokens.model_dump(mode="json", exclude_none=True)
+        _save_cache(self._path, data)
+
+    async def get_client_info(self) -> OAuthClientInformationFull | None:
+        info = _load_cache(self._path).get("client_info")
+        if info:
+            return OAuthClientInformationFull.model_validate(info)
+        # No persisted registration yet: hand back the spec's pre-registered credentials so the
+        # SDK uses them directly instead of attempting Dynamic Client Registration.
+        return OAuthClientInformationFull(
+            client_id=self._oauth["clientId"],
+            client_secret=self._oauth.get("clientSecret"),
+            redirect_uris=[self._redirect_uri],
+            grant_types=["authorization_code", "refresh_token"],
+            token_endpoint_auth_method="client_secret_post",
+        )
+
+    async def set_client_info(self, client_info: OAuthClientInformationFull) -> None:
+        data = _load_cache(self._path)
+        data["client_info"] = client_info.model_dump(mode="json", exclude_none=True)
+        _save_cache(self._path, data)
+
+
+def _loopback_oauth_handlers(stack: contextlib.AsyncExitStack):
+    """Bind a loopback HTTP listener to catch the OAuth redirect and return
+    (redirect_uri, redirect_handler, callback_handler) for OAuthClientProvider.
+    redirect_handler opens the system browser at the auth URL; callback_handler blocks until the
+    provider's redirect lands on 127.0.0.1 and yields the (code, state). The listening socket is
+    torn down via `stack` when the connection's exit stack unwinds."""
+    loop = asyncio.get_running_loop()
+    result: asyncio.Future = loop.create_future()
+
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            code, state = _parse_callback(self.path)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.end_headers()
+            self.wfile.write(b"<html><body>Authentication complete. "
+                             b"You may close this tab.</body></html>")
+            if not result.done():   # hand the code back to the event-loop thread
+                loop.call_soon_threadsafe(result.set_result, (code, state))
+
+        def log_message(self, *a):  # silence BaseHTTPRequestHandler's stderr request logging
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), _Handler)
+    redirect_uri = f"http://127.0.0.1:{server.server_address[1]}/callback"
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    stack.callback(lambda: (server.shutdown(), server.server_close()))
+
+    async def redirect_handler(authorization_url: str) -> None:
+        # Also print the URL: webbrowser.open() is a no-op on headless/remote boxes.
+        print(f"\nOpening browser to authorise MCP access:\n{authorization_url}\n")
+        webbrowser.open(authorization_url)
+
+    async def callback_handler() -> tuple[str, str | None]:
+        code, state = await result
+        if not code:
+            raise RuntimeError("OAuth redirect did not include an authorization code")
+        return code, state
+
+    return redirect_uri, redirect_handler, callback_handler
+
+
+def _build_oauth_auth(name: str, spec: dict, stack: contextlib.AsyncExitStack):
+    """Return an OAuthClientProvider for a remote spec carrying an `oauth` block, else None.
+    The provider is an httpx.Auth the transports accept; it triggers the browser login lazily on
+    the first 401 from the server."""
+    oauth = spec.get("oauth")
+    if not oauth:
+        return None
+    redirect_uri, redirect_handler, callback_handler = _loopback_oauth_handlers(stack)
+    metadata = OAuthClientMetadata(
+        client_name=f"roger ({name})",
+        redirect_uris=[redirect_uri],
+        grant_types=["authorization_code", "refresh_token"],
+        response_types=["code"],
+        token_endpoint_auth_method="client_secret_post",
+        scope=oauth.get("scope"),   # usually None — the SDK derives scopes from server metadata
+    )
+    return OAuthClientProvider(
+        server_url=_remote_url(spec),
+        client_metadata=metadata,
+        storage=_FileTokenStorage(name, oauth, redirect_uri),
+        redirect_handler=redirect_handler,
+        callback_handler=callback_handler,
+    )
+
+
 class MCPConnection:
     """Async context manager: connects to one MCP server (stdio subprocess or remote
     SSE / streamable-HTTP), discovers its tools, and exposes them in rollout()-compatible
@@ -112,14 +269,18 @@ class MCPConnection:
             read, write = await self._stack.enter_async_context(
                 stdio_client(params, errlog=subprocess.DEVNULL))
             return read, write
-        url, headers = spec["url"], spec.get("headers")
+        url, headers = _remote_url(spec), spec.get("headers")
+        # `auth` is None unless the spec carries an `oauth` block; the transports accept it as
+        # an httpx.Auth and the SDK runs the PKCE browser flow lazily on the first 401.
+        auth = _build_oauth_auth(self._name, spec, self._stack)
         if spec.get("type") == "sse":
-            read, write = await self._stack.enter_async_context(sse_client(url, headers=headers))
+            read, write = await self._stack.enter_async_context(
+                sse_client(url, headers=headers, auth=auth))
             return read, write
         # Default remote transport: streamable HTTP (the current MCP standard). Its context
         # manager yields a third value (a session-id getter) we don't need — drop it.
         read, write, _ = await self._stack.enter_async_context(
-            streamablehttp_client(url, headers=headers))
+            streamablehttp_client(url, headers=headers, auth=auth))
         return read, write
 
     async def __aenter__(self):
