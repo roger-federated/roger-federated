@@ -122,7 +122,7 @@ def test_is_leeching_and_should_train():
 
 def test_contribute_delta_uploads(monkeypatch):
     sent = []
-    monkeypatch.setattr(transport, "register_and_peers", lambda url, pub, mid: [pub])
+    monkeypatch.setattr(transport, "register_and_peers", lambda url, pub, mid: ("rid", [pub]))
     monkeypatch.setattr(transport, "contribute", lambda url, blob: sent.append((url, blob)) or "ok")
     fed_client.contribute_delta(_fake_delta(), {"federations": ["http://x"], "contribute": True})
     assert len(sent) == 1 and sent[0][0] == "http://x"

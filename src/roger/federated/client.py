@@ -50,11 +50,13 @@ def _clip(dense: dict, max_norm: float) -> dict:
     return {k: (v.float() * s).to(v.dtype) for k, v in dense.items()}
 
 
-def _pack(masked: torch.Tensor, spec: list, compat: str, model_id: str) -> bytes:
-    # Carry the layout (spec) + base hash so the server can rebuild, place, and check each ΔW.
+def _pack(masked: torch.Tensor, spec: list, compat: str, model_id: str, round_id: str) -> bytes:
+    # Carry the layout (spec) + base hash so the server can rebuild, place, and check each ΔW, plus the
+    # round_id from registration so the server routes this upload to the cohort we masked against.
     spec_json = [[k, list(shape)] for k, shape in spec]
     return st_save({"masked": masked},
-                   metadata={"model_id": model_id, "compat": compat, "spec": json.dumps(spec_json)})
+                   metadata={"model_id": model_id, "compat": compat,
+                             "spec": json.dumps(spec_json), "round_id": round_id})
 
 
 def contribute_delta(delta: dict, cfg: dict) -> None:
@@ -68,11 +70,12 @@ def contribute_delta(delta: dict, cfg: dict) -> None:
     q, spec = secure_agg.quantize(dense)
     priv, pub = secure_agg.gen_keypair()
     for url in feds:
-        peers = transport.register_and_peers(url, pub, delta["model_id"])
-        if peers is None:                       # unreachable: don't upload an unmaskable payload
+        res = transport.register_and_peers(url, pub, delta["model_id"])
+        if res is None:                         # unreachable/sub-quorum: don't upload an unmaskable payload
             continue
+        round_id, peers = res
         masked = secure_agg.mask(q, priv, peers)
-        transport.contribute(url, _pack(masked, spec, compat, delta["model_id"]))
+        transport.contribute(url, _pack(masked, spec, compat, delta["model_id"], round_id))
 
 
 def maybe_daily_pull(cfg: dict) -> bool:

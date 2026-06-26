@@ -59,14 +59,17 @@ def load_global(url: str) -> bytes | None:
         return None
 
 
-def register_and_peers(url: str, my_pub: bytes, model_id: str) -> list[bytes] | None:
-    """Announce our round public key and get back the round's peer keys. None on any failure (so the
+def register_and_peers(url: str, my_pub: bytes, model_id: str) -> tuple[str, list[bytes]] | None:
+    """Announce our round public key and get back (round_id, peer keys). The round_id identifies the
+    sealed cohort we were placed in; we echo it on the upload so the server routes our contribution to
+    the right round (several cohorts of a model can collect at once). None on any failure (so the
     caller skips this federation rather than uploading an unmaskable contribution)."""
     try:
         r = httpx.post(f"{url.rstrip('/')}/round/register", timeout=_TIMEOUT,
                        json={"model_id": model_id, "pubkey": my_pub.hex()})
         r.raise_for_status()
-        return [bytes.fromhex(h) for h in r.json().get("peers", [])]
+        data = r.json()
+        return data.get("round_id", ""), [bytes.fromhex(h) for h in data.get("peers", [])]
     except Exception:
         return None
 

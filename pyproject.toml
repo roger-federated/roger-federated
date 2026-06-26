@@ -27,6 +27,7 @@ dependencies = [
 
 [project.optional-dependencies]
 audio = ["pydub"]  # AudioSegment support in rollout_utils (guarded import)
+server = ["fastapi", "uvicorn"]  # federated aggregation server (federated/server); `python -m roger.federated.server`
 
 [project.scripts]
 roger = "roger.apps.cli:main"

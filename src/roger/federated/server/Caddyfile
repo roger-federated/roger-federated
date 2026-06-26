@@ -1,0 +1,8 @@
+# Caddy terminates TLS (the client requires HTTPS) and reverse-proxies to the server on :8000.
+# Caddy auto-provisions + renews a Let's Encrypt cert for the domain — just point the domain's
+# A/AAAA record at the VM and replace fed.example.org below. Run: caddy run --config Caddyfile
+fed.example.org {
+	reverse_proxy 127.0.0.1:8000
+	# The server trusts X-Forwarded-For only from configured proxies (default incl. 127.0.0.1); Caddy
+	# sets it automatically, giving the server the real client IP for the (best-effort) IP-binding.
+}
