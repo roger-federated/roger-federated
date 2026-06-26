@@ -6,6 +6,7 @@
 </div>
 
 ---
+---
 
 ### Overview
 The limitations of the AI transition are surfacing as a result of [far-fetched financial assumptions](https://open.spotify.com/clip/5HzODEnWAegI2Z3NGmu7UV?si=wz0K4G-NSIyTcnPK_1lbBw), [closed models we cannot inspect nor steer](https://blog.mozilla.org/en/mozilla/mozilla-open-source-ai-strategy/), and generic promises that remain unattained. _Luckily, we are at a crossroads where you, the consumer can do better [with tiny models on your own hardware](https://newsletter.semianalysis.com/p/google-we-have-no-moat-and-neither)._
@@ -13,14 +14,19 @@ The limitations of the AI transition are surfacing as a result of [far-fetched f
 You and the community can now contribute to the next generation of AI. Not just an LLM with tools, but a purpose-trained agent that is inherently omni-modal. How? By *locally* finetuning a selected *open-source* foundation model on *agentic rollout data*, and subsequently *aggregating* the resulting encrypted model updates (not the data itself) securely with your selected *federations*.
 
 ---
+---
 
 ### Features
-- **Souvereignty**: Inference and finetuning occurs entirely locally on the user's computer (unless otherwise set up), and data is never shared. Only undecipherable gradients are transmitted to selected other users.
-- **LoRA finetuning using live reinforcement learning**: Local reinforcement learning finetuning is efficiently performed using LoRA with implicit, automatically detected rewards.
-- **Federated learning**: Differentially private gradient are shared with selected specialized federations of other users, without exposing raw training data.
-- **Towards omni-modal generality**: A foundation LLM of your choice is finetuned using your federations' gradients, which gradually gives the model inherent agency.
-- **Background autonomy**: Headless workers are spawned for asynchronous task completion within isolated, sandboxed virtual environments.
+On top of the basic agentic capabilities listed further [below](#progress--contributing), Roger adds the following.
 
+- **Efficient local reinforcement learning**: Inference and finetuning run entirely on the user's own machine; raw data never leaves it. QLoRA REINFORCE++ makes on-device RL efficient on consumer GPUs.
+- **Self-evaluating rewards**: Rollouts are scored from implicit user signals, verifiable signals, and the model's own self-evaluation.
+- **Privacy filter**: Before any gradient is computed, a train-time anonymiser swaps personally identifiable information for consistent surrogates, so personal data can neither be learned nor transmitted.
+- **Federated learning using SMPC**: Based on secure multi-party computing, only encrypted weight updates are contributed to your chosen federations. No peer or server can decipher the update and no raw data is ever shared. The aggregated global update is folded back into your base model at load.
+- **Scales to world models**: The same text-native, RL-safe interface extends from agency to world-models, which the federation can train collaboratively and deploy more cheaply than alternative centralized efforts.
+- **More than just software**: Federations, continuous model updates, and a exchange of community-trained adapters on top of basic MCP-driven agentic software make Roger a unique ecosystem that improves as more people contribute.
+
+---
 ---
 
 ### Installation
@@ -32,12 +38,12 @@ git clone git@github.com:thijs-vanweezel/roger-federated.git # or extract from h
 cd roger-federated
 ```
 
-- **Requirements:**
-  - Compatible GPU strongly recommended for quantization and speed.
-  - First run downloads the selected model (several GB) and writes settings under `~/.roger/config.json`. These can be changed at any time.
-  - Linux: `apt install python3-tk` enables the native folder picker; otherwise a text-prompt fallback is used automatically.
+**Requirements:**
+- Compatible GPU strongly recommended for quantization and speed.
+- First run downloads the selected model (several GB) and writes settings under `~/.roger/config.json`. These can be changed at any time.
+- Linux: `apt install python3-tk` enables the native folder picker; otherwise a text-prompt fallback is used automatically.
 
-- **Recommended:**
+**Recommended:**
 
 Additionally requires [`uv`](https://docs.astral.sh/uv/getting-started/installation/) to be installed (provisions Python and isolates dependencies).
 
@@ -47,7 +53,7 @@ uv tool install . --torch-backend auto   # installs `roger` globally; auto-picks
 uvx --from . --torch-backend auto roger
 ```
 
-- **Alternatives:**
+**Alternatives:**
 
 These methods additionally require Python 3.10 to be already installed.
 
@@ -60,15 +66,15 @@ Classic venv:
 python -m venv .venv && source .venv/bin/activate && pip install -e .
 ```
 
-- **GPU notes:**
+**GPU notes:**
   - `bitsandbytes` (4/8-bit quantization) is installed automatically only where PyPI ships a wheel: x86-64 Linux and Windows. On other CUDA platforms (e.g. aarch64 Jetson/GH200) install a preview wheel manually, e.g. `pip install --force-reinstall https://github.com/bitsandbytes-foundation/bitsandbytes/releases/download/continuous-release_main/bitsandbytes-1.33.7.preview-py3-none-manylinux_2_24_aarch64.whl`.
   - Apple Silicon: GPU (MPS/Metal) is not used yet — only the CUDA path is wired up, so macOS runs unquantized on CPU. PRs adding an MPS check alongside the CUDA check in `src/roger/serving/model_setup.py` are welcome.
 
-- **Run:**
+**Run:**
 
 After installing, run `roger` from any terminal. First launch walks you through initial setup. Settings (including the model selection) can subsequently be adjusted in `~/.roger/config.json`.
 
-- **MCP servers:**
+**MCP servers:**
 
 To give Roger additional functionality, include MCP servers in `~/.roger/mcp.json`. It uses the standard `mcpServers`-format, and the exact schema can therefore be found at your MCP server's provider.
 
@@ -180,6 +186,7 @@ Drop any of the entries below or more into `~/.roger/mcp.json` and restart Roger
 </details>
 
 ---
+---
 
 ### Use cases
 Roger has the potential to perform any digital task. In other words, there is no limit to what you can do with (or delegate to) Roger. Here is a severely non-exhaustive list of examples.
@@ -210,6 +217,7 @@ Roger has the potential to perform any digital task. In other words, there is no
 </details>
 
 ---
+---
 
 ### Progress & contributing
 This software is still in development. Below is a non-exhaustive list of to-do items. Of course, we are an open-source community, so **feel free to open an issue or pull request!**
@@ -234,16 +242,15 @@ This software is still in development. Below is a non-exhaustive list of to-do i
 - [x] LLM-as-judge (self-evaluation inspired by RLSR, SRT, Co-rewarding, meta-evaluation; requires a portion of ground truth).
 - [x] Implement automatic QLoRA REINFORCE++.
 - [x] Use privacy filter for training data.
-- [x] Set up gradient sharing and Bonawitz secure aggregation.
+- [x] Set up gradient contributing and Bonawitz secure aggregation.
 - [ ] Build the aggregation server: federated strategy, anti-poisoning, central ground-truth gradients.
-- [ ] <ins>Huzzah, we now have a shippable.</ins>
+- [ ] <ins>Huzzah, it can now be shipped.</ins>
 
-Further into the future:
+Deferred:
 - [ ] Remote SSH execution.
 - [ ] Sandboxed docker environments.
 - [ ] Native support for agent loops.
 - [ ] Remote control: copy a session code, enter it on our website, continue interacting encrypted through the browser.
 - [ ] Always-on mode: always listen, look, and read, and when a keyboard shortcut is entered, automatically infer and continue the user's task using e.g. Touchpoint.
 - [ ] Dynalang-style world model for embedded state roll-forward.
-- [ ] Implement federated learning-style hives.
 - [ ] Automatic subagent spawning and automatic git worktrees.
