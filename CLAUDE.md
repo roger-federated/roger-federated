@@ -25,9 +25,15 @@
   and no model is ever stored. Config: `contribute`/`federations` (the ΔW L2 clip is a fixed
   best-effort client constant, not user config — authoritative norm-bounding is server-side). Leech
   mode (config'd-in but not contributing) is nudged, not blocked.
-- NOT yet built: the federated aggregation **server** (FedAvg, anti-poisoning, central ground-truth
-  gradients, peer-key distribution), docker sandboxing, account/hive/scheduling setup.
-  The authoritative TODO list is in `readme.md` ("Progress & contributing").
+- Federated aggregation **server** is built (`federated/server/`): wire-compatible with the client,
+  it seals secure-aggregation cohorts (barrier long-poll on `/round/register`, peer-key distribution),
+  sums the masked uploads (masks cancel), aggregate-norm-bounds the result, and folds η·mean(ΔW) into
+  a per-model cumulative dense global it broadcasts at `/global`. All-or-nothing rounds (void on any
+  dropout). FastAPI; `python -m roger.federated.server`; deploy via Docker+Caddy.
+- NOT yet built (see `readme.md` TODO + the federated-server-roadmap memory): Shamir/double-mask
+  dropout recovery (needs a client protocol change; multi-round is intrinsic), central
+  ground-truth-gradient anti-poison gate, membership auth (round-token/signature). Also docker
+  sandboxing, account/hive/scheduling setup.
 
 ## Confirmed design decisions
 - RL algorithm = **REINFORCE++**, not GRPO. Flat episode return broadcast over all generated
@@ -60,10 +66,12 @@
                 `transport` (httpx per-federation, fail-soft, sync state + persisted global blob),
                 `client` (contribute / daily-pull / `pending_globals` / leech gating). The bf16-fold-
                 then-bnb-quantize loading lives in `serving/model_setup.fetch_model(weight_deltas=…)`.
-                Server-side aggregation is still future work.
+                `server/` is the aggregation server (`aggregate` round lifecycle + FedAvg math,
+                `store` global persistence, `app` FastAPI endpoints, `__main__`, Dockerfile/Caddyfile/
+                DEPLOY.md); needs the `[server]` extra (fastapi+uvicorn).
 - `envs/`     — not created yet (concrete shell/browser/code environments are future work)
 - `tests/`    — `test_rewards.py`, `test_trainer.py`, `test_grade.py`, `test_privacy_filter.py`,
-                `test_mcp.py`, `test_multimodal.py`, `test_federated.py`
+                `test_mcp.py`, `test_multimodal.py`, `test_federated.py`, `test_server.py`
 
 Runtime artifacts all live under the global `~/.roger/` (never in the project): `config.json`,
 global `memory/memory.md` + per-project `memory/<dashed-abspath>.md`, `runs/`, `backups/`,

@@ -24,7 +24,7 @@ On top of the basic agentic capabilities listed further [below](#progress--contr
 - **Privacy filter**: Before any gradient is computed, a train-time anonymiser swaps personally identifiable information for consistent surrogates, so personal data can neither be learned nor transmitted.
 - **Federated learning using SMPC**: Based on secure multi-party computing, only encrypted weight updates are contributed to your chosen federations. No peer or server can decipher the update and no raw data is ever shared. The aggregated global update is folded back into your base model at load.
 - **Scales to world models**: The same text-native, RL-safe interface extends from agency to world-models, which the federation can train collaboratively and deploy more cheaply than alternative centralized efforts.
-- **More than just software**: Federations, continuous model updates, and a exchange of community-trained adapters on top of basic MCP-driven agentic software make Roger a unique ecosystem that improves as more people contribute.
+- **More than just software**: Federations, continuous model updating, and an exchange of community-trained adapters on top of basic MCP-driven agentic software make Roger a unique ecosystem that improves as more people contribute.
 
 ---
 ---
@@ -220,7 +220,7 @@ Roger has the potential to perform any digital task. In other words, there is no
 ---
 
 ### Progress & contributing
-This software is still in development. Below is a non-exhaustive list of to-do items. Of course, we are an open-source community, so **feel free to open an issue or pull request!**
+The ecosystem is still in development. Below is a non-exhaustive list of to-do items. Of course, we are an open-source community, so **feel free to open an issue or pull request!**
 
 - [x] Investigate framework and open-source models.
 - [x] Set up automatic model loading.
@@ -243,14 +243,17 @@ This software is still in development. Below is a non-exhaustive list of to-do i
 - [x] Implement automatic QLoRA REINFORCE++.
 - [x] Use privacy filter for training data.
 - [x] Set up gradient contributing and Bonawitz secure aggregation.
-- [ ] Build the aggregation server: federated strategy, anti-poisoning, central ground-truth gradients.
+- [x] Build the aggregation server: FedAvg, peer-key distribution, aggregate norm-bounding.
 - [ ] <ins>Huzzah, it can now be shipped.</ins>
 
 Deferred:
 - [ ] Remote SSH execution.
+- [ ] Shamir dropout recovery.
+- [ ] Zero-knowledge integrity proof (scale, mod, keys).
 - [ ] Sandboxed docker environments.
 - [ ] Native support for agent loops.
 - [ ] Remote control: copy a session code, enter it on our website, continue interacting encrypted through the browser.
 - [ ] Always-on mode: always listen, look, and read, and when a keyboard shortcut is entered, automatically infer and continue the user's task using e.g. Touchpoint.
 - [ ] Dynalang-style world model for embedded state roll-forward.
+- [ ] Centrally coordinated ground-truth gradient injection.
 - [ ] Automatic subagent spawning and automatic git worktrees.
