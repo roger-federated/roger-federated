@@ -244,6 +244,7 @@ The ecosystem is still in development. Below is a non-exhaustive list of to-do i
 - [x] Use privacy filter for training data.
 - [x] Set up gradient contributing and Bonawitz secure aggregation.
 - [x] Build the aggregation server: FedAvg, peer-key distribution, aggregate norm-bounding.
+- [ ] Launch the default server on Stackit.
 - [ ] <ins>Huzzah, it can now be shipped.</ins>
 
 Deferred:
