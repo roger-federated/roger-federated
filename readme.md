@@ -1,5 +1,6 @@
 <div align="center">
-    <h1>Roger Federated</h1>
+
+$\Huge \textcolor{#58a6ff}{R}\textcolor{#6f9bf5}{o}\textcolor{#8a8ef5}{g}\textcolor{#a371f7}{e}\textcolor{#b87ae0}{r}\ \textcolor{#cd7ac0}{F}\textcolor{#e07a9e}{e}\textcolor{#f0883e}{d}\textcolor{#eea14a}{e}\textcolor{#ecb957}{r}\textcolor{#e8cf63}{a}\textcolor{#d9cf6e}{t}\textcolor{#b9c97a}{e}\textcolor{#94c285}{d}$
 
 <strong>Building the world's first <i>true</i> agent together with the community, using $\textcolor{#58a6ff}{\textsf{\textbf{federated}}}$ $\textcolor{#f0883e}{\textsf{\textbf{local}}}$ $\textcolor{#a371f7}{\textsf{\textbf{reinforcement learning}}}$</strong>
 
