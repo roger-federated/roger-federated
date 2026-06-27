@@ -37,12 +37,15 @@ Smoke-test: `curl -i https://roger.example.org/global?model_id=x` should return 
 ## Configuration (env vars on `docker run -e …`)
 | Var | Default | Meaning |
 |---|---|---|
-| `ROGER_AGG_KMIN` | `2` | Min cohort size to seal (a cohort of 1 is unmasked). Also the collusion margin: unmasking one member needs `KMIN−1` colluding peers. |
-| `ROGER_AGG_KTARGET` | `4` | Seal immediately at this many registrants. Also the dropout blast radius (a no-show voids its whole cohort), so keep it modest. |
+| `ROGER_AGG_KMIN` | `3` | Min cohort size to seal (a cohort of 1 is unmasked; at 2 each peer can subtract its own ΔW to recover the other's). Also the collusion margin: unmasking one member needs `KMIN−1` colluding peers. |
+| `ROGER_AGG_KTARGET` | `5` | Seal immediately at this many registrants. Also the dropout blast radius (a no-show voids its whole cohort), so keep it modest. Defaults to the busy-mode threshold below. |
 | `ROGER_AGG_W` | `20` | Registration window, seconds — must stay below the client's 30 s timeout. |
 | `ROGER_AGG_U` | `20` | Seconds to wait for every sealed member to upload before voiding the round. |
 | `ROGER_AGG_ETA` | `1.0` | Server learning rate: `G ← G + η·mean(ΔW)`. Lower to damp noisy rounds. |
-| `ROGER_AGG_CLIP` | `1.0` | Per-client L2 budget; the cohort sum is clipped to `cohort_size · CLIP`. |
+| `ROGER_AGG_ETA_BOOT` | *(=`ETA`)* | Learning rate for a single async bootstrap upload (`G ← G + η_boot·clip(ΔW)`, k=1). Lower it to damp the noisier per-upload bootstrap gradients. |
+| `ROGER_AGG_CLIP` | `1.0` | Per-client L2 budget; the cohort sum is clipped to `cohort_size · CLIP` (and a single bootstrap upload to `CLIP`). |
+| `ROGER_AGG_BUSY_THRESHOLD` | *(=`KTARGET`)* | Distinct recent contributors needed to switch a model from bootstrap (async DP) to busy (secure-agg cohorts). |
+| `ROGER_AGG_BUSY_WINDOW` | `180` | Rolling window, seconds, over which those distinct contributors are counted. Keep it a small multiple of `W`: cohorts only seal within `W`, so counting over hours would flip to busy on traffic too spread out to ever seal. |
 | `ROGER_AGG_IPBIND` | `1` | Reject an upload whose source IP never registered (best-effort only). |
 | `ROGER_AGG_MODELS` | *(any)* | Comma-separated `model_id` allowlist; empty accepts any base model. |
 | `ROGER_AGG_TRUSTED_PROXIES` | `127.0.0.1/32,::1/128,10.0.0.0/8` | Proxies whose `X-Forwarded-For` is trusted for the real client IP — set to your proxy's address. |
@@ -51,9 +54,15 @@ Storage/bind: `ROGER_SERVER_DATA` (default `/data`, persist it), `ROGER_SERVER_H
 (default `0.0.0.0:8000`).
 
 ## Notes & limits
-- A round only aggregates when ≥`KMIN` members train and upload within the same ~`W`-second window;
-  otherwise clients get a 503 and retry next cycle. That's the safe behaviour (a sub-`KMIN` cohort
-  would expose an individual ΔW), not a fault — expect skipped rounds until a federation has traffic.
+- **Cold-start is handled by bootstrap mode.** While a model has fewer than `BUSY_THRESHOLD` recent
+  contributors, `/status` reports `bootstrap` and clients upload a single DP-noised, *unmasked* ΔW to
+  `/contribute_dp`, folded asynchronously — no cohort, no arrival coincidence, no 503. Privacy then
+  rests on the client's (faux-)DP factor noise, not secure aggregation, so bootstrap is a temporary
+  obfuscation regime: expect noisy, modest per-upload gradients until the federation fills up. Once
+  `BUSY_THRESHOLD` distinct contributors appear within `BUSY_WINDOW`, the model flips to busy mode.
+- In **busy** mode a round only aggregates when ≥`KMIN` members register and upload within the same
+  ~`W`-second window; a sub-`KMIN` cohort gets a 503 and retries (safe behaviour — it would otherwise
+  expose an individual ΔW).
 - No dropout recovery yet: one sealed member that never uploads voids only its own cohort.
 - Federations are open and unauthenticated; IP-binding is weak. Secure aggregation hides individual
   ΔW but can't filter a *well-formed* poisoned upload — only the aggregate norm-clip, small cohorts,

@@ -6,9 +6,14 @@ misbehaving returns None / a status string rather than raising, so a sharing hic
 down the agent (same convention as the web_search/web_fetch tools).
 
 Endpoints (all under a federation's base URL, served over HTTPS):
+  GET  {url}/status?model_id= -> {mode: "bootstrap"|"busy", ...}   (which aggregation regime this
+                              federation wants for the model — async DP while sparse, secure-agg cohorts
+                              once busy; probed before contributing so a cold-start client skips the
+                              cohort barrier entirely instead of 503-ing on it)
   POST {url}/round/register   {model_id, pubkey(hex)} -> {peers: [hex, ...]}   (server distributes
                               the round's peer X25519 public keys; keys are collected centrally)
   POST {url}/contribute       octet-stream = the masked, packed contribution -> 200
+  POST {url}/contribute_dp    octet-stream = a single DP-noised, UNMASKED dense ΔW (bootstrap mode) -> 200
   GET  {url}/global?since=&model_id=  -> 200 octet-stream (re-factored global adapter) + X-Cursor
                               header, or 204 when nothing new since `since`.
 """
@@ -57,6 +62,31 @@ def load_global(url: str) -> bytes | None:
             return f.read()
     except FileNotFoundError:
         return None
+
+
+def federation_mode(url: str, model_id: str) -> str:
+    """Ask whether this federation wants async DP-bootstrap uploads ("bootstrap") or secure-agg
+    cohorts ("busy") for `model_id`. Fail-soft to "busy" so an unreachable server, or an older one
+    that predates /status, keeps the existing secure-aggregation behaviour."""
+    try:
+        r = httpx.get(f"{url.rstrip('/')}/status", timeout=_TIMEOUT, params={"model_id": model_id})
+        r.raise_for_status()
+        return r.json().get("mode", "busy")
+    except Exception:
+        return "busy"
+
+
+def contribute_dp(url: str, blob: bytes) -> str:
+    """Upload one DP-noised, unmasked dense ΔW for asynchronous (cohort-free) aggregation — the
+    cold-start path that needs no peer set and no arrival coincidence. Same fail-soft string contract
+    as `contribute`."""
+    try:
+        r = httpx.post(f"{url.rstrip('/')}/contribute_dp", content=blob, timeout=_TIMEOUT,
+                       headers={"Content-Type": "application/octet-stream"})
+        r.raise_for_status()
+        return "ok"
+    except Exception as e:
+        return f"failed: {e}"
 
 
 def register_and_peers(url: str, my_pub: bytes, model_id: str) -> tuple[str, list[bytes]] | None:

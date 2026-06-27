@@ -188,6 +188,53 @@ def test_global_persists_across_restart(tmp_path):
     print("PASS test_global_persists_across_restart")
 
 
+# --- bootstrap (async DP) mode ---------------------------------------------------------------
+
+def test_dp_bootstrap_accumulates(tmp_path):
+    # A single unmasked dense ΔW folds straight into the global (k=1), no cohort. Two async uploads
+    # accumulate as Σ η_boot·clip(ΔW).
+    torch.manual_seed(5)
+    agg = Aggregator(str(tmp_path), eta=1.0, clip_norm=10.0)   # high clip ⇒ no scaling, exact sum
+    d1 = {KEY: torch.randn(6, 4) * 0.05}
+    d2 = {KEY: torch.randn(6, 4) * 0.05}
+    assert agg.submit_dp("m", d1, "1.1.1.1", now=0.0) == "ok"
+    assert agg.submit_dp("m", d2, "2.2.2.2", now=1.0) == "ok"
+    blob, version = agg.serve_global("m", "")
+    tensors, _ = delta.from_bytes(blob)
+    assert version == 2 and torch.allclose(tensors[KEY], d1[KEY] + d2[KEY], atol=1e-2)
+    print("PASS test_dp_bootstrap_accumulates")
+
+
+def test_dp_bootstrap_norm_bound_and_rejects(tmp_path):
+    agg = Aggregator(str(tmp_path), clip_norm=1.0, eta=1.0)
+    big = {KEY: torch.randn(6, 4) * 5.0}                       # ‖ΔW‖ ≫ 1 ⇒ server clips to clip_norm
+    assert agg.submit_dp("m", big, "1.1.1.1", now=0.0) == "ok"
+    tensors, _ = delta.from_bytes(agg.serve_global("m", "")[0])
+    assert float(torch.linalg.vector_norm(tensors[KEY])) <= 1.0 + 1e-3
+    # a key whose shape disagrees with the established global is refused (would corrupt the sum)
+    assert agg.submit_dp("m", {KEY: torch.randn(8, 4)}, "1.1.1.1", now=1.0) == "shape mismatch"
+    assert agg.submit_dp("m", {KEY: torch.full((6, 4), float("nan"))}, "1.1.1.1", now=1.0) == "non-finite delta"
+    print("PASS test_dp_bootstrap_norm_bound_and_rejects")
+
+
+def test_mode_flips_at_density_threshold(tmp_path):
+    agg = Aggregator(str(tmp_path), busy_threshold=3, busy_window=100.0)
+    assert agg.mode("m", now=0.0) == "bootstrap"               # nothing seen yet
+    for i, ip in enumerate(["a", "b"]):
+        agg.submit_dp("m", {KEY: torch.randn(6, 4) * 0.01}, ip, now=float(i))
+    assert agg.mode("m", now=2.0) == "bootstrap"               # only 2 distinct contributors < 3
+    agg.submit_dp("m", {KEY: torch.randn(6, 4) * 0.01}, "c", now=3.0)
+    assert agg.mode("m", now=3.0) == "busy"                    # 3rd distinct contributor ⇒ busy
+    assert agg.mode("m", now=3.0 + 200.0) == "bootstrap"       # all aged out of the window ⇒ sparse again
+    print("PASS test_mode_flips_at_density_threshold")
+
+
+def test_default_quorum_is_three(tmp_path):
+    agg = Aggregator(str(tmp_path))
+    assert agg.k_min == 3 and agg.k_target == 5
+    print("PASS test_default_quorum_is_three")
+
+
 # --- HTTP wire layer + seal barrier ----------------------------------------------------------
 
 def test_http_end_to_end(tmp_path, monkeypatch):
@@ -228,6 +275,26 @@ def test_http_end_to_end(tmp_path, monkeypatch):
     print("PASS test_http_end_to_end")
 
 
+def test_http_bootstrap_path(tmp_path):
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+    from roger.federated.server.app import create_app
+
+    torch.manual_seed(6)
+    agg = Aggregator(str(tmp_path), busy_threshold=3, ip_binding=False, clip_norm=10.0)
+    with TestClient(create_app(agg)) as client:
+        # A fresh model is sparse ⇒ /status says bootstrap; the client uploads an unmasked dense ΔW.
+        assert client.get("/status", params={"model_id": "m"}).json()["mode"] == "bootstrap"
+        dW = {KEY: torch.randn(6, 4) * 0.05}
+        blob = delta.to_bytes(dW, "m")
+        r = client.post("/contribute_dp", content=blob, headers={"Content-Type": "application/octet-stream"})
+        assert r.status_code == 200
+        g = client.get("/global", params={"model_id": "m", "since": ""})
+        assert g.status_code == 200
+        assert torch.allclose(delta.from_bytes(g.content)[0][KEY], dW[KEY], atol=1e-2)
+    print("PASS test_http_bootstrap_path")
+
+
 if __name__ == "__main__":
     import tempfile, pathlib
     d = pathlib.Path(tempfile.mkdtemp())
@@ -235,3 +302,5 @@ if __name__ == "__main__":
     test_dropout_voids_round(d / "c"); test_subquorum_register_fails(d / "d")
     test_norm_bound_clips_aggregate(d / "e"); test_rejects_bad_uploads(d / "f")
     test_serve_global_cursor(d / "g"); test_global_persists_across_restart(d / "h")
+    test_dp_bootstrap_accumulates(d / "i"); test_dp_bootstrap_norm_bound_and_rejects(d / "j")
+    test_mode_flips_at_density_threshold(d / "k"); test_default_quorum_is_three(d / "l")

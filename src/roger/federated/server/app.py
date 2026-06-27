@@ -1,10 +1,13 @@
 """app.py — FastAPI wire layer for the aggregation server.
 
-Implements the three endpoints the client's transport.py already speaks (no client change):
+Implements the endpoints the client's transport.py speaks:
+  GET  /status?model_id=  -> {mode, k_min, k_target}   (which regime to use; see aggregate.mode())
   POST /round/register   {model_id, pubkey(hex)} -> {peers:[hex,...]}   (long-polls until the cohort
                          seals; 503 if the cohort stays below k_min so the client skips — returning an
                          empty peer set would make the client upload UNMASKED, leaking its ΔW).
   POST /contribute       octet-stream safetensors ({"masked": int64} + meta model_id/compat/spec) -> 200
+  POST /contribute_dp    octet-stream safetensors (dense ΔW + meta model_id) -> 200   (bootstrap mode:
+                         a single DP-noised UNMASKED ΔW, folded async into the global — no cohort)
   GET  /global?since=&model_id=  -> 204, or 200 octet-stream dense ΔW + X-Cursor header.
 
 Async is essential: /round/register holds the connection open on an asyncio.Condition until its round
@@ -31,12 +34,15 @@ def create_app(aggregator: Aggregator | None = None) -> FastAPI:
     image deploys anywhere: ROGER_AGG_* knobs + ROGER_SERVER_DATA."""
     agg = aggregator or Aggregator(
         datadir=os.environ.get("ROGER_SERVER_DATA", "./server-data"),
-        k_min=int(os.environ.get("ROGER_AGG_KMIN", "2")),
-        k_target=int(os.environ.get("ROGER_AGG_KTARGET", "4")),
+        k_min=int(os.environ.get("ROGER_AGG_KMIN", "3")),
+        k_target=int(os.environ.get("ROGER_AGG_KTARGET", "5")),
         eta=float(os.environ.get("ROGER_AGG_ETA", "1.0")),
+        eta_boot=float(os.environ["ROGER_AGG_ETA_BOOT"]) if os.environ.get("ROGER_AGG_ETA_BOOT") else None,
         clip_norm=float(os.environ.get("ROGER_AGG_CLIP", "1.0")),
         ip_binding=os.environ.get("ROGER_AGG_IPBIND", "1") != "0",
         allowlist=_env_set("ROGER_AGG_MODELS"),
+        busy_threshold=int(os.environ["ROGER_AGG_BUSY_THRESHOLD"]) if os.environ.get("ROGER_AGG_BUSY_THRESHOLD") else None,
+        busy_window=float(os.environ.get("ROGER_AGG_BUSY_WINDOW", "180")),
     )
     register_window = float(os.environ.get("ROGER_AGG_W", "20"))   # < client 30s register timeout
     collect_window = float(os.environ.get("ROGER_AGG_U", "20"))    # how long to wait for all uploads
@@ -60,6 +66,31 @@ def create_app(aggregator: Aggregator | None = None) -> FastAPI:
         async with cond:
             agg.finalize(rnd)
             cond.notify_all()
+
+    @app.get("/status")
+    async def status(model_id: str = ""):
+        # Which regime the client should use for this model. Under the single event-loop thread the
+        # read is atomic; take the lock anyway since mode() prunes the rolling window in place.
+        async with cond:
+            return {"mode": agg.mode(model_id, time.monotonic()),
+                    "k_min": agg.k_min, "k_target": agg.k_target}
+
+    @app.post("/contribute_dp")
+    async def contribute_dp(req: Request):
+        blob = await req.body()
+        try:
+            deltas, meta = delta.from_bytes(blob)
+        except Exception:
+            raise HTTPException(400, "malformed contribution blob")
+        model_id = meta.get("model_id", "")
+        if not model_id:
+            raise HTTPException(400, "model_id required")
+        async with cond:
+            res = agg.submit_dp(model_id, deltas, client_ip(req), time.monotonic())
+            cond.notify_all()                  # a fresh global may now be servable
+        if res != "ok":
+            raise HTTPException(400, res)
+        return {"status": "ok"}
 
     @app.post("/round/register")
     async def register(req: Request):

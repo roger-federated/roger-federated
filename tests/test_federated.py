@@ -27,6 +27,20 @@ def test_densify_matches_factors():
     print("PASS test_densify_matches_factors")
 
 
+def test_densify_factor_noise():
+    # noise_z>0 (DP bootstrap) perturbs the dense ΔW but keeps shape/finiteness; default off is
+    # bit-identical to the noiseless path.
+    d = _fake_delta(out=6, in_=4)
+    clean = delta_mod.densify(d)
+    assert torch.equal(delta_mod.densify(d)["m"], clean["m"])       # default off ⇒ unchanged
+    g = torch.Generator().manual_seed(7)
+    noisy = delta_mod.densify(d, noise_z=0.5, generator=g)
+    assert noisy["m"].shape == clean["m"].shape
+    assert torch.isfinite(noisy["m"]).all()
+    assert not torch.allclose(noisy["m"], clean["m"])               # actually perturbed
+    print("PASS test_densify_factor_noise")
+
+
 def test_compat_hash_factors_eq_dense_and_detects_shape():
     d = _fake_delta(out=6, in_=4)
     factors_hash = delta_mod.compat_hash(d["weights"])
@@ -122,6 +136,7 @@ def test_is_leeching_and_should_train():
 
 def test_contribute_delta_uploads(monkeypatch):
     sent = []
+    monkeypatch.setattr(transport, "federation_mode", lambda url, mid: "busy")  # force the secure-agg path
     monkeypatch.setattr(transport, "register_and_peers", lambda url, pub, mid: ("rid", [pub]))
     monkeypatch.setattr(transport, "contribute", lambda url, blob: sent.append((url, blob)) or "ok")
     # An accepted upload reports True so the caller may consume the runs.
@@ -140,6 +155,24 @@ def test_contribute_delta_uploads(monkeypatch):
     monkeypatch.setattr(transport, "contribute", lambda url, blob: "failed: boom")
     assert fed_client.contribute_delta(_fake_delta(), {"federations": ["http://x"], "contribute": True}) is False
     print("PASS test_contribute_delta_uploads")
+
+
+def test_contribute_delta_bootstrap(monkeypatch):
+    # In bootstrap mode the client skips registration entirely and uploads a single UNMASKED dense ΔW
+    # via contribute_dp — the cold-start path. The blob must decode to a finite dense ΔW.
+    dp_sent, registered = [], []
+    monkeypatch.setattr(transport, "federation_mode", lambda url, mid: "bootstrap")
+    monkeypatch.setattr(transport, "register_and_peers", lambda url, pub, mid: registered.append(url))
+    monkeypatch.setattr(transport, "contribute_dp", lambda url, blob: dp_sent.append((url, blob)) or "ok")
+    assert fed_client.contribute_delta(_fake_delta(), {"federations": ["http://x"], "contribute": True}) is True
+    assert registered == []                                         # no cohort barrier touched
+    assert len(dp_sent) == 1 and dp_sent[0][0] == "http://x"
+    tensors, meta = delta_mod.from_bytes(dp_sent[0][1])
+    assert meta["model_id"] == "tiny" and torch.isfinite(tensors["m"]).all()
+    # A failed DP upload ⇒ False (runs preserved).
+    monkeypatch.setattr(transport, "contribute_dp", lambda url, blob: "failed: boom")
+    assert fed_client.contribute_delta(_fake_delta(), {"federations": ["http://x"], "contribute": True}) is False
+    print("PASS test_contribute_delta_bootstrap")
 
 
 def test_maybe_daily_pull_persists_blob(tmp_path, monkeypatch):
@@ -197,6 +230,7 @@ def test_attach_single_adapter_and_extract():
 
 if __name__ == "__main__":
     test_densify_matches_factors()
+    test_densify_factor_noise()
     test_compat_hash_factors_eq_dense_and_detects_shape()
     test_bytes_roundtrip()
     test_quantize_dequantize_roundtrip()

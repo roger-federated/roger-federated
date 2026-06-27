@@ -13,12 +13,24 @@ is just "same base model" = identical per-module (out, in) weight shapes, captur
 """
 import hashlib, json, struct
 
+import torch
 from safetensors.torch import load as st_load, save as st_save
 
 
-def densify(delta: dict) -> dict:
-    """{module: dense ΔW} from a round's PEFT factors. `delta` = {"weights": peft_state_dict,
-    "scaling": alpha/r, ...}; for each module ΔW = scaling·(B @ A), shapes [out,r]@[r,in]→[out,in]."""
+def _dp_noise(A, B, z: float, generator):
+    """Perturb both LoRA factors before B@A (the bootstrap DP step). ΔW is rank-r, so noising the
+    factors keeps the noise in that signal subspace instead of over all out·in dense coords — far less
+    SNR loss. Both factors, else it's projectable out of one. Per-factor σ = z·rms(factor), so z is a
+    relative multiplier rather than an absolute tied to a model's weight scale."""
+    def n(t):
+        sigma = z * t.pow(2).mean().sqrt()      # rms of this (pre-clip) factor
+        return t + torch.randn(t.shape, generator=generator) * sigma
+    return n(A), n(B)
+
+
+def densify(delta: dict, *, noise_z: float = 0.0, generator=None) -> dict:
+    """{module: dense ΔW = scaling·(B@A)} from a round's PEFT factors (`delta["weights"]` = peft state
+    dict, `["scaling"]` = alpha/r). noise_z>0 adds DP-bootstrap factor noise (see `_dp_noise`)."""
     sd, scaling = delta["weights"], float(delta["scaling"])
     out = {}
     for key, A in sd.items():
@@ -26,7 +38,10 @@ def densify(delta: dict) -> dict:
             continue
         mod = key[: -len(".lora_A.weight")]
         B   = sd[mod + ".lora_B.weight"]
-        out[mod] = (scaling * (B.float() @ A.float())).to(B.dtype)
+        Af, Bf = A.float(), B.float()
+        if noise_z:
+            Af, Bf = _dp_noise(Af, Bf, noise_z, generator)
+        out[mod] = (scaling * (Bf @ Af)).to(B.dtype)
     return out
 
 

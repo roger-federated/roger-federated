@@ -18,6 +18,13 @@ the same model collect concurrently (uploads self-route by the round_id the clie
                if every sealed member uploads (no Shamir recovery currently), so a short
                member count => VOID the round (global untouched). This is the all-or-nothing model.
 
+Bootstrap mode. The cohort dance needs k_min registrants in one register window — a coincidence sparse
+traffic rarely produces, so rounds 503 and the global stalls. While a model is sparse (`mode()`), the
+server serves "bootstrap": clients skip registration and POST one DP-noised, unmasked dense ΔW to
+/contribute_dp, folded straight in (`submit_dp` -> `_fold`, k=1). No simultaneity, no masks; privacy
+rests on the client's factor noise, not secure-agg. Once enough contributors are active `mode()` flips
+to "busy" and the cohort lifecycle above takes over (DP dropped; larger-k aggregation carries privacy).
+
 What the server can and cannot defend against is documented in client.py / the federated-server-roadmap
 memory: secure aggregation hides individual ΔW, so we can only bound the *aggregate* (norm-clip +
 small cohorts + small η), never filter a single poisoned-but-well-formed upload. That needs ZK range
@@ -69,20 +76,45 @@ def _parse_spec(spec_json: str) -> tuple[list, int]:
 
 
 class Aggregator:
-    def __init__(self, datadir: str, *, k_min: int = 2, k_target: int = 4, eta: float = 1.0,
-                 clip_norm: float = 1.0, ip_binding: bool = True, allowlist: set | None = None):
+    def __init__(self, datadir: str, *, k_min: int = 3, k_target: int = 5, eta: float = 1.0,
+                 eta_boot: float | None = None, clip_norm: float = 1.0, ip_binding: bool = True,
+                 allowlist: set | None = None, busy_threshold: int | None = None,
+                 busy_window: float = 180.0):
         self.datadir = datadir
         self.k_min = k_min
         self.k_target = k_target
         self.eta = eta                          # server learning rate: G <- G + η·mean(ΔW)
+        self.eta_boot = eta if eta_boot is None else eta_boot  # rate for a single async DP upload
         # The aggregate L2 cap is always applied: an honest cohort sums to ≤ k·clip_norm (matches the
         # client's CLIP_NORM=1.0), so we clip ‖ΣΔW‖ to that. Must be > 0.
         self.clip_norm = clip_norm
         self.ip_binding = ip_binding
         self.allowlist = allowlist              # None = accept any model_id
+        # bootstrap->busy gate: busy once busy_threshold distinct contributors fall inside busy_window.
+        # The window must be a small multiple of the register window W (not hours): cohorts seal only
+        # within W, so declaring busy off a day's spread-out traffic just sends everyone back to 503.
+        self.busy_threshold = k_target if busy_threshold is None else busy_threshold
+        self.busy_window = busy_window
+        self.recent: dict[str, dict[str, float]] = {}  # model_id -> {ip: last-seen monotonic time}
         self.registering: dict[str, Round] = {} # model_id -> the round currently open for registration
         self.collecting: dict[str, Round] = {}  # round_id -> a sealed round awaiting contributions (many at once)
         self.globals: dict[str, tuple] = store.load_all(datadir)  # model_id -> (tensors, version)
+
+    # --- mode / density ---------------------------------------------------------------------
+
+    def mode(self, model_id: str, now: float) -> str:
+        """"busy" (secure-agg cohorts) once >= busy_threshold distinct contributors fall inside the
+        busy_window, else "bootstrap" (async DP). Prunes the window in passing; a coarse rate proxy."""
+        seen = self.recent.get(model_id)
+        if not seen:
+            return "bootstrap"
+        cutoff = now - self.busy_window
+        live = {ip: t for ip, t in seen.items() if t >= cutoff}
+        self.recent[model_id] = live
+        return "busy" if len(live) >= self.busy_threshold else "bootstrap"
+
+    def _note_contributor(self, model_id: str, ip: str, now: float) -> None:
+        self.recent.setdefault(model_id, {})[ip] = now
 
     # --- registration / sealing -------------------------------------------------------------
 
@@ -91,6 +123,7 @@ class Aggregator:
         (the previous one has sealed and moved to `collecting`). Never rejects: a client arriving while
         a cohort is busy collecting simply starts/joins the NEXT cohort. The W deadline is fired by the
         long-polling waiters in app.py via try_seal(final=True), so no lazy expiry is needed here."""
+        self._note_contributor(model_id, ip, now)  # busy-mode participation keeps the density fresh
         rnd = self.registering.get(model_id)
         if rnd is None:                          # none open (sealed/failed rounds were removed on seal)
             rnd = Round(model_id, created=now)
@@ -148,6 +181,24 @@ class Aggregator:
         rnd.received += 1
         return "ok"
 
+    def submit_dp(self, model_id: str, deltas: dict, ip: str, now: float) -> str:
+        """Bootstrap path: fold ONE unmasked dense ΔW into the global (k=1), re-enforcing the norm
+        bound the client only clips best-effort. Counts the uploader toward the busy threshold."""
+        if self.allowlist is not None and model_id not in self.allowlist:
+            return "model_id not accepted"
+        if not deltas:
+            return "empty delta"
+        g_tensors = self.globals.get(model_id, ({}, 0))[0]
+        for key, t in deltas.items():
+            if t.dim() != 2:
+                return "bad delta"              # dense ΔW is [out, in]
+            if key in g_tensors and tuple(g_tensors[key].shape) != tuple(t.shape):
+                return "shape mismatch"         # would corrupt the global's coordinate-wise sum
+        self._note_contributor(model_id, ip, now)
+        if not self._fold(model_id, deltas, k=1, eta=self.eta_boot):
+            return "non-finite delta"
+        return "ok"
+
     # --- finalization (masks cancel -> dequantize -> FedAvg into the global) -----------------
 
     def finalize(self, rnd: Round) -> None:
@@ -165,19 +216,25 @@ class Aggregator:
         if rnd.received != k or rnd.running_sum is None or rnd.spec is None:
             return                              # dropout -> void (no Shamir recovery currently)
         delta_sum = secure_agg.dequantize(rnd.running_sum % secure_agg.R, rnd.spec)  # = ΣΔW_i
+        self._fold(rnd.model_id, delta_sum, k=k, eta=self.eta)
+
+    def _fold(self, model_id: str, delta_sum: dict, *, k: int, eta: float) -> bool:
+        """Norm-bound ΣΔW (over k contributions) and fold η·mean into the cumulative global, bumping
+        its version. Shared by the cohort path (k=cohort) and bootstrap (k=1). False (no-op) on NaN/Inf."""
         if any(not torch.isfinite(t).all() for t in delta_sum.values()):
-            return                              # reject NaN/Inf outright
-        # Aggregate norm-bound: an honest cohort sums to ≤ k·clip_norm; clip the whole sum to that.
+            return False                        # reject NaN/Inf outright
+        # Aggregate norm-bound: an honest set of k sums to ≤ k·clip_norm; clip the whole sum to that.
         total = float(torch.sqrt(sum((t.float() ** 2).sum() for t in delta_sum.values())))
         scale = (self.clip_norm * k) / (total + 1e-12) if total > self.clip_norm * k else 1.0
-        tensors, version = self.globals.get(rnd.model_id, ({}, 0))
+        tensors, version = self.globals.get(model_id, ({}, 0))
         tensors = dict(tensors)                 # copy so a partial failure can't corrupt the served global
         for key, t in delta_sum.items():        # G ← G + η · mean(ΔW) = G + η·scale·ΣΔW/k
-            upd = (self.eta * scale / k) * t.float()
+            upd = (eta * scale / k) * t.float()
             tensors[key] = upd if key not in tensors else tensors[key] + upd
         version += 1
-        self.globals[rnd.model_id] = (tensors, version)
-        store.save_global(self.datadir, rnd.model_id, tensors, version)
+        self.globals[model_id] = (tensors, version)
+        store.save_global(self.datadir, model_id, tensors, version)
+        return True
 
     # --- broadcast --------------------------------------------------------------------------
 

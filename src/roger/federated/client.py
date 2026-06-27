@@ -4,7 +4,8 @@ Entry points the CLI calls:
   maybe_daily_pull(cfg)         — first startup of a new UTC day: download + persist the global blob.
   pending_globals(cfg)          — at model load: the dense ΔW to fold into the base (summed across
                                   federations), or None.
-  contribute_delta(delta, cfg)  — after a training round: densify → clip → secure-mask → upload.
+  contribute_delta(delta, cfg)  — after a training round: secure-agg masked upload (busy) or, while
+                                  sparse, an async DP-noised unmasked upload (bootstrap); server picks.
 
 Plus is_leeching(cfg) for the startup reprimand. All of this is a no-op when no federation is
 configured, so the rest of the app is unaffected when sharing is off.
@@ -25,6 +26,10 @@ from roger.federated import delta as delta_mod, secure_agg, transport
 # (RoFL / EIFFeL / ELSA) since the server never sees an individual unmasked ΔW. See
 # federated_server_requirements.
 CLIP_NORM = 1.0
+
+# Bootstrap factor-noise multiplier (delta._dp_noise: σ = z·rms(factor)). Obfuscation, not a budgeted
+# (ε,δ) guarantee — a starting knob to tune against utility.
+DP_Z = 0.5
 
 
 def is_leeching(cfg: dict) -> bool:
@@ -60,27 +65,37 @@ def _pack(masked: torch.Tensor, spec: list, compat: str, model_id: str, round_id
 
 
 def contribute_delta(delta: dict, cfg: dict) -> bool:
-    """Densify the round's ΔW, clip it, and upload a secure-aggregation-masked copy to each
-    federation. No-op for a leech, an empty federation list, or an empty delta. Returns whether
-    *any* federation accepted the upload — the caller deletes the consumed runs only when it did,
-    so a fully-failed round (every cohort sub-quorum/unreachable) keeps the data for a later retry."""
+    """Upload the round's ΔW to each federation in the regime the server reports: the secure-agg cohort
+    path (busy), or the cohort-free async DP path (bootstrap) while the federation is too sparse to seal.
+    No-op for a leech / empty feds / empty delta. Returns whether *any* upload was accepted; the caller
+    keeps the runs for retry otherwise."""
     feds = cfg.get("federations") or []
     if not cfg.get("contribute", True) or not feds or not delta:
         return False
-    dense   = _clip(delta_mod.densify(delta), CLIP_NORM)
-    compat  = delta_mod.compat_hash(dense)
-    q, spec = secure_agg.quantize(dense)
-    priv, pub = secure_agg.gen_keypair()
+    model_id = delta["model_id"]
+    secure = None                               # (compat, q, spec) for the busy path; built once on demand
     accepted = False
     for url in feds:
-        res = transport.register_and_peers(url, pub, delta["model_id"])
+        if transport.federation_mode(url, model_id) == "bootstrap":
+            # Cohort-free: noise the factors, clip, upload unmasked. Re-noised per federation.
+            noisy = _clip(delta_mod.densify(delta, noise_z=DP_Z), CLIP_NORM)
+            if transport.contribute_dp(url, delta_mod.to_bytes(noisy, model_id)) == "ok":
+                accepted = True
+            continue
+        # Busy: mask against the sealed cohort. The dense ΔW is identical across feds, so quantize once.
+        if secure is None:
+            dense = _clip(delta_mod.densify(delta), CLIP_NORM)
+            q, spec = secure_agg.quantize(dense)
+            secure = (delta_mod.compat_hash(dense), q, spec)
+        compat, q, spec = secure
+        priv, pub = secure_agg.gen_keypair()
+        res = transport.register_and_peers(url, pub, model_id)
         if res is None:                         # unreachable/sub-quorum: don't upload an unmaskable payload
             continue
         round_id, peers = res
         masked = secure_agg.mask(q, priv, peers)
-        # "ok" = the upload was received into a collecting cohort (not that the round finalized — the
-        # client gets no finalization signal in this fire-and-forget protocol; best available proof).
-        if transport.contribute(url, _pack(masked, spec, compat, delta["model_id"], round_id)) == "ok":
+        # "ok" = received into a collecting cohort, not that the round finalized (no finalization signal).
+        if transport.contribute(url, _pack(masked, spec, compat, model_id, round_id)) == "ok":
             accepted = True
     return accepted
 

@@ -30,6 +30,18 @@
   sums the masked uploads (masks cancel), aggregate-norm-bounds the result, and folds η·mean(ΔW) into
   a per-model cumulative dense global it broadcasts at `/global`. All-or-nothing rounds (void on any
   dropout). FastAPI; `python -m roger.federated.server`; deploy via Docker+Caddy.
+- **Cold-start fix — DP-noised async bootstrap.** A sparse federation can't seal cohorts (needs k_min
+  registrants in one ~20s window), so per model the server advertises a mode at `GET /status`: while
+  sparse it serves `bootstrap` and clients skip the cohort entirely, uploading ONE **faux-DP-noised,
+  unmasked** dense ΔW to `POST /contribute_dp` that the server folds async (k=1, `submit_dp`→`_fold`).
+  Noise is injected in **LoRA-factor space before densifying** (`delta._dp_noise`, per-factor
+  σ=z·rms; client `DP_Z`) — the rank-r signal subspace, far less SNR loss than noising the dense matrix.
+  It's *faux*-DP: fixed σ, no accountant, and B@A is bilinear so not a formal Gaussian mechanism —
+  obfuscation against an honest-but-curious server, sound only because it's temporary. Once
+  `busy_threshold` distinct contributors appear within `busy_window`, the model flips to **busy** mode
+  (secure-agg only, no DP); quorum raised to **k_min=3 / k_target=5**. Client picks the path per
+  federation in `contribute_delta`; no new client config. (Mode is "bootstrap"/"busy" — "busy" rather
+  than "dense" to avoid clashing with the dense-matrix sense of ΔW.)
 - NOT yet built (see `readme.md` TODO + the federated-server-roadmap memory): Shamir/double-mask
   dropout recovery (needs a client protocol change; multi-round is intrinsic), central
   ground-truth-gradient anti-poison gate, membership auth (round-token/signature). Also docker
@@ -61,14 +73,15 @@
                 (`reward_utils`, `recording`, `lora_utils`, `trainer`, `privacy_filter`)
 - `skills/`   — bundled default skills shipped as package-data (`ipynb`, `skill-creator`,
                 `git-workflow`, `code`); read in place as the lowest-priority `discover_skills` base
-- `federated/`— gradient-sharing client: `delta` (densify ΔW + (de)serialize + `fold_into` the base
-                weights in bf16), `secure_agg` (X25519/EC-DH + SHAKE pairwise masks, quantize mod R),
-                `transport` (httpx per-federation, fail-soft, sync state + persisted global blob),
-                `client` (contribute / daily-pull / `pending_globals` / leech gating). The bf16-fold-
-                then-bnb-quantize loading lives in `serving/model_setup.fetch_model(weight_deltas=…)`.
-                `server/` is the aggregation server (`aggregate` round lifecycle + FedAvg math,
-                `store` global persistence, `app` FastAPI endpoints, `__main__`, Dockerfile/Caddyfile/
-                DEPLOY.md); needs the `[server]` extra (fastapi+uvicorn).
+- `federated/`— gradient-sharing client: `delta` (densify ΔW [+ optional factor-space DP noise] +
+                (de)serialize + `fold_into` the base weights in bf16), `secure_agg` (X25519/EC-DH +
+                SHAKE pairwise masks, quantize mod R), `transport` (httpx per-federation, fail-soft,
+                `federation_mode`/`contribute_dp` + sync state + persisted global blob), `client`
+                (mode-branched contribute / daily-pull / `pending_globals` / leech gating). The
+                bf16-fold-then-bnb-quantize loading lives in `serving/model_setup.fetch_model(weight_deltas=…)`.
+                `server/` is the aggregation server (`aggregate` round lifecycle + FedAvg math +
+                bootstrap `submit_dp`/density `mode`, `store` global persistence, `app` FastAPI
+                endpoints, `__main__`, Dockerfile/Caddyfile/DEPLOY.md); needs the `[server]` extra.
 - `envs/`     — not created yet (concrete shell/browser/code environments are future work)
 - `tests/`    — `test_rewards.py`, `test_trainer.py`, `test_grade.py`, `test_privacy_filter.py`,
                 `test_mcp.py`, `test_multimodal.py`, `test_federated.py`, `test_server.py`
