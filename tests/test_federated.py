@@ -124,12 +124,21 @@ def test_contribute_delta_uploads(monkeypatch):
     sent = []
     monkeypatch.setattr(transport, "register_and_peers", lambda url, pub, mid: ("rid", [pub]))
     monkeypatch.setattr(transport, "contribute", lambda url, blob: sent.append((url, blob)) or "ok")
-    fed_client.contribute_delta(_fake_delta(), {"federations": ["http://x"], "contribute": True})
+    # An accepted upload reports True so the caller may consume the runs.
+    assert fed_client.contribute_delta(_fake_delta(), {"federations": ["http://x"], "contribute": True}) is True
     assert len(sent) == 1 and sent[0][0] == "http://x"
-    # leech / no-federation are no-ops
-    fed_client.contribute_delta(_fake_delta(), {"federations": ["http://x"], "contribute": False})
-    fed_client.contribute_delta(_fake_delta(), {"federations": [], "contribute": True})
+    # leech / no-federation are no-ops, and report False (nothing shared ⇒ keep the runs)
+    assert fed_client.contribute_delta(_fake_delta(), {"federations": ["http://x"], "contribute": False}) is False
+    assert fed_client.contribute_delta(_fake_delta(), {"federations": [], "contribute": True}) is False
     assert len(sent) == 1
+    # A sub-quorum/unreachable cohort (register returns None) ⇒ no upload, False ⇒ runs preserved.
+    monkeypatch.setattr(transport, "register_and_peers", lambda url, pub, mid: None)
+    assert fed_client.contribute_delta(_fake_delta(), {"federations": ["http://x"], "contribute": True}) is False
+    assert len(sent) == 1
+    # Reachable cohort but the upload itself fails ⇒ False (not accepted).
+    monkeypatch.setattr(transport, "register_and_peers", lambda url, pub, mid: ("rid", [pub]))
+    monkeypatch.setattr(transport, "contribute", lambda url, blob: "failed: boom")
+    assert fed_client.contribute_delta(_fake_delta(), {"federations": ["http://x"], "contribute": True}) is False
     print("PASS test_contribute_delta_uploads")
 
 

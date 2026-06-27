@@ -184,10 +184,14 @@ def train(model_id: str | None = None, *, batch: int = 8, epochs: int = 1, lr: f
     delta   = {"weights":  lora_utils.local_state_dict(model),
                "scaling":  pc.lora_alpha / pc.r,
                "model_id": model_id}
-    # Consumed runs have no further training value (on-policy, consume-once); delete them outright.
-    for ep in eps:
-        shutil.rmtree(ep["dir"], ignore_errors=True)
-
+    # Caller discards consumed dirs (via discard_runs) once the contribution is accepted
     return {"trained": True, "n_episodes": len(eps), "n_tokens": total_tokens,
             "n_pii_dropped": gen_tokens - total_tokens, "delta": delta,
+            "consumed_dirs": [ep["dir"] for ep in eps],
             "mean_return": float(returns.mean()), "loss": last_loss, "skipped_mm": skipped_mm}
+
+
+def discard_runs(dirs: list[str]) -> None:
+    """Delete consumed run dirs once their ΔW has been contributed (on-policy, consume-once)."""
+    for d in dirs:
+        shutil.rmtree(d, ignore_errors=True)

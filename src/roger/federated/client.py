@@ -59,23 +59,30 @@ def _pack(masked: torch.Tensor, spec: list, compat: str, model_id: str, round_id
                              "spec": json.dumps(spec_json), "round_id": round_id})
 
 
-def contribute_delta(delta: dict, cfg: dict) -> None:
+def contribute_delta(delta: dict, cfg: dict) -> bool:
     """Densify the round's ΔW, clip it, and upload a secure-aggregation-masked copy to each
-    federation. No-op for a leech, an empty federation list, or an empty delta."""
+    federation. No-op for a leech, an empty federation list, or an empty delta. Returns whether
+    *any* federation accepted the upload — the caller deletes the consumed runs only when it did,
+    so a fully-failed round (every cohort sub-quorum/unreachable) keeps the data for a later retry."""
     feds = cfg.get("federations") or []
     if not cfg.get("contribute", True) or not feds or not delta:
-        return
+        return False
     dense   = _clip(delta_mod.densify(delta), CLIP_NORM)
     compat  = delta_mod.compat_hash(dense)
     q, spec = secure_agg.quantize(dense)
     priv, pub = secure_agg.gen_keypair()
+    accepted = False
     for url in feds:
         res = transport.register_and_peers(url, pub, delta["model_id"])
         if res is None:                         # unreachable/sub-quorum: don't upload an unmaskable payload
             continue
         round_id, peers = res
         masked = secure_agg.mask(q, priv, peers)
-        transport.contribute(url, _pack(masked, spec, compat, delta["model_id"], round_id))
+        # "ok" = the upload was received into a collecting cohort (not that the round finalized — the
+        # client gets no finalization signal in this fire-and-forget protocol; best available proof).
+        if transport.contribute(url, _pack(masked, spec, compat, delta["model_id"], round_id)) == "ok":
+            accepted = True
+    return accepted
 
 
 def maybe_daily_pull(cfg: dict) -> bool:

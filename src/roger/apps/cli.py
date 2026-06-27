@@ -216,7 +216,9 @@ async def _repl(cfg: dict, root: str) -> None:
         console.print(f"[dim]Training: {stats}[/dim]")
         if stats.get("delta"):
             with console.status("[bold]Contributing your gradient…[/bold]", spinner="dots"):
-                fed_client.contribute_delta(stats["delta"], cfg)
+                accepted = fed_client.contribute_delta(stats["delta"], cfg)
+            if accepted:                        # consume the runs only once the ΔW is actually shared
+                trainer.discard_runs(stats.get("consumed_dirs", []))
 
     console.print("\n[dim]Goodbye.[/dim]")
 
@@ -287,7 +289,9 @@ def main() -> None:
         console.print(f"Training: {stats}")
         if stats.get("delta"):
             with console.status("[bold]Contributing your gradient to the federation…[/bold]", spinner="dots"):
-                fed_client.contribute_delta(stats["delta"], cfg)
+                accepted = fed_client.contribute_delta(stats["delta"], cfg)
+            if accepted:                        # consume the runs only once the ΔW is actually shared
+                trainer.discard_runs(stats.get("consumed_dirs", []))
         return
 
     # Wipe any leftover terminal content before the session (after output config so it isn't garbled)

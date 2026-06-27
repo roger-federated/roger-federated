@@ -8,7 +8,7 @@ built from a config so the test needs no model download and runs on CPU.
 import torch
 from transformers import LlamaConfig, LlamaForCausalLM
 
-from roger.training.trainer import _apply_masks, _new_logps
+from roger.training.trainer import _apply_masks, _new_logps, discard_runs
 from roger.agency.rollout_utils import _old_logps
 
 
@@ -90,7 +90,22 @@ def test_new_logps_alignment():
     print("PASS test_new_logps_alignment")
 
 
+def test_discard_runs(tmp_path):
+    # The deletion was moved out of train() to here so a failed federated upload keeps the runs;
+    # discard_runs only removes what it's handed, and tolerates already-gone dirs (ignore_errors).
+    a, b = tmp_path / "runA", tmp_path / "runB"
+    for d in (a, b):
+        d.mkdir()
+        (d / "trajectory.pt").write_bytes(b"x")
+    discard_runs([str(a)])
+    assert not a.exists() and b.exists()      # only the named dir goes
+    discard_runs([str(a), str(b)])            # re-deleting a (gone) dir must not raise
+    assert not b.exists()
+    print("PASS test_discard_runs")
+
+
 if __name__ == "__main__":
     test_apply_masks()
     test_old_logps_matches_manual()
     test_new_logps_alignment()
+    test_discard_runs(__import__("pathlib").Path(__import__("tempfile").mkdtemp()))
