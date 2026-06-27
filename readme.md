@@ -245,7 +245,7 @@ The ecosystem is still in development. Below is a non-exhaustive list of to-do i
 - [x] Set up gradient contributing and Bonawitz secure aggregation.
 - [x] Build the aggregation server: FedAvg, peer-key distribution, aggregate norm-bounding.
 - [x] Use DP without accountant until server is busy, then switch to SMPC.
-- [ ] Launch the default server on Stackit.
+- [ ] Launch the default server as a scale-to-zero container on Koyeb with S3 storage.
 - [ ] <ins>Huzzah, it can now be shipped.</ins>
 
 Deferred:

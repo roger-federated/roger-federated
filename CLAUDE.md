@@ -29,7 +29,12 @@
   it seals secure-aggregation cohorts (barrier long-poll on `/round/register`, peer-key distribution),
   sums the masked uploads (masks cancel), aggregate-norm-bounds the result, and folds η·mean(ΔW) into
   a per-model cumulative dense global it broadcasts at `/global`. All-or-nothing rounds (void on any
-  dropout). FastAPI; `python -m roger.federated.server`; deploy via Docker+Caddy.
+  dropout). FastAPI; `python -m roger.federated.server`. The server is intrinsically single-instance
+  (secure-agg needs every cohort member in one process; concurrency = rounds inside it, never more
+  processes), so the default deploy is a **scale-to-zero container** (Scaleway Serverless Containers /
+  Koyeb, `max-instances=1`) with the durable global in **S3 object storage** (`store.py` backends:
+  `ROGER_SERVER_STORAGE=fs|s3`, boto3 in the `[server]` extra) — ~zero idle cost, client unchanged. The
+  legacy always-on Docker+Caddy VM path still works (`fs` storage). See `server/DEPLOY.md`.
 - **Cold-start fix — DP-noised async bootstrap.** A sparse federation can't seal cohorts (needs k_min
   registrants in one ~20s window), so per model the server advertises a mode at `GET /status`: while
   sparse it serves `bootstrap` and clients skip the cohort entirely, uploading ONE **faux-DP-noised,
