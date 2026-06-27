@@ -188,6 +188,44 @@ def test_global_persists_across_restart(tmp_path):
     print("PASS test_global_persists_across_restart")
 
 
+def test_s3_backend_round_trip(tmp_path, monkeypatch):
+    # The scale-to-zero deploy keeps the global in S3-compatible object storage, not on the (ephemeral)
+    # container disk. Prove a fresh Aggregator — the cold-start-after-scale-to-zero analog — rehydrates
+    # the persisted global purely from the bucket, writing nothing to local disk.
+    pytest.importorskip("boto3")
+    pytest.importorskip("moto")
+    import boto3
+    from moto import mock_aws
+
+    # An AWS-style endpoint so moto's request interception matches (it ignores non-amazonaws hosts);
+    # the real deploy points ROGER_S3_ENDPOINT at the Scaleway/Koyeb S3 endpoint instead.
+    endpoint = "https://s3.us-east-1.amazonaws.com"
+    monkeypatch.setenv("ROGER_SERVER_STORAGE", "s3")
+    monkeypatch.setenv("ROGER_S3_ENDPOINT", endpoint)
+    monkeypatch.setenv("ROGER_S3_REGION", "us-east-1")     # avoids moto's LocationConstraint requirement
+    monkeypatch.setenv("ROGER_S3_BUCKET", "roger-test")
+    monkeypatch.setenv("ROGER_S3_KEY", "k")
+    monkeypatch.setenv("ROGER_S3_SECRET", "s")
+
+    with mock_aws():
+        boto3.client("s3", endpoint_url=endpoint, region_name="us-east-1",
+                     aws_access_key_id="k", aws_secret_access_key="s").create_bucket(Bucket="roger-test")
+
+        payloads = [{KEY: torch.randn(6, 4) * 0.05} for _ in range(2)]
+        uploads, pubs = _mask_cohort(payloads)
+        agg = Aggregator(str(tmp_path), k_min=2, k_target=2)   # datadir is unused by the s3 backend
+        rnd = _seal_with(agg, pubs)
+        for masked, compat, spec_json in uploads:
+            agg.submit(rnd.round_id, masked, compat, spec_json, "1.2.3.4")
+        agg.finalize(rnd)
+
+        reloaded = Aggregator(str(tmp_path))               # cold start: rehydrate from object storage only
+        blob, version = reloaded.serve_global("m", "")
+        assert version == 1 and KEY in delta.from_bytes(blob)[0]
+        assert not list(tmp_path.iterdir())                # s3 mode never touches local disk
+    print("PASS test_s3_backend_round_trip")
+
+
 # --- bootstrap (async DP) mode ---------------------------------------------------------------
 
 def test_dp_bootstrap_accumulates(tmp_path):
