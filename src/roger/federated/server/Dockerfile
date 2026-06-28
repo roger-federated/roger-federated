@@ -6,7 +6,6 @@
 #
 # Build from the REPO ROOT:   docker build -f src/roger/federated/server/Dockerfile -t roger-agg .
 # Run (scale-to-zero, S3):    see DEPLOY.md — the durable global lives in object storage, not on disk.
-# Run (legacy always-on VM):  docker run -p 8000:8000 -v roger-agg-data:/data -e ROGER_SERVER_DATA=/data roger-agg
 FROM python:3.13-slim
 
 RUN pip install --no-cache-dir \
