@@ -1,8 +1,9 @@
 """`python -m roger.federated.server` — serve the app with uvicorn.
 
-Host/port from ROGER_SERVER_HOST/PORT (default 0.0.0.0:8000). TLS is terminated by Caddy in front
-(see Caddyfile/DEPLOY.md); this process speaks plain HTTP on the loopback/proxy network. All
-aggregation knobs are env vars read in app.create_app.
+Host/port from ROGER_SERVER_HOST/PORT (default 0.0.0.0:8000). TLS is terminated in front of this
+process (by the managed platform on a scale-to-zero deploy, or a reverse proxy on a legacy VM; see
+DEPLOY.md); this process speaks plain HTTP on the loopback/proxy network. All aggregation knobs are
+env vars read in app.create_app.
 """
 import os
 

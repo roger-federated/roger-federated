@@ -46,7 +46,9 @@ def create_app(aggregator: Aggregator | None = None) -> FastAPI:
     )
     register_window = float(os.environ.get("ROGER_AGG_W", "20"))   # < client 30s register timeout
     collect_window = float(os.environ.get("ROGER_AGG_U", "20"))    # how long to wait for all uploads
-    # Proxies whose X-Forwarded-For we trust for the real client IP (Caddy in front). Default: local.
+    # Proxies whose X-Forwarded-For we trust for the real client IP (a TLS-terminating proxy / managed
+    # platform in front). Default: local. Managed platforms rarely publish a stable proxy CIDR, so
+    # prefer disabling IP-binding (ROGER_AGG_IPBIND=0) there over trusting 0.0.0.0/0.
     trusted = [ipaddress.ip_network(c.strip()) for c in
                os.environ.get("ROGER_AGG_TRUSTED_PROXIES", "127.0.0.1/32,::1/128,10.0.0.0/8").split(",") if c.strip()]
 

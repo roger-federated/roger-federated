@@ -86,7 +86,7 @@
                 bf16-fold-then-bnb-quantize loading lives in `serving/model_setup.fetch_model(weight_deltas=…)`.
                 `server/` is the aggregation server (`aggregate` round lifecycle + FedAvg math +
                 bootstrap `submit_dp`/density `mode`, `store` global persistence, `app` FastAPI
-                endpoints, `__main__`, Dockerfile/Caddyfile/DEPLOY.md); needs the `[server]` extra.
+                endpoints, `__main__`, Dockerfile/DEPLOY.md); needs the `[server]` extra.
 - `envs/`     — not created yet (concrete shell/browser/code environments are future work)
 - `tests/`    — `test_rewards.py`, `test_trainer.py`, `test_grade.py`, `test_privacy_filter.py`,
                 `test_mcp.py`, `test_multimodal.py`, `test_federated.py`, `test_server.py`
