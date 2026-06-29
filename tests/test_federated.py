@@ -10,6 +10,23 @@ from transformers import LlamaConfig, LlamaForCausalLM
 from roger.federated import delta as delta_mod, secure_agg, client as fed_client, transport
 
 
+def _dequantize(flat, spec):
+    """Local mirror of the inverse of secure_agg.quantize. The client package no longer ships
+    `dequantize` (it is server-only, in the roger-server repo), but the round-trip and mask-cancellation
+    tests below still need it to check the quantize/mask math. Residues ≥ R/2 represent negatives."""
+    R, SCALE = secure_agg.R, secure_agg.SCALE
+    signed = flat.clone()
+    signed[signed >= R // 2] -= R
+    real, out, off = signed.float() / SCALE, {}, 0
+    for key, shape in spec:
+        n = 1
+        for d in shape:
+            n *= d
+        out[key] = real[off : off + n].reshape(shape)
+        off += n
+    return out
+
+
 # --- ΔW densification + compatibility --------------------------------------------------------
 
 def _fake_delta(out=6, in_=4, r=2, scaling=2.0, seed=0):
@@ -64,7 +81,7 @@ def test_bytes_roundtrip():
 def test_quantize_dequantize_roundtrip():
     dense = {"m": torch.randn(6, 4) * 0.1}
     q, spec = secure_agg.quantize(dense)
-    back = secure_agg.dequantize(q, spec)
+    back = _dequantize(q, spec)
     assert torch.allclose(back["m"], dense["m"], atol=1e-3)
     print("PASS test_quantize_dequantize_roundtrip")
 
@@ -89,7 +106,7 @@ def test_mask_cancellation():
         assert not torch.equal(q % secure_agg.R, mk)
     # But the masks cancel in the sum, recovering the true aggregate.
     agg = (sum(masked) % secure_agg.R)
-    recovered = secure_agg.dequantize(agg, spec)["m"]
+    recovered = _dequantize(agg, spec)["m"]
     expected = sum(p["m"] for p in payloads)
     assert torch.allclose(recovered, expected, atol=1e-2), (recovered, expected)
     print("PASS test_mask_cancellation")

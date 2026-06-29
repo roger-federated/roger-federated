@@ -45,19 +45,9 @@ def quantize(tensors: dict) -> tuple[torch.Tensor, list]:
     return q, spec
 
 
-def dequantize(flat: torch.Tensor, spec: list) -> dict:
-    """Inverse of `quantize` (server-side / tests): map residues back to signed reals and reshape.
-    Residues ≥ R/2 represent negative values."""
-    signed = flat.clone()
-    signed[signed >= R // 2] -= R
-    real, out, off = signed.float() / SCALE, {}, 0
-    for key, shape in spec:
-        n = 1
-        for d in shape:
-            n *= d
-        out[key] = real[off : off + n].reshape(shape)
-        off += n
-    return out
+# `dequantize` (the inverse of quantize) is server-only: the aggregation server sums the masked
+# uploads then maps the residues back to signed reals. It lives in the separate roger-server repo
+# (roger_server/secure_agg.py), kept in lockstep with SCALE/R/quantize/mask here.
 
 
 def _prg(secret: bytes, length: int) -> torch.Tensor:
