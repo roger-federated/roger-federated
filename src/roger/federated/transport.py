@@ -6,10 +6,12 @@ misbehaving returns None / a status string rather than raising, so a sharing hic
 down the agent (same convention as the web_search/web_fetch tools).
 
 Endpoints (all under a federation's base URL, served over HTTPS):
-  GET  {url}/status?model_id= -> {mode: "bootstrap"|"busy", ...}   (which aggregation regime this
-                              federation wants for the model — async DP while sparse, secure-agg cohorts
-                              once busy; probed before contributing so a cold-start client skips the
-                              cohort barrier entirely instead of 503-ing on it)
+  GET  {url}/status?model_id= -> {mode: "bootstrap"|"busy"|"unsupported", ...}   (which aggregation
+                              regime this federation wants for the model — async DP while sparse,
+                              secure-agg cohorts once busy, or "unsupported" when the federation's
+                              allowlist excludes the model; probed before contributing so a cold-start
+                              client skips the cohort barrier instead of 503-ing on it, and so the CLI
+                              can warn on an unsupported model before wasting a session's gradient)
   POST {url}/round/register   {model_id, pubkey(hex)} -> {peers: [hex, ...]}   (server distributes
                               the round's peer X25519 public keys; keys are collected centrally)
   POST {url}/contribute       octet-stream = the masked, packed contribution -> 200
@@ -65,9 +67,10 @@ def load_global(url: str) -> bytes | None:
 
 
 def federation_mode(url: str, model_id: str) -> str:
-    """Ask whether this federation wants async DP-bootstrap uploads ("bootstrap") or secure-agg
-    cohorts ("busy") for `model_id`. Fail-soft to "busy" so an unreachable server, or an older one
-    that predates /status, keeps the existing secure-aggregation behaviour."""
+    """Ask which regime this federation wants for `model_id`: async DP-bootstrap uploads ("bootstrap"),
+    secure-agg cohorts ("busy"), or "unsupported" when its allowlist excludes the model. Fail-soft to
+    "busy" so an unreachable server, or an older one that predates /status, keeps the existing
+    secure-aggregation behaviour (and is never mistaken for an unsupported model)."""
     try:
         r = httpx.get(f"{url.rstrip('/')}/status", timeout=_TIMEOUT, params={"model_id": model_id})
         r.raise_for_status()

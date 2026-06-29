@@ -211,14 +211,23 @@ async def _repl(cfg: dict, root: str) -> None:
     from roger.federated import client as fed_client
     train_every = cfg.get("train_every", 8)
     if fed_client.should_train(cfg) and len(trainer._list_unconsumed(train_every)) >= train_every:
-        with console.status("[bold]Training on recent runs…[/bold]", spinner="dots"):
-            stats = trainer.train(model_id=cfg["model_id"], reuse=(model, processor))
-        console.print(f"[dim]Training: {stats}[/dim]")
-        if stats.get("delta"):
-            with console.status("[bold]Contributing your gradient…[/bold]", spinner="dots"):
-                accepted = fed_client.contribute_delta(stats["delta"], cfg)
-            if accepted:                        # consume the runs only once the ΔW is actually shared
-                trainer.discard_runs(stats.get("consumed_dirs", []))
+        feds = cfg.get("federations") or []
+        # Don't burn the quit-time update on a gradient no federation will accept: if every configured
+        # federation's allowlist excludes this model, skip training but KEEP the runs (discard only ever
+        # happens on an accepted upload), so they're there once the user switches to a supported model.
+        if len(fed_client.unsupported_federations(cfg)) == len(feds):
+            console.print(f"[yellow]Skipping training: {cfg['model_id']} isn't accepted by your "
+                          "federation(s), so the gradient couldn't be shared. Your recorded runs are "
+                          "kept for when you switch to a supported model or federation.[/yellow]")
+        else:
+            with console.status("[bold]Training on recent runs…[/bold]", spinner="dots"):
+                stats = trainer.train(model_id=cfg["model_id"], reuse=(model, processor))
+            console.print(f"[dim]Training: {stats}[/dim]")
+            if stats.get("delta"):
+                with console.status("[bold]Contributing your gradient…[/bold]", spinner="dots"):
+                    accepted = fed_client.contribute_delta(stats["delta"], cfg)
+                if accepted:                    # consume the runs only once the ΔW is actually shared
+                    trainer.discard_runs(stats.get("consumed_dirs", []))
 
     console.print("\n[dim]Goodbye.[/dim]")
 
@@ -310,8 +319,18 @@ def main() -> None:
     if cfg.get("federations"):
         with console.status("[bold]Syncing federated model…[/bold]", spinner="dots"):
             fetched = fed_client.maybe_daily_pull(cfg)
+            unsupported = fed_client.unsupported_federations(cfg)
         if fetched:
             console.print("[dim]Downloaded today's federation update.[/dim]")
+        # Warn up front (before a session's worth of gradient is wasted) if a federation's allowlist
+        # excludes the selected model: those feds won't take this session's gradient or serve updates.
+        if unsupported:
+            feds = cfg["federations"]
+            scope = ("None of your federations accept" if len(unsupported) == len(feds)
+                     else f"{len(unsupported)} of your federations don't accept")
+            console.print(f"[yellow]⚠ {scope} {cfg['model_id']}: {', '.join(unsupported)}. "
+                          "Pick a supported model or federation to share gradients and receive its "
+                          "updates.[/yellow]")
 
     # Root selection
     root = ui.select_root(os.getcwd())

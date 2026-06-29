@@ -192,6 +192,25 @@ def test_contribute_delta_bootstrap(monkeypatch):
     print("PASS test_contribute_delta_bootstrap")
 
 
+def test_unsupported_model_skipped_and_reported(monkeypatch):
+    # A federation whose allowlist excludes the model reports "unsupported": contribute_delta must NOT
+    # upload (no register, no contribute_dp), and unsupported_federations must flag it so the CLI warns.
+    dp_sent, registered = [], []
+    cfg = {"federations": ["http://x", "http://y"], "contribute": True, "model_id": "tiny"}
+    modes = {"http://x": "unsupported", "http://y": "bootstrap"}
+    monkeypatch.setattr(transport, "federation_mode", lambda url, mid: modes[url])
+    monkeypatch.setattr(transport, "register_and_peers", lambda url, pub, mid: registered.append(url))
+    monkeypatch.setattr(transport, "contribute_dp", lambda url, blob: dp_sent.append(url) or "ok")
+    assert fed_client.contribute_delta(_fake_delta(), cfg) is True   # the supported fed still took it
+    assert registered == [] and dp_sent == ["http://y"]             # x skipped, no upload attempted
+    assert fed_client.unsupported_federations(cfg) == ["http://x"]
+    # All feds unsupported ⇒ nothing uploaded, every fed flagged (CLI skips training, keeps runs).
+    monkeypatch.setattr(transport, "federation_mode", lambda url, mid: "unsupported")
+    assert fed_client.contribute_delta(_fake_delta(), cfg) is False
+    assert fed_client.unsupported_federations(cfg) == ["http://x", "http://y"]
+    print("PASS test_unsupported_model_skipped_and_reported")
+
+
 def test_maybe_daily_pull_persists_blob(tmp_path, monkeypatch):
     monkeypatch.setattr(transport, "_state_path", lambda url: str(tmp_path / "fed.json"))
     saved = []

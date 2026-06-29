@@ -37,6 +37,17 @@ def is_leeching(cfg: dict) -> bool:
     return bool(cfg.get("federations")) and not cfg.get("contribute", True)
 
 
+def unsupported_federations(cfg: dict) -> list[str]:
+    """Configured federations whose allowlist excludes the current model_id (they report mode
+    "unsupported" at /status). Probed so the CLI can warn the user — at startup, before a whole
+    session's gradient is wasted, and again at quit if training would be skipped. Fail-soft: an
+    unreachable / pre-/status server defaults to "busy", so we only flag a *definite* rejection and
+    never false-warn on a network hiccup."""
+    model_id = cfg.get("model_id", "")
+    return [url for url in (cfg.get("federations") or [])
+            if transport.federation_mode(url, model_id) == "unsupported"]
+
+
 def should_train(cfg: dict) -> bool:
     """Local training only earns its keep when there's a federation to send the ΔW to and the user
     is contributing — there is no local-apply path, so otherwise the round would be discarded."""
@@ -76,7 +87,10 @@ def contribute_delta(delta: dict, cfg: dict) -> bool:
     secure = None                               # (compat, q, spec) for the busy path; built once on demand
     accepted = False
     for url in feds:
-        if transport.federation_mode(url, model_id) == "bootstrap":
+        mode = transport.federation_mode(url, model_id)
+        if mode == "unsupported":
+            continue                            # allowlist excludes this model here; nothing to upload
+        if mode == "bootstrap":
             # Cohort-free: noise the factors, clip, upload unmasked. Re-noised per federation.
             noisy = _clip(delta_mod.densify(delta, noise_z=DP_Z), CLIP_NORM)
             if transport.contribute_dp(url, delta_mod.to_bytes(noisy, model_id)) == "ok":
