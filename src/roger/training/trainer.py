@@ -98,7 +98,7 @@ def _new_logps(model, ep, device) -> tuple[torch.Tensor, torch.Tensor]:
 
 
 def train(model_id: str | None = None, *, batch: int = 8, epochs: int = 1, lr: float = 1e-5,
-          clip_eps: float = 0.2, max_grad_norm: float = 1.0, targets="all-linear",
+          clip_eps: float = 0.2, max_grad_norm: float = 1.0, targets=lora_utils.FED_TARGETS,
           reuse=None) -> dict:
     """Run one REINFORCE++ update over up to `batch` unconsumed runs. `reuse=(model, processor)`
     trains the already-loaded in-session model (Ctrl-D path); None loads its own via

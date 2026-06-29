@@ -8,9 +8,14 @@ is pulled and folded at load time, so there is no inference-time adapter and no 
 """
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 
+# Fixed federation LoRA basis (the shared secure-agg dense basis; masks only cancel if every member
+# targets the same modules). Not "all-linear": dense ΔW is aggregated, so a broad set bloats per-round
+# server I/O. q/v ≈ 6% of all-linear; lm_head/embeddings excluded (vocab-sized).
+FED_TARGETS = ["q_proj", "v_proj"]
+
 
 def attach_lora(model, *, r: int = 16, alpha: int = 32, dropout: float = 0.05,
-                targets="all-linear"):
+                targets=FED_TARGETS):                # all training is federated → default to the basis
     """Return the model wrapped with a single trainable LoRA adapter. Works for a quantized (QLoRA)
     or full base. The Ctrl-D reuse path passes the already-loaded (non-PeftModel) served model."""
     is_quantized = getattr(model, "is_loaded_in_4bit", False) or getattr(model, "is_loaded_in_8bit", False)
@@ -20,9 +25,8 @@ def attach_lora(model, *, r: int = 16, alpha: int = 32, dropout: float = 0.05,
     else:
         model.gradient_checkpointing_enable()
         model.enable_input_require_grads()   # checkpointing needs a grad-bearing input on a frozen base
-    # 'all-linear' = every nn.Linear (minus head), model-agnostic.
     cfg = LoraConfig(task_type="CAUSAL_LM", r=r, lora_alpha=alpha, lora_dropout=dropout,
-                     target_modules=targets, bias="none")
+                     target_modules=targets, bias="none")   # targets: name list or "all-linear"
     model = get_peft_model(model, cfg)
     model.config.use_cache = False   # incompatible with gradient checkpointing
     return model
