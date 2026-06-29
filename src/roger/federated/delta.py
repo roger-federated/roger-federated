@@ -45,6 +45,13 @@ def densify(delta: dict, *, noise_z: float = 0.0, generator=None) -> dict:
     return out
 
 
+def compat_from_shapes(shapes: dict) -> str:
+    """The compat digest from an already-extracted {module: (out, in)} map. Split out so the server can
+    recompute it while rebuilding the global per-module (it has shapes, not whole tensors)."""
+    blob = ";".join(f"{m}:{s[0]}x{s[1]}" for m, s in sorted(shapes.items()))
+    return hashlib.sha1(blob.encode()).hexdigest()
+
+
 def compat_hash(tensors: dict) -> str:
     """Stable digest of the base architecture this delta targets: sorted module → (out, in). Dense
     ΔW carries (out, in) directly; LoRA factors give out from lora_B[:,0], in from lora_A[0,:], so a
@@ -57,8 +64,7 @@ def compat_hash(tensors: dict) -> str:
             shapes.setdefault(key[: -len(".lora_B.weight")], [None, None])[0] = t.shape[0]   # out
         else:                                              # dense ΔW [out, in]
             shapes[key] = [t.shape[0], t.shape[1]]
-    blob = ";".join(f"{m}:{s[0]}x{s[1]}" for m, s in sorted(shapes.items()))
-    return hashlib.sha1(blob.encode()).hexdigest()
+    return compat_from_shapes(shapes)
 
 
 def _read_metadata(buf: bytes) -> dict:
