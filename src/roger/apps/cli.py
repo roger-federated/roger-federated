@@ -14,8 +14,8 @@ from typing import Callable
 from rich.console import Console
 
 from roger.apps import config, ui
-import roger.serving.model_setup as model_setup
-from roger.serving.model_setup import fetch_model
+import roger.loading.model_setup as model_setup
+from roger.loading.model_setup import fetch_model
 from roger.agency.rollout_utils import rollout
 from roger.tools import mcp_utils, std_tools
 
@@ -97,7 +97,7 @@ def _keep_awake_start() -> Callable | None:
 async def _repl(cfg: dict, root: str) -> None:
     """Load model once, then loop: read prompt → rollout → record."""
     # The federation's cumulative global ΔW (if any) is folded into the base weights in bf16 before
-    # quantization — see federated/delta.fold_into + serving/model_setup. The HF cache is untouched;
+    # quantization — see federated/delta.fold_into + loading/model_setup. The HF cache is untouched;
     # nothing is stored. None when no federation is configured or none has been pulled yet.
     from roger.federated import client as fed_client
     global_deltas = fed_client.pending_globals(cfg)

@@ -40,7 +40,7 @@ def _get_pipe():
     global _PIPE
     if _PIPE is None:
         from transformers import AutoModelForTokenClassification, pipeline
-        from roger.serving.model_setup import fetch_model
+        from roger.loading.model_setup import fetch_model
         # Reuse the policy loader so the filter quantizes/offloads against whatever VRAM is free
         # (the policy may already be resident on the Ctrl-D / reuse training path).
         model, tok = fetch_model(PII_MODEL_ID, model_cls=AutoModelForTokenClassification)

@@ -14,7 +14,7 @@ from collections.abc import Callable
 from roger.tools.std_tools import (get_standard_tools, finish_score, set_user_grade, clear_grade,
                                     pending_backups, apply_revert, maxsteps_checkin)
 from roger.tools.shell_tools import drain_finished_jobs, pending_jobs, terminate_jobs, shell_idioms
-from roger.serving.model_setup import find_gen_prompt, find_tool_res_id, find_tool_call_tokens, find_think_tokens
+from roger.loading.model_setup import find_gen_prompt, find_tool_res_id, find_tool_call_tokens, find_think_tokens
 from roger.training import recording
 from datetime import datetime, timezone
 

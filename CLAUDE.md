@@ -72,7 +72,8 @@
 - `agency/`   — rollout loop, tool/skill loaders, RAG retrieval, `@path` expansion
                 (`rollout_utils`, `retrieval`, `skill_utils`, `path_utils`)
 - `apps/`     — CLI entry point, config, Rich/prompt_toolkit UI (`cli`, `config`, `ui`)
-- `serving/`  — model loading + VRAM-aware quantization tier selection (`model_setup`)
+- `loading/`  — model loading + VRAM-aware quantization tier selection (`model_setup`);
+                future home for subagent spawning
 - `tools/`    — standard tools, shell execution + policy guardrails, MCP bridge
                 (`std_tools`, `shell_tools`, `mcp_utils`, `command_policy.txt`)
 - `training/` — RL machinery: reward shaping, trajectory recording, LoRA adapter + REINFORCE++
@@ -85,7 +86,7 @@
                 SHAKE pairwise masks, quantize mod R), `transport` (httpx per-federation, fail-soft,
                 `federation_mode`/`contribute_dp` + sync state + persisted global blob), `client`
                 (mode-branched contribute / daily-pull / `pending_globals` / leech gating). The
-                bf16-fold-then-bnb-quantize loading lives in `serving/model_setup.fetch_model(weight_deltas=…)`.
+                bf16-fold-then-bnb-quantize loading lives in `loading/model_setup.fetch_model(weight_deltas=…)`.
                 The aggregation **server is a separate repo** (`roger-server`); this package is client-only.
                 `secure_agg` + `delta` here mirror the server's copies of the wire contract (the server's
                 `secure_agg` additionally carries the server-only `dequantize` half).

@@ -104,7 +104,7 @@ def train(model_id: str | None = None, *, batch: int = 8, epochs: int = 1, lr: f
     trains the already-loaded in-session model (Ctrl-D path); None loads its own via
     fetch_model(for_training=True). Returns a stats dict; never raises on 'nothing to do'."""
     import bitsandbytes as bnb
-    from roger.serving.model_setup import fetch_model
+    from roger.loading.model_setup import fetch_model
 
     dirs = _list_unconsumed(batch)
     eps, skipped_mm = [], 0
