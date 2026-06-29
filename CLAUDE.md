@@ -27,21 +27,16 @@
   and no model is ever stored. Config: `contribute`/`federations` (the ΔW L2 clip is a fixed
   best-effort client constant, not user config — authoritative norm-bounding is server-side). Leech
   mode (config'd-in but not contributing) is nudged, not blocked.
-- Federated aggregation **server** is built (`federated/server/`): wire-compatible with the client,
-  it seals secure-aggregation cohorts (barrier long-poll on `/round/register`, peer-key distribution),
-  **streams each masked upload to its own object** in storage (never a RAM running-sum) and, at finalize,
-  sums the cohort **one module at a time** (range-GET; masks cancel per coordinate) and folds η·mean(ΔW)
-  into a per-model cumulative dense global it **streams** at `/global` — in ONE pass, voiding the round if
-  ‖ΣΔW‖ exceeds k·clip (only a non-clipping client can, by triangle ineq; we reject rather than damp). So
-  peak RAM is ~one weight matrix at *any* model size, and concurrent cohorts don't multiply it — the binding
-  constraint shifts to per-round S3 I/O. All-or-nothing rounds (void on any dropout or over-norm); finalize
-  runs off the event loop (threadpool, per-model lock). FastAPI; `python -m roger.federated.server`. The server
-  is intrinsically single-instance (secure-agg needs every cohort member in one process; concurrency =
-  rounds inside it, never more processes), so the default deploy is a **scale-to-zero container** (Scaleway
-  Serverless Containers / Koyeb, `max-instances=1`) with the durable global **and per-round upload staging
-  (`tmp/<round_id>/`, GC'd by an S3 lifecycle rule)** in **S3 object storage** (`store.py` backends:
-  `ROGER_SERVER_STORAGE=fs|s3`, boto3 in the `[server]` extra) — ~zero idle cost, client unchanged. The
-  legacy always-on Docker+Caddy VM path still works (`fs` storage). See `server/DEPLOY.md`.
+- The federated aggregation **server now lives in a separate repo** (`roger-server`,
+  github.com/roger-federated/roger-server; package `roger_server`, run `python -m roger_server`). It is
+  wire-compatible with this client purely over HTTP: it seals secure-agg cohorts, streams + sums the
+  masked uploads one module at a time (masks cancel), folds η·mean(ΔW) into a per-model cumulative dense
+  global, and broadcasts it; default deploy is a scale-to-zero container with the global in S3. The
+  secure-aggregation + ΔW wire format is a **contract shared by hand across the two repos**:
+  `federated/secure_agg.py` (SCALE/R/quantize/mask; `dequantize` is server-only and lives over there) and
+  `federated/delta.py` here mirror `roger_server/secure_agg.py` + `roger_server/delta.py`. Any change to
+  the quantization, the sorted-key flatten layout, the safetensors metadata keys, or an endpoint shape
+  must be made on **both** sides.
 - **Cold-start fix — DP-noised async bootstrap.** A sparse federation can't seal cohorts (needs k_min
   registrants in one ~20s window), so per model the server advertises a mode at `GET /status`: while
   sparse it serves `bootstrap` and clients skip the cohort entirely, uploading ONE **faux-DP-noised,
@@ -54,10 +49,10 @@
   (secure-agg only, no DP); quorum raised to **k_min=3 / k_target=5**. Client picks the path per
   federation in `contribute_delta`; no new client config. (Mode is "bootstrap"/"busy" — "busy" rather
   than "dense" to avoid clashing with the dense-matrix sense of ΔW.)
-- NOT yet built (see `readme.md` TODO + the federated-server-roadmap memory): Shamir/double-mask
-  dropout recovery (needs a client protocol change; multi-round is intrinsic), central
-  ground-truth-gradient anti-poison gate, membership auth (round-token/signature). Also docker
-  sandboxing, account/hive/scheduling setup.
+- NOT yet built (see `readme.md` TODO + the federated-server-roadmap memory): the **server-side**
+  roadmap — Shamir/double-mask dropout recovery (needs a client protocol change too; multi-round is
+  intrinsic), central ground-truth-gradient anti-poison gate, membership auth (round-token/signature) —
+  now lives in the `roger-server` repo. Client/app side: docker sandboxing, account/hive/scheduling setup.
 
 ## Confirmed design decisions
 - RL algorithm = **REINFORCE++**, not GRPO. Flat episode return broadcast over all generated
@@ -91,14 +86,12 @@
                 `federation_mode`/`contribute_dp` + sync state + persisted global blob), `client`
                 (mode-branched contribute / daily-pull / `pending_globals` / leech gating). The
                 bf16-fold-then-bnb-quantize loading lives in `serving/model_setup.fetch_model(weight_deltas=…)`.
-                `server/` is the aggregation server (`aggregate` round lifecycle + per-module streamed
-                FedAvg (`begin_stage`/`mark_received`/`claim_finalize`/`run_finalize`) + bootstrap
-                `submit_dp`/density `mode`; `store` durable global + per-round upload staging +
-                per-module reader / multipart `GlobalWriter` + streamed broadcast (fs+s3), `app`
-                FastAPI streaming endpoints, `__main__`, Dockerfile/DEPLOY.md); needs the `[server]` extra.
+                The aggregation **server is a separate repo** (`roger-server`); this package is client-only.
+                `secure_agg` + `delta` here mirror the server's copies of the wire contract (the server's
+                `secure_agg` additionally carries the server-only `dequantize` half).
 - `envs/`     — not created yet (concrete shell/browser/code environments are future work)
 - `tests/`    — `test_rewards.py`, `test_trainer.py`, `test_grade.py`, `test_privacy_filter.py`,
-                `test_mcp.py`, `test_multimodal.py`, `test_federated.py`, `test_server.py`
+                `test_mcp.py`, `test_multimodal.py`, `test_federated.py`
 
 Runtime artifacts all live under the global `~/.roger/` (never in the project): `config.json`,
 global `memory/memory.md` + per-project `memory/<dashed-abspath>.md`, `runs/`, `backups/`,

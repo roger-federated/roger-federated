@@ -27,7 +27,6 @@ dependencies = [
 
 [project.optional-dependencies]
 audio = ["pydub"]  # AudioSegment support in rollout_utils (guarded import)
-server = ["fastapi", "uvicorn", "boto3"]  # federated aggregation server (federated/server); `python -m roger.federated.server`. boto3 = S3 object-storage backend for ROGER_SERVER_STORAGE=s3 (scale-to-zero deploy), server-only so the client install stays lean
 
 [project.scripts]
 roger = "roger.apps.cli:main"
