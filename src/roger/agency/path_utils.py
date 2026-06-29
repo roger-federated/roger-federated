@@ -13,6 +13,8 @@ def state_dir() -> str:
 
 
 _MAX_BYTES = 262144                     # mirrors retrieval.build_index max_bytes
+_MAX_DEPTH = 2                          # expand @refs down to this nesting depth
+                                        # (1 = referenced directly in the text)
 # @token preceded by whitespace or start-of-string (skips emails, in-word @)
 _AT_RE = re.compile(r"(?<!\S)@(\S+)")
 
@@ -65,12 +67,19 @@ def _collect_refs(text: str, root: str, seen: set, depth: int,
         except ValueError:
             display = resolved   # absolute fallback (cross-drive on Windows)
 
+        # Surface the nesting depth this file was found at (1 = direct ref). At
+        # the ceiling, flag it when the file still holds @refs we won't expand,
+        # so the reader knows the chain was truncated rather than empty.
+        at_max = depth >= _MAX_DEPTH
+        tag = f"depth {depth}"
+        if at_max and _AT_RE.search("".join(raw)):
+            tag += ", max depth reached — nested @refs not expanded"
         blocks.append(
-            f"### {display} (lines {a_start}-{a_end})\n"
+            f"### {display} (lines {a_start}-{a_end}) [{tag}]\n"
             + content
         )
         # Recurse into refs inside this file; resolve relative to its own dir
-        if depth < 5:
+        if not at_max:
             _collect_refs("".join(raw), os.path.dirname(resolved),
                           seen, depth + 1, blocks)
 
@@ -84,13 +93,14 @@ def expand_at_references(text: str, root: str = None) -> str:
 
     @tokens not preceded by whitespace are skipped (emails, in-word @ are safe).
     Missing files / unresolvable refs are left as plain text; no error raised.
-    Depth-limited recursion (5 levels) with cycle/dup protection.
+    Depth-limited recursion (max depth 2) with cycle/dup protection; each block
+    header carries the depth it was found at and a note when the cap truncated.
     Returns text unchanged when no resolvable refs are found.
     """
     if root is None:
         root = os.getcwd()
     blocks: list[str] = []
-    _collect_refs(text, root, set(), 0, blocks)
+    _collect_refs(text, root, set(), 1, blocks)
     if not blocks:
         return text
     return text + "\n\n[Referenced files]\n" + "\n\n".join(blocks)
