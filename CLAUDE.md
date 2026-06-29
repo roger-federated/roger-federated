@@ -17,7 +17,9 @@
   PII anonymisation via `privacy_filter.py`. Gated Ctrl-D auto-train + `roger train` subcommand.
   `/grade` user override of `finish()` self-eval score + 10%-user-graded training gate.
 - Federated gradient-sharing **client** is built (`federated/`): a training round trains a single
-  fresh LoRA adapter, exports its weight-space ΔW (=scaling·B@A) — never applied/saved locally —
+  fresh LoRA adapter on the **fixed federation basis q_proj/v_proj** (`lora_utils.FED_TARGETS`, NOT
+  all-linear — it is the shared secure-agg dense basis, so it bounds the server's per-round work),
+  exports its weight-space ΔW (=scaling·B@A) — never applied/saved locally —
   densifies + masks it with Bonawitz secure aggregation (X25519 EC-DH), and uploads per federation.
   The server broadcasts the **full cumulative dense global** ΔW; the client pulls it daily, persists
   the blob under `~/.roger/federated/`, and **folds it into the base in bf16 at load, then bnb-quantizes
@@ -27,18 +29,23 @@
   mode (config'd-in but not contributing) is nudged, not blocked.
 - Federated aggregation **server** is built (`federated/server/`): wire-compatible with the client,
   it seals secure-aggregation cohorts (barrier long-poll on `/round/register`, peer-key distribution),
-  sums the masked uploads (masks cancel), aggregate-norm-bounds the result, and folds η·mean(ΔW) into
-  a per-model cumulative dense global it broadcasts at `/global`. All-or-nothing rounds (void on any
-  dropout). FastAPI; `python -m roger.federated.server`. The server is intrinsically single-instance
-  (secure-agg needs every cohort member in one process; concurrency = rounds inside it, never more
-  processes), so the default deploy is a **scale-to-zero container** (Scaleway Serverless Containers /
-  Koyeb, `max-instances=1`) with the durable global in **S3 object storage** (`store.py` backends:
+  **streams each masked upload to its own object** in storage (never a RAM running-sum) and, at finalize,
+  sums the cohort **one module at a time** (range-GET; masks cancel per coordinate) and folds η·mean(ΔW)
+  into a per-model cumulative dense global it **streams** at `/global` — in ONE pass, voiding the round if
+  ‖ΣΔW‖ exceeds k·clip (only a non-clipping client can, by triangle ineq; we reject rather than damp). So
+  peak RAM is ~one weight matrix at *any* model size, and concurrent cohorts don't multiply it — the binding
+  constraint shifts to per-round S3 I/O. All-or-nothing rounds (void on any dropout or over-norm); finalize
+  runs off the event loop (threadpool, per-model lock). FastAPI; `python -m roger.federated.server`. The server
+  is intrinsically single-instance (secure-agg needs every cohort member in one process; concurrency =
+  rounds inside it, never more processes), so the default deploy is a **scale-to-zero container** (Scaleway
+  Serverless Containers / Koyeb, `max-instances=1`) with the durable global **and per-round upload staging
+  (`tmp/<round_id>/`, GC'd by an S3 lifecycle rule)** in **S3 object storage** (`store.py` backends:
   `ROGER_SERVER_STORAGE=fs|s3`, boto3 in the `[server]` extra) — ~zero idle cost, client unchanged. The
   legacy always-on Docker+Caddy VM path still works (`fs` storage). See `server/DEPLOY.md`.
 - **Cold-start fix — DP-noised async bootstrap.** A sparse federation can't seal cohorts (needs k_min
   registrants in one ~20s window), so per model the server advertises a mode at `GET /status`: while
   sparse it serves `bootstrap` and clients skip the cohort entirely, uploading ONE **faux-DP-noised,
-  unmasked** dense ΔW to `POST /contribute_dp` that the server folds async (k=1, `submit_dp`→`_fold`).
+  unmasked** dense ΔW to `POST /contribute_dp` that the server folds (k=1, `dp_fold`, same per-module stream).
   Noise is injected in **LoRA-factor space before densifying** (`delta._dp_noise`, per-factor
   σ=z·rms; client `DP_Z`) — the rank-r signal subspace, far less SNR loss than noising the dense matrix.
   It's *faux*-DP: fixed σ, no accountant, and B@A is bilinear so not a formal Gaussian mechanism —
@@ -84,9 +91,11 @@
                 `federation_mode`/`contribute_dp` + sync state + persisted global blob), `client`
                 (mode-branched contribute / daily-pull / `pending_globals` / leech gating). The
                 bf16-fold-then-bnb-quantize loading lives in `serving/model_setup.fetch_model(weight_deltas=…)`.
-                `server/` is the aggregation server (`aggregate` round lifecycle + FedAvg math +
-                bootstrap `submit_dp`/density `mode`, `store` global persistence, `app` FastAPI
-                endpoints, `__main__`, Dockerfile/DEPLOY.md); needs the `[server]` extra.
+                `server/` is the aggregation server (`aggregate` round lifecycle + per-module streamed
+                FedAvg (`begin_stage`/`mark_received`/`claim_finalize`/`run_finalize`) + bootstrap
+                `submit_dp`/density `mode`; `store` durable global + per-round upload staging +
+                per-module reader / multipart `GlobalWriter` + streamed broadcast (fs+s3), `app`
+                FastAPI streaming endpoints, `__main__`, Dockerfile/DEPLOY.md); needs the `[server]` extra.
 - `envs/`     — not created yet (concrete shell/browser/code environments are future work)
 - `tests/`    — `test_rewards.py`, `test_trainer.py`, `test_grade.py`, `test_privacy_filter.py`,
                 `test_mcp.py`, `test_multimodal.py`, `test_federated.py`, `test_server.py`
