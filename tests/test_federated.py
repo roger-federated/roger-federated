@@ -228,6 +228,20 @@ def test_attach_single_adapter_and_extract():
     print("PASS test_attach_single_adapter_and_extract")
 
 
+def test_federation_basis_is_q_v():
+    """The federation basis is fixed to q/v (the secure-agg dense basis every member must share). It is
+    NOT all-linear: the server stages+sums dense ΔW, so a broad target set blows up per-round I/O."""
+    from roger.training import lora_utils
+    assert lora_utils.FED_TARGETS == ["q_proj", "v_proj"]
+    cfg = LlamaConfig(vocab_size=64, hidden_size=32, intermediate_size=64,
+                      num_hidden_layers=2, num_attention_heads=4, num_key_value_heads=4)
+    model = lora_utils.attach_lora(LlamaForCausalLM(cfg), targets=lora_utils.FED_TARGETS)
+    wrapped = {n.rsplit(".lora_", 1)[0].rsplit(".", 1)[-1]
+               for n, p in model.named_parameters() if p.requires_grad and ".lora_" in n}
+    assert wrapped == {"q_proj", "v_proj"}     # only q/v, never k/o/mlp/lm_head
+    print("PASS test_federation_basis_is_q_v")
+
+
 if __name__ == "__main__":
     test_densify_matches_factors()
     test_densify_factor_noise()
@@ -238,3 +252,4 @@ if __name__ == "__main__":
     test_mask_noop_when_alone()
     test_fold_into_adds_and_skips_mismatch()
     test_is_leeching_and_should_train()
+    test_federation_basis_is_q_v()

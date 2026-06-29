@@ -4,8 +4,12 @@ CPU-only, download-free. The core tests drive the synchronous Aggregator directl
 event loop); the HTTP test exercises the FastAPI wire layer + the register/seal barrier via concurrent
 TestClient calls. Synthetic clients reuse the real client crypto (secure_agg.quantize/mask), so the
 mask-cancellation the server relies on is genuinely tested end-to-end.
+
+The cohort path stages each masked upload to its own object in `store` and aggregates one module at a
+time at finalize (so server RAM is ~one module, not the whole model). `_stage` mirrors the wire path:
+validate+reserve via begin_stage, write the blob through store.stage_writer, mark_received.
 """
-import json
+import json, os
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -13,6 +17,7 @@ import torch
 from safetensors.torch import save as st_save
 
 from roger.federated import delta, secure_agg
+from roger.federated.server import store
 from roger.federated.server.aggregate import Aggregator
 
 KEY = "base_model.model.model.layers.0.self_attn.q_proj"
@@ -44,6 +49,34 @@ def _seal_with(agg, pubs, ip="1.2.3.4", model="m"):
     return rnd
 
 
+def _stage(agg, rnd, masked, compat, spec_json, ip="1.2.3.4", model="m"):
+    """Validate + stage one upload exactly as the wire layer does; returns the begin_stage status."""
+    r, slot, res = agg.begin_stage(rnd.round_id, compat, spec_json, ip,
+                                   masked_i64=(masked.dtype == torch.int64 and masked.dim() == 1),
+                                   masked_len=masked.numel())
+    if res != "ok":
+        return res
+    w = store.stage_writer(agg.datadir, rnd.round_id, slot)
+    w.write(_pack(masked, compat, spec_json, rnd.round_id, model))
+    w.commit()
+    agg.mark_received(r, slot)
+    return res
+
+
+def _finalize(agg, rnd):
+    status = agg.claim_finalize(rnd)
+    if status != "done":
+        agg.run_finalize(rnd, status)
+
+
+def _pull(agg, model="m", since=""):
+    res = agg.serve_global(model, since)
+    if res is None:
+        return None
+    chunks, version = res
+    return b"".join(chunks), version
+
+
 # --- core: recovery + FedAvg accumulation ----------------------------------------------------
 
 def test_aggregator_recovers_mean(tmp_path):
@@ -55,13 +88,14 @@ def test_aggregator_recovers_mean(tmp_path):
     rnd = _seal_with(agg, pubs)
     assert rnd.sealed and set(rnd.sealed_peers) == {p.hex() for p in pubs}
     for masked, compat, spec_json in uploads:
-        assert agg.submit(rnd.round_id, masked, compat, spec_json, "1.2.3.4") == "ok"
-    agg.finalize(rnd)
-    blob, version = agg.serve_global("m", "")
+        assert _stage(agg, rnd, masked, compat, spec_json) == "ok"
+    _finalize(agg, rnd)
+    blob, version = _pull(agg)
     tensors, _ = delta.from_bytes(blob)
     expected = sum(p[KEY] for p in payloads) / N            # η=1, no clip ⇒ plain mean of ΔW
     assert torch.allclose(tensors[KEY], expected, atol=1e-2)
     assert version == 1
+    assert not (tmp_path / "tmp").exists() or not list((tmp_path / "tmp").iterdir())   # temp cleaned
     print("PASS test_aggregator_recovers_mean")
 
 
@@ -74,10 +108,10 @@ def test_two_rounds_accumulate(tmp_path):
         uploads, pubs = _mask_cohort(payloads)
         rnd = _seal_with(agg, pubs)
         for masked, compat, spec_json in uploads:
-            agg.submit(rnd.round_id, masked, compat, spec_json, "1.2.3.4")
-        agg.finalize(rnd)
+            _stage(agg, rnd, masked, compat, spec_json)
+        _finalize(agg, rnd)
         totals += sum(p[KEY] for p in payloads) / 2          # cumulative Σ mean(ΔW)
-    blob, version = agg.serve_global("m", "")
+    blob, version = _pull(agg)
     tensors, _ = delta.from_bytes(blob)
     assert version == 2 and torch.allclose(tensors[KEY], totals, atol=1e-2)
     print("PASS test_two_rounds_accumulate")
@@ -89,9 +123,10 @@ def test_dropout_voids_round(tmp_path):
     agg = Aggregator(str(tmp_path), k_min=2, k_target=3)
     rnd = _seal_with(agg, pubs)
     for masked, compat, spec_json in uploads[:-1]:          # one sealed member never uploads
-        agg.submit(rnd.round_id, masked, compat, spec_json, "1.2.3.4")
-    agg.finalize(rnd)
-    assert agg.serve_global("m", "") is None                # global untouched (masks wouldn't cancel)
+        _stage(agg, rnd, masked, compat, spec_json)
+    _finalize(agg, rnd)
+    assert _pull(agg) is None                               # global untouched (masks wouldn't cancel)
+    assert not (tmp_path / "tmp" / rnd.round_id).exists()   # voided round's staged objects cleaned up
     print("PASS test_dropout_voids_round")
 
 
@@ -104,19 +139,18 @@ def test_subquorum_register_fails(tmp_path):
     print("PASS test_subquorum_register_fails")
 
 
-def test_norm_bound_clips_aggregate(tmp_path):
+def test_norm_bound_voids_aggregate(tmp_path):
     torch.manual_seed(2)
     N = 3
-    payloads = [{KEY: torch.randn(6, 4) * 3.0} for _ in range(N)]   # huge ⇒ ΣΔW well over k·clip
+    payloads = [{KEY: torch.randn(6, 4) * 3.0} for _ in range(N)]   # ΣΔW ≫ k·clip ⇒ over the honest bound
     uploads, pubs = _mask_cohort(payloads)
     agg = Aggregator(str(tmp_path), k_min=2, k_target=N, clip_norm=1.0, eta=1.0)
     rnd = _seal_with(agg, pubs)
     for masked, compat, spec_json in uploads:
-        agg.submit(rnd.round_id, masked, compat, spec_json, "1.2.3.4")
-    agg.finalize(rnd)
-    tensors, _ = delta.from_bytes(agg.serve_global("m", "")[0])
-    assert float(torch.linalg.vector_norm(tensors[KEY])) <= 1.0 + 1e-3   # η·clip
-    print("PASS test_norm_bound_clips_aggregate")
+        _stage(agg, rnd, masked, compat, spec_json)
+    _finalize(agg, rnd)
+    assert _pull(agg) is None                 # only a non-clipping client exceeds k·clip ⇒ round voided
+    print("PASS test_norm_bound_voids_aggregate")
 
 
 def test_rejects_bad_uploads(tmp_path):
@@ -125,10 +159,10 @@ def test_rejects_bad_uploads(tmp_path):
     agg = Aggregator(str(tmp_path), k_min=2, k_target=2)
     rnd = _seal_with(agg, pubs)
     masked, compat, spec_json = uploads[0]
-    assert agg.submit(rnd.round_id, masked.float(), compat, spec_json, "1.2.3.4") == "bad tensor"      # wrong dtype
-    assert agg.submit(rnd.round_id, masked, "deadbeef", spec_json, "1.2.3.4") == "ok"                  # first fixes compat
-    assert agg.submit(rnd.round_id, uploads[1][0], "different", spec_json, "1.2.3.4") == "compat mismatch"
-    assert agg.submit(rnd.round_id, masked, compat, spec_json, "9.9.9.9") == "ip not in cohort"        # IP-binding
+    assert _stage(agg, rnd, masked.float(), compat, spec_json) == "bad tensor"          # wrong dtype
+    assert _stage(agg, rnd, masked, "deadbeef", spec_json) == "ok"                       # first fixes compat
+    assert _stage(agg, rnd, uploads[1][0], "different", spec_json) == "compat mismatch"
+    assert _stage(agg, rnd, masked, compat, spec_json, ip="9.9.9.9") == "ip not in cohort"  # IP-binding
     print("PASS test_rejects_bad_uploads")
 
 
@@ -138,8 +172,8 @@ def test_serve_global_cursor(tmp_path):
     agg = Aggregator(str(tmp_path), k_min=2, k_target=2)
     rnd = _seal_with(agg, pubs)
     for masked, compat, spec_json in uploads:
-        agg.submit(rnd.round_id, masked, compat, spec_json, "1.2.3.4")
-    agg.finalize(rnd)
+        _stage(agg, rnd, masked, compat, spec_json)
+    _finalize(agg, rnd)
     assert agg.serve_global("m", "1") is None            # since == current version ⇒ nothing new
     assert agg.serve_global("m", "") is not None
     assert agg.serve_global("other", "") is None         # unknown model
@@ -161,14 +195,15 @@ def test_concurrent_cohorts_per_model(tmp_path):
     assert rnd_a.round_id != rnd_b.round_id
     assert rnd_a.round_id in agg.collecting and rnd_b.round_id in agg.collecting  # both live at once
 
-    # Interleave uploads; each routes by its round_id.
-    agg.submit(rnd_b.round_id, up_b[0][0], up_b[0][1], up_b[0][2], "1.2.3.4")
-    agg.submit(rnd_a.round_id, up_a[0][0], up_a[0][1], up_a[0][2], "1.2.3.4")
-    agg.submit(rnd_b.round_id, up_b[1][0], up_b[1][1], up_b[1][2], "1.2.3.4")
-    agg.submit(rnd_a.round_id, up_a[1][0], up_a[1][1], up_a[1][2], "1.2.3.4")
-    agg.finalize(rnd_a); agg.finalize(rnd_b)
+    # Interleave uploads; each routes by its round_id (and stages to its own temp prefix).
+    _stage(agg, rnd_b, up_b[0][0], up_b[0][1], up_b[0][2])
+    _stage(agg, rnd_a, up_a[0][0], up_a[0][1], up_a[0][2])
+    _stage(agg, rnd_b, up_b[1][0], up_b[1][1], up_b[1][2])
+    _stage(agg, rnd_a, up_a[1][0], up_a[1][1], up_a[1][2])
+    _finalize(agg, rnd_a)
+    _finalize(agg, rnd_b)
 
-    blob, version = agg.serve_global("m", "")
+    blob, version = _pull(agg)
     expected = (sum(p[KEY] for p in payloads_a) + sum(p[KEY] for p in payloads_b)) / 2  # two rounds of mean
     assert version == 2 and torch.allclose(delta.from_bytes(blob)[0][KEY], expected, atol=1e-2)
     print("PASS test_concurrent_cohorts_per_model")
@@ -180,18 +215,19 @@ def test_global_persists_across_restart(tmp_path):
     agg = Aggregator(str(tmp_path), k_min=2, k_target=2)
     rnd = _seal_with(agg, pubs)
     for masked, compat, spec_json in uploads:
-        agg.submit(rnd.round_id, masked, compat, spec_json, "1.2.3.4")
-    agg.finalize(rnd)
-    reloaded = Aggregator(str(tmp_path))                  # fresh instance reads the persisted blob
-    blob, version = reloaded.serve_global("m", "")
+        _stage(agg, rnd, masked, compat, spec_json)
+    _finalize(agg, rnd)
+    reloaded = Aggregator(str(tmp_path))                  # fresh instance serves from storage, no eager load
+    blob, version = _pull(reloaded)
     assert version == 1 and KEY in delta.from_bytes(blob)[0]
     print("PASS test_global_persists_across_restart")
 
 
 def test_s3_backend_round_trip(tmp_path, monkeypatch):
     # The scale-to-zero deploy keeps the global in S3-compatible object storage, not on the (ephemeral)
-    # container disk. Prove a fresh Aggregator — the cold-start-after-scale-to-zero analog — rehydrates
-    # the persisted global purely from the bucket, writing nothing to local disk.
+    # container disk, and STAGES uploads there too (multipart) then aggregates per-module via range-GET.
+    # Prove a fresh Aggregator — the cold-start-after-scale-to-zero analog — rehydrates the persisted
+    # global purely from the bucket, writing nothing to local disk.
     pytest.importorskip("boto3")
     pytest.importorskip("moto")
     import boto3
@@ -216,12 +252,13 @@ def test_s3_backend_round_trip(tmp_path, monkeypatch):
         agg = Aggregator(str(tmp_path), k_min=2, k_target=2)   # datadir is unused by the s3 backend
         rnd = _seal_with(agg, pubs)
         for masked, compat, spec_json in uploads:
-            agg.submit(rnd.round_id, masked, compat, spec_json, "1.2.3.4")
-        agg.finalize(rnd)
+            _stage(agg, rnd, masked, compat, spec_json)
+        _finalize(agg, rnd)
 
         reloaded = Aggregator(str(tmp_path))               # cold start: rehydrate from object storage only
-        blob, version = reloaded.serve_global("m", "")
-        assert version == 1 and KEY in delta.from_bytes(blob)[0]
+        blob, version = _pull(reloaded)
+        expected = sum(p[KEY] for p in payloads) / 2
+        assert version == 1 and torch.allclose(delta.from_bytes(blob)[0][KEY], expected, atol=1e-2)
         assert not list(tmp_path.iterdir())                # s3 mode never touches local disk
     print("PASS test_s3_backend_round_trip")
 
@@ -237,7 +274,7 @@ def test_dp_bootstrap_accumulates(tmp_path):
     d2 = {KEY: torch.randn(6, 4) * 0.05}
     assert agg.submit_dp("m", d1, "1.1.1.1", now=0.0) == "ok"
     assert agg.submit_dp("m", d2, "2.2.2.2", now=1.0) == "ok"
-    blob, version = agg.serve_global("m", "")
+    blob, version = _pull(agg)
     tensors, _ = delta.from_bytes(blob)
     assert version == 2 and torch.allclose(tensors[KEY], d1[KEY] + d2[KEY], atol=1e-2)
     print("PASS test_dp_bootstrap_accumulates")
@@ -245,14 +282,26 @@ def test_dp_bootstrap_accumulates(tmp_path):
 
 def test_dp_bootstrap_norm_bound_and_rejects(tmp_path):
     agg = Aggregator(str(tmp_path), clip_norm=1.0, eta=1.0)
-    big = {KEY: torch.randn(6, 4) * 5.0}                       # ‖ΔW‖ ≫ 1 ⇒ server clips to clip_norm
-    assert agg.submit_dp("m", big, "1.1.1.1", now=0.0) == "ok"
-    tensors, _ = delta.from_bytes(agg.serve_global("m", "")[0])
-    assert float(torch.linalg.vector_norm(tensors[KEY])) <= 1.0 + 1e-3
+    big = {KEY: torch.randn(6, 4) * 5.0}                       # ‖ΔW‖ ≫ 1 ⇒ over bound ⇒ void
+    assert agg.submit_dp("m", big, "1.1.1.1", now=0.0) == "norm exceeded"
+    assert _pull(agg) is None                                 # nothing folded
+    small = {KEY: torch.randn(6, 4) * 0.05}                   # within bound ⇒ folds, establishes G
+    assert agg.submit_dp("m", small, "1.1.1.1", now=1.0) == "ok"
     # a key whose shape disagrees with the established global is refused (would corrupt the sum)
-    assert agg.submit_dp("m", {KEY: torch.randn(8, 4)}, "1.1.1.1", now=1.0) == "shape mismatch"
-    assert agg.submit_dp("m", {KEY: torch.full((6, 4), float("nan"))}, "1.1.1.1", now=1.0) == "non-finite delta"
+    assert agg.submit_dp("m", {KEY: torch.randn(8, 4)}, "1.1.1.1", now=2.0) == "shape mismatch"
+    assert agg.submit_dp("m", {KEY: torch.full((6, 4), float("nan"))}, "1.1.1.1", now=3.0) == "non-finite delta"
     print("PASS test_dp_bootstrap_norm_bound_and_rejects")
+
+
+def test_dp_bootstrap_bf16(tmp_path):
+    # The real client uploads bf16 ΔW (densify casts to the factor dtype); the staged per-module reader
+    # must read bf16 back. f32 tests don't exercise that path.
+    agg = Aggregator(str(tmp_path), eta=1.0, clip_norm=10.0)
+    dW = {KEY: (torch.randn(6, 4) * 0.05).to(torch.bfloat16)}
+    assert agg.submit_dp("m", dW, "1.1.1.1", now=0.0) == "ok"
+    tensors, _ = delta.from_bytes(_pull(agg)[0])
+    assert torch.allclose(tensors[KEY], dW[KEY].float(), atol=1e-2)   # bf16 round-trip precision
+    print("PASS test_dp_bootstrap_bf16")
 
 
 def test_mode_flips_at_density_threshold(tmp_path):
@@ -271,6 +320,13 @@ def test_default_quorum_is_three(tmp_path):
     agg = Aggregator(str(tmp_path))
     assert agg.k_min == 3 and agg.k_target == 5
     print("PASS test_default_quorum_is_three")
+
+
+def test_absent_global(tmp_path):
+    assert store.open_global_reader(str(tmp_path), "nope") is None   # never-folded model ⇒ None, not a crash
+    assert store.open_global_stream(str(tmp_path), "nope") is None
+    assert store.load_version(str(tmp_path), "nope") == 0
+    print("PASS test_absent_global")
 
 
 # --- HTTP wire layer + seal barrier ----------------------------------------------------------
@@ -338,7 +394,8 @@ if __name__ == "__main__":
     d = pathlib.Path(tempfile.mkdtemp())
     test_aggregator_recovers_mean(d / "a"); test_two_rounds_accumulate(d / "b")
     test_dropout_voids_round(d / "c"); test_subquorum_register_fails(d / "d")
-    test_norm_bound_clips_aggregate(d / "e"); test_rejects_bad_uploads(d / "f")
+    test_norm_bound_voids_aggregate(d / "e"); test_rejects_bad_uploads(d / "f")
     test_serve_global_cursor(d / "g"); test_global_persists_across_restart(d / "h")
     test_dp_bootstrap_accumulates(d / "i"); test_dp_bootstrap_norm_bound_and_rejects(d / "j")
     test_mode_flips_at_density_threshold(d / "k"); test_default_quorum_is_three(d / "l")
+    test_absent_global(d / "m"); test_dp_bootstrap_bf16(d / "n")
