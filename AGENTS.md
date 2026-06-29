@@ -48,7 +48,11 @@
   `busy_threshold` distinct contributors appear within `busy_window`, the model flips to **busy** mode
   (secure-agg only, no DP); quorum raised to **k_min=3 / k_target=5**. Client picks the path per
   federation in `contribute_delta`; no new client config. (Mode is "bootstrap"/"busy" — "busy" rather
-  than "dense" to avoid clashing with the dense-matrix sense of ΔW.)
+  than "dense" to avoid clashing with the dense-matrix sense of ΔW.) `GET /status` also returns a third
+  mode, **"unsupported"**, when the server's allowlist (`ROGER_AGG_MODELS`) excludes the model: the
+  client then skips that federation and the CLI warns the user (at startup before a session's gradient is
+  wasted, and again at quit, where it skips training but KEEPS the recorded runs). `federation_mode`
+  fail-soft-defaults to "busy", so an unreachable server is never mistaken for an unsupported model.
 - NOT yet built (see `readme.md` TODO + the federated-server-roadmap memory): the **server-side**
   roadmap — Shamir/double-mask dropout recovery (needs a client protocol change too; multi-round is
   intrinsic), central ground-truth-gradient anti-poison gate, membership auth (round-token/signature) —
