@@ -9,21 +9,20 @@ import roger.training.trainer as tr
 
 def test_grade_state_machine():
     st.clear_grade()
-    assert st.finish_score() is None                # None == nothing overridable
-    assert st.set_user_grade(0.9) is None           # nothing pending -> no-op (can't grade out of band)
+    assert st.grade_value() is None
 
-    st.finish(0.3)                                   # a finish opens the override window
-    assert st.finish_score() == 0.3
+    st.set_grade(0.3)
+    assert st.grade_value() == 0.3
 
-    assert st.set_user_grade("nonsense") is None     # unparseable -> no-op, grade unchanged
-    assert st.finish_score() == 0.3
+    assert st.set_grade("nonsense") is None          # unparseable → no-op, grade unchanged
+    assert st.grade_value() == 0.3
 
-    assert st.set_user_grade(0.9) == 0.9             # override sticks; window stays open for re-override
-    assert st.finish_score() == 0.9
-    assert st.set_user_grade(5) == 1.0               # clamped to [-1, 1]
+    assert st.set_grade(0.9) == 0.9                  # override sticks; window stays open for re-override
+    assert st.grade_value() == 0.9
+    assert st.set_grade(5) == 1.0                    # clamped to [-1, 1]
 
     st.clear_grade()                                 # new task closes the window
-    assert st.finish_score() is None
+    assert st.grade_value() is None
 
 
 def test_user_grade_shortfall(tmp_path, monkeypatch):

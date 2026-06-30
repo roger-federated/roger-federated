@@ -247,7 +247,7 @@ _TOOL_ICONS = {
     "run_command": "⚡", "stop_command": "⛔", "check_command": "🔍",
     "read_file": "📄", "write_file": "✏️",  "edit_file": "✏️",
     "search_file": "🔎", "search_dir": "🗂️",
-    "calculate": "🧮", "prompt_user": "💬", "finish": "✅",
+    "calculate": "🧮", "prompt_user": "💬",
     "load_tools": "🔧", "load_skill": "📚",
 }
 _DEFAULT_ICON = "⚙"
@@ -327,10 +327,6 @@ def render_tool_call(name: str, args: dict) -> None:
 
 def render_tool_result(name: str, result, args: dict = None) -> None:
     """Print a formatted panel (or concise intent line) for a tool result."""
-    # finish has no payload; the score is shown by render_tool_call
-    if name == "finish":
-        return
-
     # --- edit_file diff ---
     if name == "edit_file" and args and str(result).startswith("Replaced"):
         _render_diff(args.get("path", "?"), args.get("old", ""), args.get("new", ""))
@@ -491,21 +487,19 @@ class _RevertSuggest(AutoSuggest):
 
 
 class _GradeSuggest(AutoSuggest):
-    """Inline ghost text for `/grade`: once a finished task is overridable, completing the bare
-    command surfaces the model's current self-grade so the user can replace it (e.g. `de +0.40  ·
-    override self-grade`). get_grade() returns the pending grade, or None when nothing is overridable."""
-    def __init__(self, get_grade: Callable[[], float | None]):
-        self._get_grade = get_grade
+    """Inline ghost text for `/grade`: active while the previous task's grade window is open.
+    get_gradeable() returns True when /grade is accepted, False otherwise."""
+    def __init__(self, get_gradeable: Callable[[], bool]):
+        self._get_gradeable = get_gradeable
 
     def get_suggestion(self, buffer, document):
         text = document.text
         cmd = "/grade"
         if not text or not cmd.startswith(text.lower()):
             return None
-        g = self._get_grade()
-        if g is None:
+        if not self._get_gradeable():
             return None
-        return Suggestion(cmd[len(text):] + f" {g:+.2f}  ·  override self-grade")
+        return Suggestion(cmd[len(text):] + "  ·  grade this task")
 
 
 class _AnySuggest(AutoSuggest):

@@ -11,7 +11,8 @@ if not hasattr(_tu, "PreTrainedTokenizerBase"):
     _tu.PreTrainedTokenizerBase = transformers.PreTrainedTokenizerBase
 from lmformatenforcer.integrations.transformers import build_transformers_prefix_allowed_tokens_fn
 from collections.abc import Callable
-from roger.tools.std_tools import (get_standard_tools, finish_score, set_user_grade, clear_grade,
+from roger.tools.std_tools import (get_standard_tools, grade_value, set_grade, clear_grade,
+                                    set_gradeable, record_grade,
                                     pending_backups, apply_revert, maxsteps_checkin)
 from roger.tools.shell_tools import drain_finished_jobs, pending_jobs, terminate_jobs, shell_idioms
 from roger.loading.model_setup import find_gen_prompt, find_tool_res_id, find_tool_call_tokens, find_think_tokens
@@ -254,13 +255,12 @@ def _revert_preamble(backups) -> str:
 
 
 def _grade_preamble() -> str:
-    """Encourage overriding the self-grade (empty unless a finish is overridable). Escalates to an
-    urgent warning when the 10% rule would currently block the next training pass."""
-    g = finish_score()
-    if g is None:
+    """Offer /grade when a task just completed. Escalates when the 10% gate would block training."""
+    from roger.tools.std_tools import gradeable
+    if not gradeable():
         return ""
     from roger.training.trainer import user_grade_shortfall   # lazy: don't pull the trainer stack at import
-    hint = f"Roger self-graded {g:+.2f}. Type '/grade <n>' (-1..1) to override it."
+    hint = "Type '/grade <n>' (-1..1) to grade this task yourself."
     if user_grade_shortfall() > 0:
         hint = "Training is blocked due to insufficient user-graded trajectories. " + hint
     return hint
@@ -271,12 +271,13 @@ def _user_turn_preamble() -> str:
     return "\n".join(p for p in (_revert_preamble(pending_backups()), _grade_preamble()) if p)
 
 
-async def _await_user_turn(read_turn, trajectory, seg_start, checkpoint) -> str | None:
+async def _await_user_turn(read_turn, trajectory, seg_start) -> str | None:
     """Next user turn (None on Ctrl-D). Two non-obstructing commands, both staying in this loop:
       /revert[ 1,3]  undo changed files (penalised -n*W_REVERT over trajectory[seg_start:]);
-      /grade <n>     overwrite the model's self-grade for the just-finished task.
+      /grade <n>     pre-empt the model's self-grade for the just-finished task.
     Anything else is the user's next task. Backups persist across tasks (a partial revert keeps the
     rest), so the revert listing accumulates until each file is explicitly reverted."""
+    from roger.tools.std_tools import gradeable
     preamble = _user_turn_preamble()
     while True:
         nxt = await read_turn(preamble)
@@ -292,16 +293,9 @@ async def _await_user_turn(read_turn, trajectory, seg_start, checkpoint) -> str 
                 entry["reward"] -= n * reward_utils.W_REVERT
             preamble = _user_turn_preamble()                 # re-offer anything left
             continue
-        if finish_score() is not None and nxt.lower().startswith("/grade"):
-            old = finish_score()
-            new = set_user_grade(nxt[len("/grade"):].strip())
-            if new is not None:                              # unparseable → ignore (no-op)
-                # Self-grade was already broadcast over the segment, so apply only the delta, and
-                # re-checkpoint now (Ctrl-D doesn't re-save, so a quit would else lose the override).
-                for entry in trajectory[seg_start:]:
-                    entry["reward"] += new - old
-                checkpoint(user_graded=True)
-            preamble = _user_turn_preamble()                 # reflect the new grade / urgency
+        if gradeable() and nxt.lower().startswith("/grade"):
+            set_grade(nxt[len("/grade"):].strip())           # unparseable → no-op (grade stays None)
+            preamble = _user_turn_preamble()                 # reflect urgency / updated hint
             continue
         return nxt                          # moved on → backups stay pending for next time
 
@@ -391,16 +385,45 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
                  f"Project-specific facts (e.g., conventions, overview) go in {_proj_mem}.")
     mem_inner  = _build_inner_fn(processor.tokenizer, ["write_file", "edit_file"]) if enable_memory else None
     saving_mem = False
-    # Finish-nudge: run one turn seeded with a reasoning preamble; the name-enum stays unconstrained
-    _FIN_SEED = ("Now let me decide: did I just have an interaction that I should grade? If it was merely "
-                 "a conversation, no further action is needed. Instead, if it was a task where I emitted tool "
-                 "calls, I'll call `finish` with an honest self-eval score in the range [-1, 1]. In the latter case, "
-                 "I should weigh how directly and efficiently I reached the goal (preferring very few wasted, wrong, "
-                 "or redundant steps), and how accurate and complete the result is. 1 for a clean, fully-"
-                 "correct solve, around 0 for partial or clumsy, negative if I largely failed.")
-    nudging_finish = False
-    # Only a task warrants a finish-nudge
-    emitted_tool_call = False
+    # Silent post-task grade nudge: constrained to a single _grade(...) call, erased from context
+    # after via KV-cache rollback (see _run_grade_nudge below).
+    _GRADE_SEED = ("Let me honestly grade how well I completed the task that I just performed. "
+                   "I should weigh how directly and efficiently I reached the goal (preferring very few wasted, wrong, "
+                   "or redundant steps), and how accurate and complete the result is. 1 for a clean, fully-"
+                   "correct solve, around 0 for partial or clumsy, negative if I largely failed.")
+    grade_inner = _build_inner_fn(processor.tokenizer, ["_grade"])
+    emitted_tool_call = False   # tracks whether the current segment is a task (vs. pure conversation)
+    loop = asyncio.get_event_loop()
+
+    async def _run_grade_nudge(base_ids: torch.Tensor) -> None:
+        """Silent grade pass seeded on base_ids (incl. user reply when available).
+        Calls _grade(...) → sets grade_value(). Rolls past_key_values back afterwards."""
+        nonlocal past_key_values
+        seed = processor.tokenizer.encode(_GRADE_SEED, add_special_tokens=False) + [tool_tokens[0]]
+        ids  = torch.cat([base_ids, torch.tensor([seed], device=model.device, dtype=torch.long)], dim=1)
+        lp, _ = _make_constraint_processor(grade_inner, processor.tokenizer, tool_tokens, base_ids.shape[1])
+        if on_gen_start: on_gen_start(suppress=True)
+        _str = transformers.AsyncTextIteratorStreamer(processor.tokenizer, skip_prompt=True)
+        async def _consume():
+            async for _ in _str: pass
+        out, _ = await asyncio.gather(
+            loop.run_in_executor(None, lambda: model.generate(
+                input_ids=ids,
+                attention_mask=torch.ones(1, ids.shape[1], device=model.device, dtype=torch.long),
+                past_key_values=past_key_values, use_cache=True,
+                output_logits=False, return_dict_in_generate=True,
+                logits_processor=transformers.LogitsProcessorList([lp]),
+                max_new_tokens=32, streamer=_str,
+            )),
+            _consume()
+        )
+        if on_gen_end: on_gen_end()
+        await _execute_tools(out.sequences.squeeze()[base_ids.shape[1]:],
+                             processor.tokenizer, {"_grade": record_grade}, tool_tokens)
+        if isinstance(past_key_values, transformers.DynamicCache):
+            past_key_values.crop(base_ids.shape[1])
+        else:
+            past_key_values = None   # fall back to full prefix recompute on next generate
 
     # RAG: build corpus index once (deterministic; no re-indexing on mid-rollout edits)
     rag_index = build_index(rag_root or root or os.getcwd()) if enable_rag else None
@@ -411,10 +434,9 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
         f"cwd: {os.getcwd()}, platform: {sys.platform}, shell: {_shell}, date/time: {datetime.now(timezone.utc).isoformat()}\n"
         "You are an agentic assistant named 'Roger Federated'. Given a task, use the provided tools to accomplish it.\n"
         "You may issue multiple tool calls in one turn by emitting them back-to-back in JSON. "
-        "They will be executed sequentially, unless `background=True. "
-        "Call finish(...) whenever you complete an identified task, grading your own execution with "
-        "an honest self-evaluation score in [-1, 1], i.e., negative if the execution was inaccurate or suboptimal."
-        "The user will then give you their next turn.\n\n"
+        "They will be executed sequentially, unless `background=True`. "
+        "Prefer empirical discovery over recalling from your internal knowledge. "
+        "Stop emitting tool calls when the task is complete; the user will then give you their next turn.\n\n"
         + shell_idioms()
     )
     # Project instructions: AGENTS.md or CLAUDE.md from cwd (first-found-wins)
@@ -472,14 +494,6 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
                 [input_ids, torch.tensor([_seed], device=model.device, dtype=torch.long)], dim=1)
             new_idx = input_ids.shape[1] - 1    # slice from the open token; constraint engages immediately
             active_fn = mem_inner
-        elif nudging_finish:
-            # Seed the preamble inside the think channel (open id, no tool-open → finish stays optional).
-            _seed = ([think_tokens[0]] if think_tokens else []) \
-                    + processor.tokenizer.encode(_FIN_SEED, add_special_tokens=False)
-            input_ids = torch.cat(
-                [input_ids, torch.tensor([_seed], device=model.device, dtype=torch.long)], dim=1)
-            new_idx   = input_ids.shape[1]      # generate after the seed; seed is side-effect-only
-            active_fn = inner_fn                # unconstrained: finish optional
         else:
             new_idx   = input_ids.shape[1]
             active_fn = inner_fn
@@ -509,11 +523,7 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
         # Generate with a fresh streamer; _drain() forwards tokens to on_token concurrently.
         # suppress=saving_mem: that turn's open delim is seeded into the prompt (never streamed).
         if on_gen_start: on_gen_start(suppress=saving_mem)
-        # The nudge's think-open sits in the skipped prompt; feed it so its reasoning collapses.
-        if nudging_finish and think_tokens and on_token:
-            on_token(processor.tokenizer.decode([think_tokens[0]]))
         streamer = transformers.AsyncTextIteratorStreamer(processor.tokenizer, skip_prompt=True)
-        loop = asyncio.get_event_loop()
         async def _drain():
             async for chunk in streamer:
                 if on_token: on_token(chunk)
@@ -536,50 +546,40 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
         if results:
             emitted_tool_call = True
 
-        # Nudge turn is side-effect-only: keep its seeded tokens out of the trajectory.
-        if not nudging_finish:
-            # Step reward: sum auto_signal over all results in this turn, clamped to [-1, 1]
-            step_reward = max(-1.0, min(1.0,
-                sum(reward_utils.auto_signal(r) for _, r in results)))
-            n = int(new_ids.numel())          # new_ids drops a trailing EOS; align everything to n
-            # masks keyed by absolute position (not call order: speculative-decoding safe)
-            mask_log = [mask_by_pos.get(new_idx + t) for t in range(n)]
-            # no gen_token_ids: trainer recovers them as sequence[gen_start:gen_start+len(masks)]
-            entry = {
-                "gen_start": int(new_idx),
-                "old_logp": _old_logps(outputs.logits, mask_log, new_ids, model.device),
-                "masks": mask_log,
-                "reward": step_reward,
-            }
-            if pending_mm is not None:   # store the mm tensors for RL replay
-                entry["input_mm"] = {k: (v.detach().cpu() if torch.is_tensor(v) else v) for k, v in pending_mm.items()}
-                pending_mm = None
-            trajectory.append(entry)
+        # Step reward: sum auto_signal over all results in this turn, clamped to [-1, 1]
+        step_reward = max(-1.0, min(1.0,
+            sum(reward_utils.auto_signal(r) for _, r in results)))
+        n = int(new_ids.numel())          # new_ids drops a trailing EOS; align everything to n
+        # masks keyed by absolute position (not call order: speculative-decoding safe)
+        mask_log = [mask_by_pos.get(new_idx + t) for t in range(n)]
+        # no gen_token_ids: trainer recovers them as sequence[gen_start:gen_start+len(masks)]
+        entry = {
+            "gen_start": int(new_idx),
+            "old_logp": _old_logps(outputs.logits, mask_log, new_ids, model.device),
+            "masks": mask_log,
+            "reward": step_reward,
+        }
+        if pending_mm is not None:   # store the mm tensors for RL replay
+            entry["input_mm"] = {k: (v.detach().cpu() if torch.is_tensor(v) else v) for k, v in pending_mm.items()}
+            pending_mm = None
+        trajectory.append(entry)
 
-        # finish checkpoints this task: broadcast its self-eval grade over the task's steps
-        # (since the last user turn), then save the running episode. The user may still override
-        # the grade at the upcoming turn (see _await_user_turn), which re-checkpoints.
-        if any(name == "finish" for name, _ in results):
-            grade = finish_score() or 0.0
-            for entry in trajectory[seg_start:]:
-                entry["reward"] += grade
-            _checkpoint()
-        # Plain answer, no finish() → model thinks it's done. Nudge it once to self-evaluate
-        if not results and not (pending := pending_jobs()):
-            if not nudging_finish and emitted_tool_call:
-                nudging_finish = True
-                input_ids = gen_ids
-                continue
         # Mutually exclusive: bg-wait (another model turn) | task done (await user) | tool results.
-        if not results and pending: 
-            # Note: branch not immediately activated when a command is emitted with background=True, because it returns job id
-            await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
-            bg = _bg_msgs(processor, tool_res_id, model.device)
-            input_ids = torch.cat([gen_ids, bg], dim=1) if isinstance(bg, torch.Tensor) else gen_ids
-        elif not results or any(name == "finish" for name, _ in results):
-            # read_turn's placeholder reminds the user that Ctrl-D quits and saves memory
-            next_text = await _await_user_turn(read_turn, trajectory, seg_start, _checkpoint) if read_turn else None
-            if next_text is None:                 # Ctrl-D → one memory turn (if any), then end
+        pending = pending_jobs()
+        if not results and not pending:
+            # task done: no tool calls, no pending background jobs
+            seg_end = len(trajectory)
+            set_gradeable(emitted_tool_call)
+            next_text = await _await_user_turn(read_turn, trajectory, seg_start) if read_turn else None
+            set_gradeable(False)
+            if next_text is None:                 # Ctrl-D → grade (if task), memory turn, then end
+                if emitted_tool_call:
+                    user_preempted = grade_value() is not None
+                    if not user_preempted:
+                        await _run_grade_nudge(gen_ids)
+                    grade = grade_value() or 0.0
+                    for e in trajectory[seg_start:seg_end]: e["reward"] += grade
+                    _checkpoint(user_graded=user_preempted)
                 if enable_memory and not saving_mem:
                     saving_mem = True
                     input_ids = gen_ids
@@ -587,12 +587,24 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
                 break
             # Inject the user's turn as a prompt-free delta, retaining the KV-cache across tasks.
             input_ids = torch.cat([gen_ids, _user_turn_delta(processor.tokenizer, asst_msg, next_text, model.device)], dim=1)
-            seg_start = len(trajectory)           # next finish grades only this fresh segment
-            clear_grade()                         # close the previous task's grade-override window
-            i = 0                                 # fresh max-steps budget per task
-            nudging_finish = False                # arm a fresh finish-nudge for the next task
-            emitted_tool_call = False             # fresh segment: re-decide task-vs-conversation
+            if emitted_tool_call:
+                # Grade with the user's reply already visible; skip if user pre-empted with /grade.
+                user_preempted = grade_value() is not None
+                if not user_preempted:
+                    await _run_grade_nudge(input_ids)
+                grade = grade_value() or 0.0
+                for e in trajectory[seg_start:seg_end]: e["reward"] += grade
+                _checkpoint(user_graded=user_preempted)
+            seg_start = len(trajectory)           # new segment starts here
+            clear_grade()
+            i = 0
+            emitted_tool_call = False
             continue
+        elif not results and pending:
+            # Note: branch not immediately activated when a command is emitted with background=True, because it returns job id
+            await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+            bg = _bg_msgs(processor, tool_res_id, model.device)
+            input_ids = torch.cat([gen_ids, bg], dim=1) if isinstance(bg, torch.Tensor) else gen_ids
         else:
             tool_ids, pending_mm = _result_to_ids(results, processor, tool_res_id, model.device)  # mm (or None) → next generate
             bg = _bg_msgs(processor, tool_res_id, model.device)

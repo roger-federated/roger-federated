@@ -38,10 +38,10 @@ _policy_file: str = "command_policy.txt"   # kept here so write_file/_is_protect
 # Write backups — (original_path, backup_path) for end-of-rollout revert
 _backups: list[tuple[str, str]] = []
 
-# Self-eval grade [-1,1] from the most recent finish(); the rollout reads it via finish_score().
-# None == no grade pending (no finish since the last task / override window closed), so this one
-# var doubles as the "is there a grade the user can still override?" flag (see pending_grade()).
-_finish_score: float | None = None
+# Per-rollout grade state. grade_value() is None until the model or user grades the segment;
+# _gradeable opens/closes the /grade window for the current user turn.
+_grade_value: float | None = None
+_gradeable: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -151,47 +151,42 @@ def prompt_user(question: str) -> str:
     return _prompt_backend(question)
 
 
-def finish(score: float = 0.0) -> str:
-    """Call when you have finished a task.
-    Args:
-        score: Your self-evaluation in [-1, 1] of how well the task was accomplished
-               (1 = fully succeeded, 0 = unclear / partial, -1 = failed). This is the training
-               reward for the task, so grade truthfully.
-    """
-    # Coerce defensively: the decoding constraint doesn't type-check args.
-    global _finish_score
+def grade_value() -> float | None:
+    """Pending grade, or None when nothing has been graded yet / window is closed."""
+    return _grade_value
+
+
+def set_grade(score) -> float | None:
+    """Set the grade; returns the clamped value, or None on parse error."""
+    global _grade_value
     try:
-        _finish_score = max(-1.0, min(1.0, float(score)))
+        _grade_value = max(-1.0, min(1.0, float(score)))
     except (TypeError, ValueError):
-        _finish_score = 0.0
+        return None
+    return _grade_value
+
+
+def record_grade(score: float = 0.0) -> str:
+    """Tool handler for the silent grade nudge — sets grade_value() and returns '(done)'."""
+    set_grade(score)
     return "(done)"
 
 
-def finish_score() -> float | None:
-    """The most recent finish()'s self-eval grade, or None when no finish is overridable yet.
-    None is the 'nothing pending' flag driving the /grade ghost text; reward math reads it as
-    `finish_score() or 0.0`."""
-    return _finish_score
-
-
-def set_user_grade(score) -> float | None:
-    """User override of the pending grade. No-op -> None when nothing's pending or the value is
-    unparseable (so an accidental ghost-text accept can't grade). Leaves it pending on success so
-    the hint keeps offering re-override until the next task."""
-    global _finish_score
-    if _finish_score is None:
-        return None
-    try:
-        _finish_score = max(-1.0, min(1.0, float(score)))
-    except (TypeError, ValueError):
-        return None
-    return _finish_score
-
-
 def clear_grade() -> None:
-    """Close the override window at a fresh task segment so a stale grade hint doesn't linger."""
-    global _finish_score
-    _finish_score = None
+    """Close the grade window at a new task boundary."""
+    global _grade_value
+    _grade_value = None
+
+
+def gradeable() -> bool:
+    """True when the current user turn follows a task and /grade is active."""
+    return _gradeable
+
+
+def set_gradeable(value: bool) -> None:
+    """Open/close the /grade window (called by the rollout around _await_user_turn)."""
+    global _gradeable
+    _gradeable = value
 
 
 # ---------------------------------------------------------------------------
@@ -299,14 +294,15 @@ def get_standard_tools(prompt_backend=None, policy_file="command_policy.txt") ->
         prompt_backend: Optional callable(question: str) -> str replacing input().
         policy_file: Path to the command policy file for run_command.
     """
-    global _prompt_backend, _policy_file, _finish_score
+    global _prompt_backend, _policy_file, _grade_value, _gradeable
     if prompt_backend is not None:
         _prompt_backend = prompt_backend
     _policy_file = policy_file
 
     # Reset per-rollout state
     _backups.clear()
-    _finish_score = None
+    _grade_value = None
+    _gradeable   = False
 
     # Configure shell_tools (sets its own prompt/policy globals, resets _jobs)
     shell_tools.configure(prompt_backend=prompt_backend, policy_file=policy_file)
@@ -314,7 +310,7 @@ def get_standard_tools(prompt_backend=None, policy_file="command_policy.txt") ->
     shell = [shell_tools.run_command, shell_tools.stop_command, shell_tools.check_command]
     file  = [write_file, edit_file]
     web   = [web_search, web_fetch]
-    misc  = [prompt_user, finish]
+    misc  = [prompt_user]
     tools = shell + file + web + misc
     handlers = {fn.__name__: fn for fn in tools}
     return tools, handlers

@@ -1,4 +1,4 @@
-from transformers import AutoProcessor, AutoTokenizer, AutoModelForImageTextToText, BitsAndBytesConfig
+from transformers import AutoConfig, AutoProcessor, AutoTokenizer, AutoModelForCausalLM, AutoModelForImageTextToText, AutoModelForMultimodalLM, BitsAndBytesConfig
 from huggingface_hub import get_safetensors_metadata
 import os, torch
 import psutil
@@ -243,9 +243,24 @@ def _load_folded(model_id, deltas, model_cls, quant_cfg, dtype, fits, gpu_availa
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def _resolve_model_cls(model_id: str):
+    """Pick the right Auto model class from the HF config registry (no weights download).
+    Priority: MultimodalLM (any-to-any) > ImageTextToText > CausalLM."""
+    try:
+        cfg = AutoConfig.from_pretrained(model_id)
+    except Exception:
+        return AutoModelForCausalLM
+    for cls in [AutoModelForMultimodalLM, AutoModelForImageTextToText, AutoModelForCausalLM]:
+        if type(cfg) in cls._model_mapping:
+            return cls
+    return AutoModelForCausalLM
+
+
 def fetch_model(model_id="google/gemma-4-E2B-it", for_training: bool = False,
-                model_cls=AutoModelForImageTextToText,
+                model_cls=None,
                 weight_deltas: dict | None = None) -> tuple[AutoModelForImageTextToText, AutoProcessor]:
+    if model_cls is None:
+        model_cls = _resolve_model_cls(model_id)
     # `model_cls` lets non-generative models reuse this loader (e.g. the privacy filter's
     # AutoModelForTokenClassification) so they get the same VRAM-aware quant/placement.
     # `weight_deltas` (federated): a dense ΔW per module folded into the base before quantization.
@@ -276,7 +291,7 @@ def load_drafter(draft_id: str, target_tokenizer):
     from transformers import AutoTokenizer
     if AutoTokenizer.from_pretrained(draft_id).get_vocab() != target_tokenizer.get_vocab():
         return None
-    return fetch_model(draft_id)[0]
+    return fetch_model(draft_id, model_cls=AutoModelForCausalLM)[0]
 
 
 def uses_sliding_window(model) -> bool:

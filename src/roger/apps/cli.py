@@ -154,7 +154,7 @@ async def _repl(cfg: dict, root: str) -> None:
             console.print()
             console.print(preamble, style="dim", markup=False)  # paths may contain []; don't parse markup
         return await ui.read_prompt(session, suggest_revert=std_tools.pending_backups,
-                                    placeholder=placeholder, suggest_grade=std_tools.finish_score)
+                                    placeholder=placeholder, suggest_grade=std_tools.gradeable)
 
     # First task: read until a non-empty prompt (or quit on Ctrl-D)
     while True:

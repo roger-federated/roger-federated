@@ -112,8 +112,11 @@ and instruction files (`AGENTS.md`/`CLAUDE.md`) are still read from the project.
 - No manual env patching needed: lm-format-enforcer 0.11.3 imports `PreTrainedTokenizerBase` from
   `transformers.tokenization_utils`, which transformers>=5.11 removed — a compat shim in
   `agency/rollout_utils.py` re-exposes it before the integration import, so any install just works.
-- Default model `google/gemma-4-E2B-it` is **5.12B** params (not 2B); dev box GPU =
-  RTX 1000 Ada, 6.44 GB VRAM (bf16 supported).
+- Shipped default model is `OBLITERATUS/Gemma-4-12B-OBLITERATED` with `google/gemma-4-12B-it-assistant`
+  (1B despite the name) as the default speculative-decoding drafter. The default federation only
+  accepts gemma-4 bases. The small `google/gemma-4-E2B-it` (**5.12B** params, not 2B) is the
+  low-VRAM experimentation fallback; dev box GPU = RTX 1000 Ada, 6.44 GB VRAM (bf16 supported), so
+  the 12B default won't fit there — test against E2B locally.
 - Install/run for end users: `uv tool install . --torch-backend auto` then `roger`; or
   `uvx --from . --torch-backend auto roger`. Tests: `conda run -n roger python -m pytest tests/`.
 
