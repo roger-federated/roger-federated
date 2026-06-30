@@ -1,5 +1,5 @@
 {
-  "model_id": "google/gemma-4-E2B-it",
+  "model_id": "OBLITERATUS/Gemma-4-12B-OBLITERATED",
   "max_steps": 10,
   "max_new_tokens": 4096,
   "enable_rag": true,
@@ -7,8 +7,10 @@
   "enable_skills": true,
   "enable_memory": true,
   "verbose": false,
-  "draft_model": "",
+  "draft_model": "google/gemma-4-12B-it-assistant",
   "train_every": 8,
   "contribute": true,
-  "federations": []
+  "federations": [
+    "https://rogeragg06d9ff26-roger-aggregator.functions.fnc.nl-ams.scw.cloud"
+  ]
 }
