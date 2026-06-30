@@ -124,7 +124,7 @@ async def _repl(cfg: dict, root: str) -> None:
                       "attention (its KV-cache can't be cropped). Pass --draft-model for a drafter.[/yellow]")
     else:
         console.print("[yellow]No draft_model set; using n-gram prompt-lookup. Pass --draft-model "
-                      "(auto-saved to config) for faster speculative decoding.[/yellow]")
+                      "(or set \"draft_model\" in the config) for faster speculative decoding.[/yellow]")
     # Decode delimiter token-ids back to strings for the text renderer; derive think-channel once
     tool_delims  = tuple(tokenizer.decode([t]) for t in model_setup.find_tool_call_tokens(tokenizer))
     _think_ids   = model_setup.find_think_tokens(tokenizer)
@@ -249,8 +249,9 @@ def main() -> None:
     parser.add_argument("--verbose",        action="store_true", help="Expand thinking blocks")
     parser.add_argument("--no-contribute",  action="store_true",
                         help="Leech mode: pull the federated model but share no gradients this run")
-    parser.add_argument("--federation",     action="append", metavar="URL", dest="federation",
-                        help="Add a federation base URL for this run (repeatable)")
+    # Federation servers are managed only via the "federations" list in ~/.roger/config.json
+    # (no flag): the source of truth is the config, so a per-run flag can't silently append to or
+    # shadow the default server.
     # Optional `train` subcommand; bare `roger` (cmd=None) still launches the chat REPL.
     sub = parser.add_subparsers(dest="cmd")
     p_train = sub.add_parser("train", help="Run a LoRA REINFORCE++ update over recorded runs")
@@ -259,16 +260,11 @@ def main() -> None:
     p_train.add_argument("--lr",     type=float, default=1e-5, help="LoRA learning rate")
     args = parser.parse_args()
 
-    # Load config; apply flag overrides
+    # Load config; apply flag overrides. Every flag is a per-run override only — none are written
+    # back to ~/.roger/config.json. To change a setting permanently, edit the config file.
     cfg = config.load()
-    # --draft-model is persisted (unlike the other per-run flags): setting it once carries to
-    # future sessions. Saved before the transient overrides so only draft_model is written.
-    if args.draft_model:
-        cfg["draft_model"] = args.draft_model
-        config.save(cfg)
-    first_run = not os.path.exists(config.path())  # path existed before load() — inaccurate here;
-    # (first-run detection: load() creates the file, so check size afterwards instead)
     if args.model:          cfg["model_id"]      = args.model
+    if args.draft_model:    cfg["draft_model"]    = args.draft_model
     if args.max_steps:      cfg["max_steps"]      = args.max_steps
     if args.max_new_tokens: cfg["max_new_tokens"] = args.max_new_tokens
     if args.no_rag:         cfg["enable_rag"]     = False
@@ -276,7 +272,6 @@ def main() -> None:
     if args.no_memory:      cfg["enable_memory"]  = False
     if args.verbose:        cfg["verbose"]         = True
     if args.no_contribute:  cfg["contribute"]      = False
-    if args.federation:     cfg["federations"]     = list(cfg.get("federations", [])) + args.federation
 
     # Console output policy (before any model fetch so download bars are suppressed)
     _configure_output(cfg["verbose"])
@@ -312,6 +307,14 @@ def main() -> None:
     # Federated: nudge a leech, then download + persist the day's cumulative global once on first
     # startup. It's folded into the base at model-load time (in _repl). Inert without a federation.
     from roger.federated import client as fed_client
+    # Warn if the user has dropped the default federation server: without it they pull no community
+    # updates and run the bare base model, so model quality is meaningfully worse.
+    _defaults = config.default_federations()
+    if _defaults and not any(f in cfg.get("federations", []) for f in _defaults):
+        console.print("[yellow]⚠ You're not partaking in the default federation server, so you "
+                      "won't pull its updates and will experience degraded model "
+                      f"performance. Add it back to \"federations\" in {config.path()}: "
+                      f"{_defaults[0]}[/yellow]")
     if fed_client.is_leeching(cfg):
         console.print("[yellow]🪱 Leech mode: you're pulling the federation's model but contributing "
                       "nothing back. Set \"contribute\": true in ~/.roger/config.json to pull your "
