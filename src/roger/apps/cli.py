@@ -106,9 +106,8 @@ async def _repl(cfg: dict, root: str) -> None:
         model, processor = fetch_model(cfg["model_id"], weight_deltas=global_deltas)
         # Speculative decoding: a user-set draft_model (must share the target's tokenizer) is used
         # as the assistant model; otherwise fall back to model-free n-gram prompt-lookup.
-        # On sliding-window models, speculative decoding forces a full (non-evicting) KV cache so the
-        # cache can be rolled back on rejected candidates — VRAM grows with the session instead of being
-        # window-bounded. Off by default on sliding models ("auto"); set "speculative": true to opt in.
+        # Off by default on sliding-window models ("auto") as it adds output_hidden_states overhead;
+        # set "speculative": true to opt in.
         draft_id = cfg.get("draft_model")
         sliding  = model_setup.uses_sliding_window(model)
         spec     = cfg.get("speculative", "auto")
@@ -120,8 +119,8 @@ async def _repl(cfg: dict, root: str) -> None:
     tokenizer = processor.tokenizer
     if not speculate:
         if sliding:
-            console.print("[dim]Speculative decoding has been turned off. "
-                          "To forcibly enable it, set \"speculative\": true in the config (higher VRAM).[/dim]")
+            console.print("[dim]Speculative decoding off (sliding-window model). "
+                          "Set \"speculative\": true in the config to enable it.[/dim]")
     elif drafter:
         if sliding:
             console.print("[dim]Speculative decoding: drafter active.[/dim]")

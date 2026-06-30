@@ -303,32 +303,38 @@ def uses_sliding_window(model) -> bool:
     return lt is None or any("sliding" in str(t) for t in lt)
 
 
-def _patch_dynamic_full_cache():
-    """Fix transformers' dynamic_full bug: for assisted/contrastive decoding it sets
-    cache_implementation='dynamic_full' intending to build a full (croppable) DynamicCache, but
-    utils.py:1911 still passes the model config → DynamicCache builds sliding layers → crop() raises.
-    This patch runs after the original and replaces a sliding-layer cache with a truly full one.
-    Self-deactivating: when upstream fixes the bug the produced cache has no sliding layers, the guard
-    is false, and the patch is a no-op. Safe to leave installed permanently.
-    NOTE: this is an upstream bug to report to huggingface/transformers."""
-    import transformers
-    from transformers import DynamicCache
+def _patch_sliding_crop():
+    """Make DynamicSlidingWindowLayer.crop() work for small rollbacks (speculative rejection, grade nudge).
+
+    The layer evicts tokens at update time (keeps only sliding_window-1), so the stock crop() raises
+    once cumulative_length >= sliding_window — even for a 1-token rollback. But the physical buffer
+    always contains the most-recent tokens, so a crop that stays within it is safe: truncate the tensor
+    and update cumulative_length (absolute position, unlike the base class which tracks physical length).
+    Crops deeper than the physical buffer (>sliding_window tokens into the past) still raise — that
+    would require restoring evicted states.
+    NOTE: upstream transformers bug — dynamic_full path still builds sliding layers (utils.py:1911);
+    tracked in memory for potential upstream issue filing."""
     from transformers.cache_utils import DynamicSlidingWindowLayer
-    orig = transformers.generation.utils.GenerationMixin._prepare_cache_for_generation
 
-    def _patched(self, generation_config, model_kwargs, *args, **kwargs):
-        orig(self, generation_config, model_kwargs, *args, **kwargs)
-        # Only intercept the assisted/contrastive path; other paths leave cache_implementation != dynamic_full.
-        if generation_config.cache_implementation != "dynamic_full":
+    def _crop(self, max_length: int) -> None:
+        if max_length < 0:
+            max_length = self.cumulative_length + max_length
+        if max_length >= self.cumulative_length:
             return
-        cache_name = "past_key_values"   # non-Mamba; Mamba models aren't sliding anyway
-        cache = model_kwargs.get(cache_name)
-        if not isinstance(cache, DynamicCache):
+        if not self.is_initialized:
             return
-        if any(isinstance(layer, DynamicSlidingWindowLayer) for layer in cache.layers):
-            # Replace with a config-free DynamicCache → lazy-initializes full DynamicLayers only
-            model_kwargs[cache_name] = DynamicCache()
+        physical = self.keys.shape[-2]
+        evicted  = self.cumulative_length - physical
+        if max_length < evicted:
+            raise ValueError(
+                f"Cannot crop DynamicSlidingWindowLayer to {max_length}: "
+                f"{evicted} tokens already evicted from the sliding window."
+            )
+        new_physical = max_length - evicted
+        self.keys   = self.keys[...,   :new_physical, :]
+        self.values = self.values[..., :new_physical, :]
+        self.cumulative_length = max_length   # abs position, NOT physical length (unlike base DynamicLayer)
 
-    transformers.generation.utils.GenerationMixin._prepare_cache_for_generation = _patched
+    DynamicSlidingWindowLayer.crop = _crop
 
-_patch_dynamic_full_cache()   # install once at import time
+_patch_sliding_crop()   # install once at import time
