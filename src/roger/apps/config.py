@@ -45,3 +45,9 @@ def save(cfg: dict) -> None:
 
 def path() -> str:
     return _config_path()
+
+
+def default_federations() -> list[str]:
+    """The federation server URLs that ship as the baseline default (apps/config.json).
+    Used to warn when a user has dropped the default server and so won't pull its updates."""
+    return list(_DEFAULTS.get("federations", []))
