@@ -2,20 +2,20 @@
 
 $\Huge \textcolor{#58a6ff}{R}\textcolor{#6f9bf5}{o}\textcolor{#8a8ef5}{g}\textcolor{#a371f7}{e}\textcolor{#b87ae0}{r}\ \textcolor{#cd7ac0}{F}\textcolor{#e07a9e}{e}\textcolor{#f0883e}{d}\textcolor{#eea14a}{e}\textcolor{#ecb957}{r}\textcolor{#e8cf63}{a}\textcolor{#d9cf6e}{t}\textcolor{#b9c97a}{e}\textcolor{#94c285}{d}$
 
-<strong>Building the world's first <i>true</i> agent together with the community, using $\textcolor{#58a6ff}{\textsf{\textbf{federated}}}$ $\textcolor{#f0883e}{\textsf{\textbf{local}}}$ $\textcolor{#a371f7}{\textsf{\textbf{reinforcement learning}}}$</strong>
+<strong>Building the world's first <i>true</i> agent together with the community, using $\textcolor{#a371f7}{\textsf{\textbf{federated}}}$ $\textcolor{#f0883e}{\textsf{\textbf{local}}}$ $\textcolor{#b9c97a}{\textsf{\textbf{reinforcement learning}}}$</strong>
+
+═════════════════════════════════════════════════════════════
 
 </div>
 
----
----
-
 ### Overview
-The limitations of the AI transition are surfacing as a result of [far-fetched financial assumptions](https://open.spotify.com/clip/5HzODEnWAegI2Z3NGmu7UV?si=wz0K4G-NSIyTcnPK_1lbBw), [closed models we cannot inspect nor steer](https://blog.mozilla.org/en/mozilla/mozilla-open-source-ai-strategy/), and generic promises that remain unattained. _Luckily, we are at a crossroads where you, the consumer can do better [with tiny models on your own hardware](https://newsletter.semianalysis.com/p/google-we-have-no-moat-and-neither)._
+The limitations of the AI transition are surfacing as a result of [far-fetched financial projections](https://futurumgroup.com/insights/ai-capex-2026-the-690b-infrastructure-sprint/), [closed models we cannot inspect nor steer](https://blog.mozilla.org/en/mozilla/mozilla-open-source-ai-strategy/), [and myopic hype that fails to recognize real adjacent progress](https://europe2031.ai/). _Luckily, we are at a crossroads where you, the consumer can do better [with tiny models on your own hardware](https://newsletter.semianalysis.com/p/google-we-have-no-moat-and-neither)._
 
 You and the community can now contribute to the next generation of AI. Not just an LLM with tools, but a purpose-trained agent that is inherently omni-modal. How? By *locally* finetuning a selected *open-source* foundation model on *agentic rollout data*, and subsequently *aggregating* the resulting encrypted model updates (not the data itself) securely with your selected *federations*.
 
----
----
+<div align="center">
+═════════════════════════════════════════════════════════════
+</div>
 
 ### Features
 On top of the basic agentic capabilities listed further [below](#progress--contributing), Roger adds the following.
@@ -27,8 +27,9 @@ On top of the basic agentic capabilities listed further [below](#progress--contr
 - **Scales to world models**: The same text-native, RL-safe interface extends from agency to world-models, which the federation can train collaboratively and deploy more cheaply than alternative centralized efforts.
 - **More than just software**: Federations, continuous model updating, and an exchange of community-trained adapters on top of basic MCP-driven agentic software make Roger a unique ecosystem that improves as more people contribute.
 
----
----
+<div align="center">
+═════════════════════════════════════════════════════════════
+</div>
 
 ### Installation
 
@@ -75,9 +76,11 @@ python -m venv .venv && source .venv/bin/activate && pip install -e .
 
 After installing, run `roger` from any terminal. First launch walks you through initial setup. Settings (including the model selection) can subsequently be adjusted in `~/.roger/config.json`.
 
+Any config key can be overridden for a single run with a flag, e.g. `roger --model <hf-id> --max-steps 20 --verbose`. To persist a setting, edit the config file. The default federation server currently only accepts Gemma-4 models, so to partake in gradient contribution you must stay on a Gemma-4 base. The smaller `E2B`/`E4B` variants perform significantly worse than the recommended default 12B model, so use them only for low-VRAM experimentation.
+
 **MCP servers:**
 
-To give Roger additional functionality, include MCP servers in `~/.roger/mcp.json`. It uses the standard `mcpServers`-format, and the exact schema can therefore be found at your MCP server's provider.
+It is strongly recommended to introduce additional functionalities and tools to Roger by extending the list of MCP services in `~/.roger/mcp.json`. This file uses the standard `mcpServers`-format, and the exact schema can therefore be found at your MCP server's provider.
 
 <details>
 <summary>Popular servers to get you started</summary>
@@ -186,8 +189,9 @@ Drop any of the entries below or more into `~/.roger/mcp.json` and restart Roger
 ```
 </details>
 
----
----
+<div align="center">
+═════════════════════════════════════════════════════════════
+</div>
 
 ### Use cases
 Roger has the potential to perform any digital task. In other words, there is no limit to what you can do with (or delegate to) Roger. Here is a severely non-exhaustive list of examples.
@@ -217,8 +221,9 @@ Roger has the potential to perform any digital task. In other words, there is no
 ...
 </details>
 
----
----
+<div align="center">
+═════════════════════════════════════════════════════════════
+</div>
 
 ### Progress & contributing
 The ecosystem is still in development. Below is a non-exhaustive list of to-do items. Of course, we are an open-source community, so **feel free to open an issue or pull request!**
