@@ -301,3 +301,34 @@ def uses_sliding_window(model) -> bool:
         return False
     lt = getattr(cfg, "layer_types", None)
     return lt is None or any("sliding" in str(t) for t in lt)
+
+
+def _patch_dynamic_full_cache():
+    """Fix transformers' dynamic_full bug: for assisted/contrastive decoding it sets
+    cache_implementation='dynamic_full' intending to build a full (croppable) DynamicCache, but
+    utils.py:1911 still passes the model config → DynamicCache builds sliding layers → crop() raises.
+    This patch runs after the original and replaces a sliding-layer cache with a truly full one.
+    Self-deactivating: when upstream fixes the bug the produced cache has no sliding layers, the guard
+    is false, and the patch is a no-op. Safe to leave installed permanently.
+    NOTE: this is an upstream bug to report to huggingface/transformers."""
+    import transformers
+    from transformers import DynamicCache
+    from transformers.cache_utils import DynamicSlidingWindowLayer
+    orig = transformers.generation.utils.GenerationMixin._prepare_cache_for_generation
+
+    def _patched(self, generation_config, model_kwargs, *args, **kwargs):
+        orig(self, generation_config, model_kwargs, *args, **kwargs)
+        # Only intercept the assisted/contrastive path; other paths leave cache_implementation != dynamic_full.
+        if generation_config.cache_implementation != "dynamic_full":
+            return
+        cache_name = "past_key_values"   # non-Mamba; Mamba models aren't sliding anyway
+        cache = model_kwargs.get(cache_name)
+        if not isinstance(cache, DynamicCache):
+            return
+        if any(isinstance(layer, DynamicSlidingWindowLayer) for layer in cache.layers):
+            # Replace with a config-free DynamicCache → lazy-initializes full DynamicLayers only
+            model_kwargs[cache_name] = DynamicCache()
+
+    transformers.generation.utils.GenerationMixin._prepare_cache_for_generation = _patched
+
+_patch_dynamic_full_cache()   # install once at import time

@@ -106,22 +106,29 @@ async def _repl(cfg: dict, root: str) -> None:
         model, processor = fetch_model(cfg["model_id"], weight_deltas=global_deltas)
         # Speculative decoding: a user-set draft_model (must share the target's tokenizer) is used
         # as the assistant model; otherwise fall back to model-free n-gram prompt-lookup.
+        # On sliding-window models, speculative decoding forces a full (non-evicting) KV cache so the
+        # cache can be rolled back on rejected candidates — VRAM grows with the session instead of being
+        # window-bounded. Off by default on sliding models ("auto"); set "speculative": true to opt in.
         draft_id = cfg.get("draft_model")
-        drafter = model_setup.load_drafter(draft_id, processor.tokenizer) if draft_id else None
-        sliding = model_setup.uses_sliding_window(model)
-        # n-gram crashes on sliding-window models because it crops KV-cache
-        gen_kwargs = ({"assistant_model": drafter} if drafter # TODO: may still crash due to sliding window
-                        else {} if sliding
-                        else {"prompt_lookup_num_tokens": 10})
+        sliding  = model_setup.uses_sliding_window(model)
+        spec     = cfg.get("speculative", "auto")
+        speculate = spec if isinstance(spec, bool) else not sliding   # auto: off on sliding
+        drafter   = (model_setup.load_drafter(draft_id, processor.tokenizer) if draft_id else None) if speculate else None
+        gen_kwargs = ({"assistant_model": drafter} if drafter
+                        else {"prompt_lookup_num_tokens": 10} if speculate
+                        else {})
     tokenizer = processor.tokenizer
-    if drafter:
-        pass  # user's draft model in use
+    if not speculate:
+        if sliding:
+            console.print("[dim]Speculative decoding has been turned off. "
+                          "To forcibly enable it, set \"speculative\": true in the config (higher VRAM).[/dim]")
+    elif drafter:
+        if sliding:
+            console.print("[dim]Speculative decoding: drafter active.[/dim]")
+        # else: non-sliding drafter; nothing to flag
     elif draft_id:
         console.print(f"[yellow]draft_model '{draft_id}' has a different tokenizer than the target; "
-                      "ignoring it.[/yellow]")
-    elif sliding:
-        console.print("[yellow]n-gram speculative decoding disabled: model uses sliding-window "
-                      "attention (its KV-cache can't be cropped). Pass --draft-model for a drafter.[/yellow]")
+                      "falling back to n-gram prompt-lookup.[/yellow]")
     else:
         console.print("[yellow]No draft_model set; using n-gram prompt-lookup. Pass --draft-model "
                       "(or set \"draft_model\" in the config) for faster speculative decoding.[/yellow]")

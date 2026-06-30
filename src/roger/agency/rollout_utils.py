@@ -421,7 +421,12 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
         await _execute_tools(out.sequences.squeeze()[base_ids.shape[1]:],
                              processor.tokenizer, {"_grade": record_grade}, tool_tokens)
         if isinstance(past_key_values, transformers.DynamicCache):
-            past_key_values.crop(base_ids.shape[1])
+            try:
+                past_key_values.crop(base_ids.shape[1])
+            except ValueError:
+                # Sliding-window cache past its window: states evicted, can't roll back.
+                # Drop the cache; next generate recomputes from input_ids (grade seed absent there → erased).
+                past_key_values = None
         else:
             past_key_values = None   # fall back to full prefix recompute on next generate
 
@@ -432,10 +437,10 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
     _shell = "PowerShell" if os.name == "nt" else "/bin/sh"
     sys_content = (
         f"cwd: {os.getcwd()}, platform: {sys.platform}, shell: {_shell}, date/time: {datetime.now(timezone.utc).isoformat()}\n"
-        "You are an agentic assistant named 'Roger Federated'. Given a task, use the provided tools to accomplish it.\n"
+        "You are an agentic assistant named 'Roger Federated'. Use the provided tools to accomplish the task you are given.\n"
         "You may issue multiple tool calls in one turn by emitting them back-to-back in JSON. "
-        "They will be executed sequentially, unless `background=True`. "
-        "Prefer empirical discovery over recalling from your internal knowledge. "
+        "They will be executed sequentially, unless `background=True`.\n"
+        "Prefer empirical discovery over recalling from your internal knowledge.\n"
         "Stop emitting tool calls when the task is complete; the user will then give you their next turn.\n\n"
         + shell_idioms()
     )

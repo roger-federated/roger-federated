@@ -7,6 +7,7 @@
   "enable_skills": true,
   "enable_memory": true,
   "verbose": false,
+  "speculative": "auto",
   "draft_model": "google/gemma-4-12B-it-assistant",
   "train_every": 8,
   "contribute": true,
