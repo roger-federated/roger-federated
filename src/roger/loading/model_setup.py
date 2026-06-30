@@ -278,7 +278,7 @@ def fetch_model(model_id="google/gemma-4-E2B-it", for_training: bool = False,
     try:
         processor = AutoProcessor.from_pretrained(model_id)
     except (ValueError, OSError, KeyError):
-        processor = AutoTokenizer.from_pretrained(model_id)
+        processor = AutoTokenizer.from_pretrained(model_id, use_fast=True)
     return model, processor
 
 
