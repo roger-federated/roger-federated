@@ -1,21 +1,11 @@
-<div align="center">
-
-$\Huge \textcolor{#58a6ff}{R}\textcolor{#6f9bf5}{o}\textcolor{#8a8ef5}{g}\textcolor{#a371f7}{e}\textcolor{#b87ae0}{r}\ \textcolor{#cd7ac0}{F}\textcolor{#e07a9e}{e}\textcolor{#f0883e}{d}\textcolor{#eea14a}{e}\textcolor{#ecb957}{r}\textcolor{#e8cf63}{a}\textcolor{#d9cf6e}{t}\textcolor{#b9c97a}{e}\textcolor{#94c285}{d}$
-
-<strong>Building the world's first <i>true</i> agent together with the community, using $\textcolor{#a371f7}{\textsf{\textbf{federated}}}$ $\textcolor{#f0883e}{\textsf{\textbf{local}}}$ $\textcolor{#b9c97a}{\textsf{\textbf{reinforcement learning}}}$</strong>
-
-═════════════════════════════════════════════════════════════
-
-</div>
+![Roger Federated](assets/banner.PNG)
 
 ### Overview
 The limitations of the AI transition are surfacing as a result of [far-fetched financial projections](https://futurumgroup.com/insights/ai-capex-2026-the-690b-infrastructure-sprint/); [closed models we cannot inspect nor steer](https://blog.mozilla.org/en/mozilla/mozilla-open-source-ai-strategy/); [and myopic hype that fails to recognize real adjacent progress](https://europe2031.ai/). _Luckily, we are at a crossroads where you, the consumer, can do better [with tiny models on your own hardware](https://newsletter.semianalysis.com/p/google-we-have-no-moat-and-neither)._
 
 You and the community can now contribute to the next generation of AI. Not just an LLM with tools, but a purpose-trained agent that is inherently omni-modal. How? By *locally* finetuning a selected *open-source* foundation model on *agentic rollout data*, and subsequently *aggregating* the resulting encrypted model updates (not the data itself) securely with your selected *federations*.
 
-<div align="center">
-═════════════════════════════════════════════════════════════
-</div>
+![](assets/divider.PNG)
 
 ### Features
 On top of the basic agentic capabilities listed further [below](#progress--contributing), Roger adds the following.
@@ -27,13 +17,11 @@ On top of the basic agentic capabilities listed further [below](#progress--contr
 - **Scales to world models**: The same text-native, RL-safe interface extends from agency to world-models, which the federation can train collaboratively and deploy more cheaply than alternative centralized efforts.
 - **More than just software**: Federations, continuous model updating, and an exchange of community-trained adapters on top of basic MCP-driven agentic software make Roger a unique ecosystem that improves as more people contribute.
 
-<div align="center">
-═════════════════════════════════════════════════════════════
-</div>
+![](assets/divider.PNG)
 
 ### Installation
 
-First, download the repo and navigate to the folder:
+First, download the repo and navigate to the folder. For Windows users: install under WSL2 for to support Flash Attention 2 and get the best performance.
 
 ```bash
 git clone git@github.com:thijs-vanweezel/roger-federated.git # or extract from https://github.com/thijs-vanweezel/roger-federated/archive/refs/heads/main.zip
@@ -45,7 +33,7 @@ cd roger-federated
 - First run downloads the selected model (several GB) and writes settings under `~/.roger/config.json`. These can be changed at any time.
 - Linux: `apt install python3-tk` enables the native folder picker; otherwise a text-prompt fallback is used automatically.
 
-**Recommended:**
+**Recommended method:**
 
 Additionally requires [`uv`](https://docs.astral.sh/uv/getting-started/installation/) to be installed (provisions Python and isolates dependencies).
 
@@ -55,18 +43,6 @@ uv tool install . --torch-backend auto   # installs `roger` globally; auto-picks
 uvx --from . --torch-backend auto roger
 ```
 
-**Alternatives:**
-
-These methods additionally require Python 3.10 to be already installed.
-
-Isolated:
-```bash
-pipx install .
-```
-Classic venv:
-```bash
-python -m venv .venv && source .venv/bin/activate && pip install -e .
-```
 
 **GPU notes:**
   - `bitsandbytes` (4/8-bit quantization) is installed automatically only where PyPI ships a wheel: x86-64 Linux and Windows. On other CUDA platforms (e.g. aarch64 Jetson/GH200) install a preview wheel manually, e.g. `pip install --force-reinstall https://github.com/bitsandbytes-foundation/bitsandbytes/releases/download/continuous-release_main/bitsandbytes-1.33.7.preview-py3-none-manylinux_2_24_aarch64.whl`.
@@ -191,9 +167,7 @@ Drop any of the entries below or more into `~/.roger/mcp.json` and restart Roger
 ```
 </details>
 
-<div align="center">
-═════════════════════════════════════════════════════════════
-</div>
+![](assets/divider.PNG)
 
 ### Use cases
 Roger has the potential to perform any digital task. In other words, there is no limit to what you can do with (or delegate to) Roger. Here is a severely non-exhaustive list of examples.
@@ -223,9 +197,7 @@ Roger has the potential to perform any digital task. In other words, there is no
 ...
 </details>
 
-<div align="center">
-═════════════════════════════════════════════════════════════
-</div>
+![](assets/divider.PNG)
 
 ### Progress & contributing
 The ecosystem is still in development. Below is a non-exhaustive list of to-do items. Of course, we are an open-source community, so **feel free to open an issue or pull request!**
@@ -253,8 +225,8 @@ The ecosystem is still in development. Below is a non-exhaustive list of to-do i
 - [x] Set up gradient contributing and Bonawitz secure aggregation.
 - [x] Build the aggregation server: FedAvg, peer-key distribution, aggregate norm-bounding.
 - [x] Use DP without accountant until server is busy, then switch to SMPC.
-- [ ] Launch the default server as a scale-to-zero container on Koyeb with S3 storage.
-- [ ] <ins>Huzzah, it can now be shipped.</ins>
+- [x] Launch the default server as a scale-to-zero container on Scaleway with S3 storage.
+- [x] <ins>Huzzah, the beta version can now be shipped.</ins>
 
 Deferred:
 - [ ] Remote SSH execution.
