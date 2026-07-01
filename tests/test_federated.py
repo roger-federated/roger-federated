@@ -153,7 +153,7 @@ def test_is_leeching_and_should_train():
 
 def test_contribute_delta_uploads(monkeypatch):
     sent = []
-    monkeypatch.setattr(transport, "federation_mode", lambda url, mid: "busy")  # force the secure-agg path
+    monkeypatch.setattr(transport, "federation_status", lambda url, mid: {"mode": "busy"})  # force secure-agg
     monkeypatch.setattr(transport, "register_and_peers", lambda url, pub, mid: ("rid", [pub]))
     monkeypatch.setattr(transport, "contribute", lambda url, blob: sent.append((url, blob)) or "ok")
     # An accepted upload reports True so the caller may consume the runs.
@@ -178,7 +178,7 @@ def test_contribute_delta_bootstrap(monkeypatch):
     # In bootstrap mode the client skips registration entirely and uploads a single UNMASKED dense ΔW
     # via contribute_dp — the cold-start path. The blob must decode to a finite dense ΔW.
     dp_sent, registered = [], []
-    monkeypatch.setattr(transport, "federation_mode", lambda url, mid: "bootstrap")
+    monkeypatch.setattr(transport, "federation_status", lambda url, mid: {"mode": "bootstrap"})
     monkeypatch.setattr(transport, "register_and_peers", lambda url, pub, mid: registered.append(url))
     monkeypatch.setattr(transport, "contribute_dp", lambda url, blob: dp_sent.append((url, blob)) or "ok")
     assert fed_client.contribute_delta(_fake_delta(), {"federations": ["http://x"], "contribute": True}) is True
@@ -194,21 +194,47 @@ def test_contribute_delta_bootstrap(monkeypatch):
 
 def test_unsupported_model_skipped_and_reported(monkeypatch):
     # A federation whose allowlist excludes the model reports "unsupported": contribute_delta must NOT
-    # upload (no register, no contribute_dp), and unsupported_federations must flag it so the CLI warns.
+    # upload (no register, no contribute_dp), and unsupported_urls must flag it so the CLI warns.
     dp_sent, registered = [], []
     cfg = {"federations": ["http://x", "http://y"], "contribute": True, "model_id": "tiny"}
-    modes = {"http://x": "unsupported", "http://y": "bootstrap"}
-    monkeypatch.setattr(transport, "federation_mode", lambda url, mid: modes[url])
+    statuses = {"http://x": {"mode": "unsupported"}, "http://y": {"mode": "bootstrap"}}
+    monkeypatch.setattr(transport, "federation_status", lambda url, mid: statuses[url])
     monkeypatch.setattr(transport, "register_and_peers", lambda url, pub, mid: registered.append(url))
     monkeypatch.setattr(transport, "contribute_dp", lambda url, blob: dp_sent.append(url) or "ok")
     assert fed_client.contribute_delta(_fake_delta(), cfg) is True   # the supported fed still took it
     assert registered == [] and dp_sent == ["http://y"]             # x skipped, no upload attempted
-    assert fed_client.unsupported_federations(cfg) == ["http://x"]
+    assert fed_client.unsupported_urls(fed_client.probe_federations(cfg)) == ["http://x"]
     # All feds unsupported ⇒ nothing uploaded, every fed flagged (CLI skips training, keeps runs).
-    monkeypatch.setattr(transport, "federation_mode", lambda url, mid: "unsupported")
+    monkeypatch.setattr(transport, "federation_status", lambda url, mid: {"mode": "unsupported"})
     assert fed_client.contribute_delta(_fake_delta(), cfg) is False
-    assert fed_client.unsupported_federations(cfg) == ["http://x", "http://y"]
+    assert fed_client.unsupported_urls(fed_client.probe_federations(cfg)) == ["http://x", "http://y"]
     print("PASS test_unsupported_model_skipped_and_reported")
+
+
+def test_outdated_client_skipped_and_reported(monkeypatch):
+    # A federation whose min_client exceeds this build must be skipped exactly like an unsupported model:
+    # contribute_delta uploads nothing there, outdated_urls flags it, and a merely-higher latest_client
+    # is advisory-only (surfaced by newest_client, never blocks). A future min_client is set relative to
+    # the live CLIENT_VERSION so the test tracks version bumps.
+    from roger.federated import CLIENT_VERSION
+    dp_sent, registered = [], []
+    cfg = {"federations": ["http://old", "http://ok"], "contribute": True, "model_id": "tiny"}
+    statuses = {"http://old": {"mode": "bootstrap", "min_client": CLIENT_VERSION + 1},
+                "http://ok":  {"mode": "bootstrap", "latest_client": CLIENT_VERSION + 1}}
+    monkeypatch.setattr(transport, "federation_status", lambda url, mid: statuses[url])
+    monkeypatch.setattr(transport, "register_and_peers", lambda url, pub, mid: registered.append(url))
+    monkeypatch.setattr(transport, "contribute_dp", lambda url, blob: dp_sent.append(url) or "ok")
+    assert fed_client.contribute_delta(_fake_delta(), cfg) is True   # the compatible fed still took it
+    assert registered == [] and dp_sent == ["http://ok"]           # the too-new fed is skipped
+    probed = fed_client.probe_federations(cfg)
+    assert fed_client.outdated_urls(probed) == ["http://old"]
+    assert fed_client.unsupported_urls(probed) == []               # min_client mismatch != unsupported
+    assert fed_client.newest_client(probed) == CLIENT_VERSION + 1  # advisory notice fires
+    # An unreachable / pre-version server ({}) is never mistaken for outdated (fail-soft, no false block).
+    monkeypatch.setattr(transport, "federation_status", lambda url, mid: {})
+    empty = fed_client.probe_federations(cfg)
+    assert fed_client.outdated_urls(empty) == [] and fed_client.newest_client(empty) == 0
+    print("PASS test_outdated_client_skipped_and_reported")
 
 
 def test_maybe_daily_pull_persists_blob(tmp_path, monkeypatch):

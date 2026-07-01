@@ -28,6 +28,11 @@ Tip 1: Before starting a long-running task, plug in your computer and disable sl
 Tip 2: To avoid polluting the KV-cache, provide instructions incrementally and start a fresh session for new tasks.
 """
 
+# Shown when a federation reports this client is out of date. There is no PyPI release (readme.md):
+# roger is installed from a local clone, so the update is a git pull + reinstall of the tool. We can't
+# know where the user cloned it, so the instruction names the repo rather than a path.
+_UPDATE_CMD = "git pull && uv tool install . --reinstall   (in your roger-federated clone)"
+
 # ---------------------------------------------------------------------------
 # Console output policy — clean by default, raw under --verbose
 # ---------------------------------------------------------------------------
@@ -219,12 +224,15 @@ async def _repl(cfg: dict, root: str) -> None:
     if fed_client.should_train(cfg) and len(trainer._list_unconsumed(train_every)) >= train_every:
         feds = cfg.get("federations") or []
         # Don't burn the quit-time update on a gradient no federation will accept: if every configured
-        # federation's allowlist excludes this model, skip training but KEEP the runs (discard only ever
-        # happens on an accepted upload), so they're there once the user switches to a supported model.
-        if len(fed_client.unsupported_federations(cfg)) == len(feds):
-            console.print(f"[yellow]Skipping training: {cfg['model_id']} isn't accepted by your "
-                          "federation(s), so the gradient couldn't be shared. Your recorded runs are "
-                          "kept for when you switch to a supported model or federation.[/yellow]")
+        # federation would reject it — allowlist excludes this model, or requires a newer client than we
+        # speak — skip training but KEEP the runs (discard only ever happens on an accepted upload), so
+        # they're there once the user switches model / federation or updates the client.
+        statuses = fed_client.probe_federations(cfg)
+        blocked = set(fed_client.unsupported_urls(statuses)) | set(fed_client.outdated_urls(statuses))
+        if len(blocked) == len(feds):
+            console.print(f"[yellow]Skipping training: no configured federation will accept a gradient "
+                          f"for {cfg['model_id']} from this client (unsupported model, or the client is "
+                          "out of date). Your recorded runs are kept for next time.[/yellow]")
         else:
             with console.status("[bold]Training on recent runs…[/bold]", spinner="dots"):
                 stats = trainer.train(model_id=cfg["model_id"], reuse=(model, processor))
@@ -328,18 +336,30 @@ def main() -> None:
     if cfg.get("federations"):
         with console.status("[bold]Syncing federated model…[/bold]", spinner="dots"):
             fetched = fed_client.maybe_daily_pull(cfg)
-            unsupported = fed_client.unsupported_federations(cfg)
+            statuses = fed_client.probe_federations(cfg)   # one /status pass, reused for every verdict
+        feds = cfg["federations"]
+        unsupported = fed_client.unsupported_urls(statuses)
+        outdated = fed_client.outdated_urls(statuses)
         if fetched:
             console.print("[dim]Downloaded today's federation update.[/dim]")
         # Warn up front (before a session's worth of gradient is wasted) if a federation's allowlist
         # excludes the selected model: those feds won't take this session's gradient or serve updates.
         if unsupported:
-            feds = cfg["federations"]
             scope = ("None of your federations accept" if len(unsupported) == len(feds)
                      else f"{len(unsupported)} of your federations don't accept")
             console.print(f"[yellow]⚠ {scope} {cfg['model_id']}: {', '.join(unsupported)}. "
                           "Pick a supported model or federation to share gradients and receive its "
                           "updates.[/yellow]")
+        # Hard incompatibility: a federation requires a newer protocol than this build speaks, so it
+        # would reject our gradient. Block contributing to those feds (runs are kept, same as an
+        # unsupported model) and tell the user how to update. A merely-newer latest_client is advisory.
+        if outdated:
+            scope = ("None of your federations accept" if len(outdated) == len(feds)
+                     else f"{len(outdated)} of your federations no longer accept")
+            console.print(f"[yellow]⚠ Your roger client is out of date: {scope} this version's "
+                          f"gradients. Update to keep contributing:\n  {_UPDATE_CMD}[/yellow]")
+        elif fed_client.newest_client(statuses):
+            console.print(f"[dim]A newer roger client is available. Update with: {_UPDATE_CMD}[/dim]")
 
     # Root selection
     root = ui.select_root(os.getcwd())

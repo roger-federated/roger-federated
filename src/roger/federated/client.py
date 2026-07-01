@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 import torch
 from safetensors.torch import save as st_save
 
-from roger.federated import delta as delta_mod, secure_agg, transport
+from roger.federated import CLIENT_VERSION, delta as delta_mod, secure_agg, transport
 
 # Per-client L2 bound on the shared ΔW — the clipping step of DP-FedAvg (McMahan et al. 2018), here
 # applied within secure aggregation in the spirit of cpSGD (Agarwal et al. 2018). It is NOT
@@ -37,15 +37,33 @@ def is_leeching(cfg: dict) -> bool:
     return bool(cfg.get("federations")) and not cfg.get("contribute", True)
 
 
-def unsupported_federations(cfg: dict) -> list[str]:
-    """Configured federations whose allowlist excludes the current model_id (they report mode
-    "unsupported" at /status). Probed so the CLI can warn the user — at startup, before a whole
-    session's gradient is wasted, and again at quit if training would be skipped. Fail-soft: an
-    unreachable / pre-/status server defaults to "busy", so we only flag a *definite* rejection and
-    never false-warn on a network hiccup."""
+def probe_federations(cfg: dict) -> dict[str, dict]:
+    """One /status GET per configured federation (fail-soft to {}), keyed by URL. A single pass yields
+    every verdict the CLI needs — unsupported model, outdated client, update-available — so probing the
+    servers three times (startup) is avoided; the helpers below just read this dict."""
     model_id = cfg.get("model_id", "")
-    return [url for url in (cfg.get("federations") or [])
-            if transport.federation_mode(url, model_id) == "unsupported"]
+    return {url: transport.federation_status(url, model_id)
+            for url in (cfg.get("federations") or [])}
+
+
+def unsupported_urls(statuses: dict) -> list[str]:
+    """Feds whose allowlist excludes the model (mode "unsupported"): they won't take this session's
+    gradient or serve updates. Fail-soft {} reads as "busy", so only a *definite* rejection is flagged
+    and a network hiccup never false-warns."""
+    return [url for url, s in statuses.items() if s.get("mode", "busy") == "unsupported"]
+
+
+def outdated_urls(statuses: dict) -> list[str]:
+    """Feds whose min_client exceeds this build: our contribution would be rejected/misaggregated, so we
+    skip them exactly like an unsupported model (keeping the runs). Absent min_client (0, a pre-version
+    or unreachable server) never flags — same fail-soft as unsupported_urls."""
+    return [url for url, s in statuses.items() if CLIENT_VERSION < int(s.get("min_client", 0) or 0)]
+
+
+def newest_client(statuses: dict) -> int:
+    """Highest latest_client any fed advertises above our version (advisory update notice), else 0."""
+    latest = max((int(s.get("latest_client", 0) or 0) for s in statuses.values()), default=0)
+    return latest if latest > CLIENT_VERSION else 0
 
 
 def should_train(cfg: dict) -> bool:
@@ -87,9 +105,10 @@ def contribute_delta(delta: dict, cfg: dict) -> bool:
     secure = None                               # (compat, q, spec) for the busy path; built once on demand
     accepted = False
     for url in feds:
-        mode = transport.federation_mode(url, model_id)
-        if mode == "unsupported":
-            continue                            # allowlist excludes this model here; nothing to upload
+        st = transport.federation_status(url, model_id)
+        mode = st.get("mode", "busy")
+        if mode == "unsupported" or CLIENT_VERSION < int(st.get("min_client", 0) or 0):
+            continue                            # model not accepted here, or our client is too old: skip
         if mode == "bootstrap":
             # Cohort-free: noise the factors, clip, upload unmasked. Re-noised per federation.
             noisy = _clip(delta_mod.densify(delta, noise_z=DP_Z), CLIP_NORM)
