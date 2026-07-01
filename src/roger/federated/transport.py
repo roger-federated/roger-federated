@@ -6,12 +6,14 @@ misbehaving returns None / a status string rather than raising, so a sharing hic
 down the agent (same convention as the web_search/web_fetch tools).
 
 Endpoints (all under a federation's base URL, served over HTTPS):
-  GET  {url}/status?model_id= -> {mode: "bootstrap"|"busy"|"unsupported", ...}   (which aggregation
-                              regime this federation wants for the model — async DP while sparse,
-                              secure-agg cohorts once busy, or "unsupported" when the federation's
-                              allowlist excludes the model; probed before contributing so a cold-start
-                              client skips the cohort barrier instead of 503-ing on it, and so the CLI
-                              can warn on an unsupported model before wasting a session's gradient)
+  GET  {url}/status?model_id= -> {mode: "bootstrap"|"busy"|"unsupported", min_client, latest_client, ...}
+                              (which aggregation regime this federation wants for the model — async DP
+                              while sparse, secure-agg cohorts once busy, or "unsupported" when the
+                              federation's allowlist excludes the model; probed before contributing so a
+                              cold-start client skips the cohort barrier instead of 503-ing on it, and so
+                              the CLI can warn on an unsupported model before wasting a session's gradient.
+                              min_client/latest_client advertise the protocol version this federation
+                              requires/prefers, so an out-of-date client self-skips + nudges an update)
   POST {url}/round/register   {model_id, pubkey(hex)} -> {peers: [hex, ...]}   (server distributes
                               the round's peer X25519 public keys; keys are collected centrally)
   POST {url}/contribute       octet-stream = the masked, packed contribution -> 200
@@ -66,17 +68,24 @@ def load_global(url: str) -> bytes | None:
         return None
 
 
-def federation_mode(url: str, model_id: str) -> str:
-    """Ask which regime this federation wants for `model_id`: async DP-bootstrap uploads ("bootstrap"),
-    secure-agg cohorts ("busy"), or "unsupported" when its allowlist excludes the model. Fail-soft to
-    "busy" so an unreachable server, or an older one that predates /status, keeps the existing
-    secure-aggregation behaviour (and is never mistaken for an unsupported model)."""
+def federation_status(url: str, model_id: str) -> dict:
+    """The full /status response for `model_id`: {mode, k_min, k_target, min_client, latest_client}.
+    Fail-soft to {} so an unreachable server, or an older one that predates a field, yields the safe
+    defaults its callers apply (mode "busy", no version opinion) instead of raising."""
     try:
         r = httpx.get(f"{url.rstrip('/')}/status", timeout=_TIMEOUT, params={"model_id": model_id})
         r.raise_for_status()
-        return r.json().get("mode", "busy")
+        return r.json()
     except Exception:
-        return "busy"
+        return {}
+
+
+def federation_mode(url: str, model_id: str) -> str:
+    """Which regime this federation wants for `model_id`: async DP-bootstrap uploads ("bootstrap"),
+    secure-agg cohorts ("busy"), or "unsupported" when its allowlist excludes the model. Fail-soft to
+    "busy" so an unreachable / pre-/status server keeps the existing secure-aggregation behaviour (and
+    is never mistaken for an unsupported model)."""
+    return federation_status(url, model_id).get("mode", "busy")
 
 
 def contribute_dp(url: str, blob: bytes) -> str:
