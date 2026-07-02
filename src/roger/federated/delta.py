@@ -18,19 +18,27 @@ from safetensors.torch import load as st_load, save as st_save
 
 
 def _dp_noise(A, B, z: float, generator):
-    """Perturb both LoRA factors before B@A (the bootstrap DP step). ΔW is rank-r, so noising the
-    factors keeps the noise in that signal subspace instead of over all out·in dense coords — far less
-    SNR loss. Both factors, else it's projectable out of one. Per-factor σ = z·rms(factor), so z is a
-    relative multiplier rather than an absolute tied to a model's weight scale."""
-    def n(t):
-        sigma = z * t.pow(2).mean().sqrt()      # rms of this (pre-clip) factor
-        return t + torch.randn(t.shape, generator=generator) * sigma
-    return n(A), n(B)
+    """Additive DP-bootstrap noise for B@A: B@N_A + N_B@A only — the linear terms of perturbing both
+    factors, not the full (B+N_B)@(A+N_A) product. The dropped N_B@N_A cross term is a product of two
+    independent Gaussians, which is itself not Gaussian (heavy-tailed, Bessel-K shaped) — keeping it
+    would make the dense noise non-Gaussian and add variance for no protection benefit. B@N_A and N_B@A
+    alone already keep both row(A) and col(B) unpredictable (row(N_A)/col(N_B) are random directions
+    unrelated to A/B), which is the actual property "both factors noised" is for — so nothing about the
+    original both-factor rationale is lost, and this is strictly less noisy than perturbing both factors
+    before multiplying. Per-factor σ = z·rms(factor), so z is a relative multiplier rather than an
+    absolute tied to a model's weight scale (data-dependent scale — not a formal sensitivity bound;
+    still faux-DP, see delta.py module docstring)."""
+    sigma_A = z * A.pow(2).mean().sqrt()
+    sigma_B = z * B.pow(2).mean().sqrt()
+    N_A = torch.randn(A.shape, generator=generator) * sigma_A
+    N_B = torch.randn(B.shape, generator=generator) * sigma_B
+    return B @ N_A + N_B @ A
 
 
 def densify(delta: dict, *, noise_z: float = 0.0, generator=None) -> dict:
-    """{module: dense ΔW = scaling·(B@A)} from a round's PEFT factors (`delta["weights"]` = peft state
-    dict, `["scaling"]` = alpha/r). noise_z>0 adds DP-bootstrap factor noise (see `_dp_noise`)."""
+    """{module: dense ΔW = scaling·(B@A [+ noise])} from a round's PEFT factors (`delta["weights"]` =
+    peft state dict, `["scaling"]` = alpha/r). noise_z>0 adds DP-bootstrap noise (see `_dp_noise`) —
+    exactly Gaussian per dense entry, unlike naively multiplying two independently-noised factors."""
     sd, scaling = delta["weights"], float(delta["scaling"])
     out = {}
     for key, A in sd.items():
@@ -39,9 +47,10 @@ def densify(delta: dict, *, noise_z: float = 0.0, generator=None) -> dict:
         mod = key[: -len(".lora_A.weight")]
         B   = sd[mod + ".lora_B.weight"]
         Af, Bf = A.float(), B.float()
+        dense = Bf @ Af
         if noise_z:
-            Af, Bf = _dp_noise(Af, Bf, noise_z, generator)
-        out[mod] = (scaling * (Bf @ Af)).to(B.dtype)
+            dense = dense + _dp_noise(Af, Bf, noise_z, generator)
+        out[mod] = (scaling * dense).to(B.dtype)
     return out
 
 

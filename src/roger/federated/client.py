@@ -28,8 +28,10 @@ from roger.federated import CLIENT_VERSION, delta as delta_mod, secure_agg, tran
 CLIP_NORM = 1.0
 
 # Bootstrap factor-noise multiplier (delta._dp_noise: σ = z·rms(factor)). Obfuscation, not a budgeted
-# (ε,δ) guarantee — a starting knob to tune against utility.
-DP_Z = 0.5
+# (ε,δ) guarantee — a starting knob to tune against utility. noise/signal power in the densified ΔW
+# ≈ 2z², shape-independent (same ratio for every target module regardless of rank/dims), so one
+# global z suffices. z=0.3 → 18% noise power (~42% amplitude); z=0.5 was ~50% power (~71% amplitude).
+DP_Z = 0.3
 
 
 def is_leeching(cfg: dict) -> bool:
