@@ -65,9 +65,8 @@ Roger installs and runs identically on any machine you can SSH into, so a rented
 - Install the same way as the local steps above: clone the repo and run `uv tool install . --torch-backend auto`.
 - Use `ssh -A` agent forwarding for `git clone`/`pull`, so your key is used but never copied onto the remote disk.
 - Use `tmux` so the session survives an SSH disconnect.
-- We recommend setting up auto-deletion of the instance when inactive.
 
-*Important: keep `~/.roger` state on your local machine.* Rollout data, memory, skills and config should stay owned by your durable local machine rather than getting siloed (and destructively consumed by training) on an ephemeral rented box. Mount your local `~/.roger` back onto the remote through the same SSH connection, and symlink everything into it except `scratch/` (model-loading disk-offload spill space, which must stay on fast local disk):
+*Important: keep `~/.roger` state on your local machine.* Rollout data, memory, skills and config should stay owned by your durable local machine rather than getting siloed on an ephemeral remote machine. Mount your local `~/.roger` back onto the remote through the same SSH connection, and symlink everything into it except `scratch/` (model-loading disk-offload spill space, which must stay on fast local disk):
 
 ```bash
 # from local: reverse-tunnel local sshd through the same connection you use the remote with
