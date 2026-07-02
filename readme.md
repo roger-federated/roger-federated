@@ -1,13 +1,13 @@
 ![Roger Federated](assets/banner.PNG)
 
-### Overview
+## Overview
 The limitations of the AI transition are surfacing as a result of [far-fetched financial projections](https://futurumgroup.com/insights/ai-capex-2026-the-690b-infrastructure-sprint/); [closed models we cannot inspect nor steer](https://blog.mozilla.org/en/mozilla/mozilla-open-source-ai-strategy/); [and myopic hype that fails to recognize real adjacent progress](https://europe2031.ai/). _Luckily, we are at a crossroads where you, the consumer, can do better [with tiny models on your own hardware](https://newsletter.semianalysis.com/p/google-we-have-no-moat-and-neither)._
 
 You and the community can now contribute to the next generation of AI. Not just an LLM with tools, but a purpose-trained agent that is inherently omni-modal. How? By *locally* finetuning a selected *open-source* foundation model on *agentic rollout data*, and subsequently *aggregating* the resulting encrypted model updates (not the data itself) securely with your selected *federations*.
 
 ![](assets/divider.PNG)
 
-### Features
+## Features
 On top of the basic agentic capabilities listed further [below](#progress--contributing), Roger adds the following.
 
 - **Efficient local reinforcement learning**: Inference and finetuning run entirely on the user's own machine; raw data never leaves it. QLoRA REINFORCE++ makes on-device RL efficient on consumer GPUs.
@@ -19,7 +19,7 @@ On top of the basic agentic capabilities listed further [below](#progress--contr
 
 ![](assets/divider.PNG)
 
-### Installation
+## Installation
 
 First, download the repo and navigate to the folder. For Windows users: install under WSL2 for to support Flash Attention 2 and get the best performance.
 
@@ -66,7 +66,7 @@ Roger installs and runs identically on any machine you can SSH into, so a rented
 - Use `ssh -A` agent forwarding for `git clone`/`pull`, so your key is used but never copied onto the remote disk.
 - Use `tmux` so the session survives an SSH disconnect.
 
-*Important: keep `~/.roger` state on your local machine.* Rollout data, memory, skills and config should stay owned by your durable local machine rather than getting siloed on an ephemeral remote machine. Mount your local `~/.roger` back onto the remote through the same SSH connection, and symlink everything into it except `scratch/` (model-loading disk-offload spill space, which must stay on fast local disk):
+*Important:* Keep `~/.roger` state on your local machine. Rollout data, memory, skills and config should stay owned by your durable local machine rather than getting siloed on an ephemeral remote machine. Mount your local `~/.roger` back onto the remote through the same SSH connection, and symlink everything into it except `scratch/` (this only works while the SSH session is alive):
 
 ```bash
 # from local: reverse-tunnel local sshd through the same connection you use the remote with
@@ -82,8 +82,6 @@ done
 # afterwards, launch roger
 roger
 ```
-
-This only works while the SSH session is alive, by design: the remote should never accumulate state disconnected from home.
 
 </details>
 
@@ -200,7 +198,7 @@ Drop any of the entries below or more into `~/.roger/mcp.json` and restart Roger
 
 ![](assets/divider.PNG)
 
-### Use cases
+## Use cases
 Roger has the potential to perform any digital task. In other words, there is no limit to what you can do with (or delegate to) Roger. Here is a severely non-exhaustive list of examples.
 
 <details>
@@ -230,7 +228,7 @@ Roger has the potential to perform any digital task. In other words, there is no
 
 ![](assets/divider.PNG)
 
-### Progress & contributing
+## Progress & contributing
 The ecosystem is still in development. Below is a non-exhaustive list of to-do items. Of course, we are an open-source community, so **feel free to open an issue or pull request!**
 
 - [x] Investigate framework and open-source models.
