@@ -55,8 +55,9 @@
   fail-soft-defaults to "busy", so an unreachable server is never mistaken for an unsupported model.
 - NOT yet built (see `readme.md` TODO + the federated-server-roadmap memory): the **server-side**
   roadmap — Shamir/double-mask dropout recovery (needs a client protocol change too; multi-round is
-  intrinsic), central ground-truth-gradient anti-poison gate, membership auth (round-token/signature) —
-  now lives in the `roger-server` repo. Client/app side: docker sandboxing, account/hive/scheduling setup.
+  intrinsic), central ground-truth-gradient anti-poison gate — now lives in the `roger-server` repo.
+  Client/app side: docker sandboxing, account/hive/scheduling setup. (Membership auth is built: a
+  secret token issued at `/round/register`, echoed back and checked at `/contribute`.)
 
 ## Confirmed design decisions
 - RL algorithm = **REINFORCE++**, not GRPO. Flat episode return broadcast over all generated
@@ -112,7 +113,7 @@ and instruction files (`AGENTS.md`/`CLAUDE.md`) are still read from the project.
 - No manual env patching needed: lm-format-enforcer 0.11.3 imports `PreTrainedTokenizerBase` from
   `transformers.tokenization_utils`, which transformers>=5.11 removed — a compat shim in
   `agency/rollout_utils.py` re-exposes it before the integration import, so any install just works.
-- Shipped default model is `OBLITERATUS/Gemma-4-12B-OBLITERATED` with `google/gemma-4-12B-it-assistant`
+- Shipped default model is `google/gemma-4-12B-it` with `google/gemma-4-12B-it-assistant`
   (1B despite the name) as the default speculative-decoding drafter. The default federation only
   accepts gemma-4 bases. The small `google/gemma-4-E2B-it` (**5.12B** params, not 2B) is the
   low-VRAM experimentation fallback; dev box GPU = RTX 1000 Ada, 6.44 GB VRAM (bf16 supported), so

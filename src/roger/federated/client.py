@@ -84,13 +84,15 @@ def _clip(dense: dict, max_norm: float) -> dict:
     return {k: (v.float() * s).to(v.dtype) for k, v in dense.items()}
 
 
-def _pack(masked: torch.Tensor, spec: list, compat: str, model_id: str, round_id: str) -> bytes:
-    # Carry the layout (spec) + base hash so the server can rebuild, place, and check each ΔW, plus the
-    # round_id from registration so the server routes this upload to the cohort we masked against.
+def _pack(masked: torch.Tensor, spec: list, compat: str, model_id: str, round_id: str,
+          token: str) -> bytes:
+    # Carry the layout (spec) + base hash so the server can rebuild, place, and check each ΔW, the
+    # round_id from registration so the server routes this upload to the cohort we masked against, and
+    # the token proving we're the registrant who masked against that cohort's peer set.
     spec_json = [[k, list(shape)] for k, shape in spec]
     return st_save({"masked": masked},
                    metadata={"model_id": model_id, "compat": compat,
-                             "spec": json.dumps(spec_json), "round_id": round_id})
+                             "spec": json.dumps(spec_json), "round_id": round_id, "token": token})
 
 
 def contribute_delta(delta: dict, cfg: dict) -> bool:
@@ -125,10 +127,10 @@ def contribute_delta(delta: dict, cfg: dict) -> bool:
         res = transport.register_and_peers(url, pub, model_id)
         if res is None:                         # unreachable/sub-quorum: don't upload an unmaskable payload
             continue
-        round_id, peers = res
+        round_id, token, peers = res
         masked = secure_agg.mask(q, priv, peers)
         # "ok" = received into a collecting cohort, not that the round finalized (no finalization signal).
-        if transport.contribute(url, _pack(masked, spec, compat, model_id, round_id)) == "ok":
+        if transport.contribute(url, _pack(masked, spec, compat, model_id, round_id, token)) == "ok":
             accepted = True
     return accepted
 

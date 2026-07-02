@@ -154,7 +154,7 @@ def test_is_leeching_and_should_train():
 def test_contribute_delta_uploads(monkeypatch):
     sent = []
     monkeypatch.setattr(transport, "federation_status", lambda url, mid: {"mode": "busy"})  # force secure-agg
-    monkeypatch.setattr(transport, "register_and_peers", lambda url, pub, mid: ("rid", [pub]))
+    monkeypatch.setattr(transport, "register_and_peers", lambda url, pub, mid: ("rid", "tok", [pub]))
     monkeypatch.setattr(transport, "contribute", lambda url, blob: sent.append((url, blob)) or "ok")
     # An accepted upload reports True so the caller may consume the runs.
     assert fed_client.contribute_delta(_fake_delta(), {"federations": ["http://x"], "contribute": True}) is True
@@ -168,7 +168,7 @@ def test_contribute_delta_uploads(monkeypatch):
     assert fed_client.contribute_delta(_fake_delta(), {"federations": ["http://x"], "contribute": True}) is False
     assert len(sent) == 1
     # Reachable cohort but the upload itself fails ⇒ False (not accepted).
-    monkeypatch.setattr(transport, "register_and_peers", lambda url, pub, mid: ("rid", [pub]))
+    monkeypatch.setattr(transport, "register_and_peers", lambda url, pub, mid: ("rid", "tok", [pub]))
     monkeypatch.setattr(transport, "contribute", lambda url, blob: "failed: boom")
     assert fed_client.contribute_delta(_fake_delta(), {"federations": ["http://x"], "contribute": True}) is False
     print("PASS test_contribute_delta_uploads")
