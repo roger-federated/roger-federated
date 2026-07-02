@@ -16,6 +16,7 @@ from rich.console import Console
 from roger.apps import config, ui
 import roger.loading.model_setup as model_setup
 from roger.loading.model_setup import fetch_model
+from roger.agency.path_utils import state_dir
 from roger.agency.rollout_utils import rollout
 from roger.tools import mcp_utils, std_tools
 
@@ -32,6 +33,27 @@ Tip 2: To avoid polluting the KV-cache, provide instructions incrementally and s
 # roger is installed from a local clone, so the update is a git pull + reinstall of the tool. We can't
 # know where the user cloned it, so the instruction names the repo rather than a path.
 _UPDATE_CMD = "git pull && uv tool install . --reinstall   (in your roger-federated clone)"
+
+_PRIVACY_URL = "https://github.com/roger-federated/roger-federated/blob/main/PRIVACY.md"
+
+
+def _ensure_privacy_notice(cfg: dict) -> None:
+    """One-time notice, before this client's first-ever federation activity, of what gets sent to the
+    default federation server and how to opt out. Sentinel in state_dir() so it shows once per machine,
+    not once per run. Not gated on a keypress: the processing basis is legitimate interest with a
+    standing right to object (opt out), not consent, so transparency is what's required, not sign-off."""
+    if not cfg.get("federations"):
+        return
+    sentinel = os.path.join(state_dir(), "privacy_ack")
+    if os.path.exists(sentinel):
+        return
+    console.print(
+        "[yellow]Roger contributes an encrypted, secret-shared gradient update to your configured "
+        "federation server(s) by default (never raw data). The server also logs ordinary connection "
+        f"metadata (IP, timestamp) for every request, like any web service. Details: {_PRIVACY_URL}\n"
+        "Opt out anytime by setting \"federations\": [] in ~/.roger/config.json.[/yellow]\n")
+    os.makedirs(os.path.dirname(sentinel), exist_ok=True)
+    open(sentinel, "w").close()
 
 # ---------------------------------------------------------------------------
 # Console output policy — clean by default, raw under --verbose
@@ -295,6 +317,7 @@ def main() -> None:
     if args.cmd == "train":
         from roger.training import trainer
         from roger.federated import client as fed_client
+        _ensure_privacy_notice(cfg)
         if not fed_client.should_train(cfg):
             why = ("you're in leech mode (\"contribute\": false)" if cfg.get("federations")
                    else "no federations are configured in ~/.roger/config.json")
@@ -321,6 +344,7 @@ def main() -> None:
     # Federated: nudge a leech, then download + persist the day's cumulative global once on first
     # startup. It's folded into the base at model-load time (in _repl). Inert without a federation.
     from roger.federated import client as fed_client
+    _ensure_privacy_notice(cfg)
     # Warn if the user has dropped the default federation server: without it they pull no community
     # updates and run the bare base model, so model quality is meaningfully worse.
     _defaults = config.default_federations()

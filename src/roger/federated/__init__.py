@@ -6,8 +6,11 @@
 # recovery + membership auth are future work, see readme + the federated-server-roadmap memory).
 
 # Wire-protocol version this client speaks. A plain monotonic counter (NOT the pyproject marketing
-# version) — bump it only when a federation-protocol change makes older clients' contributions
-# incompatible. Federations advertise `min_client` (hard floor: below it we skip contributing to that
-# fed, exactly like an unsupported model) and `latest_client` (advisory: below it we print an update
-# notice) at /status. Derived per-fed in client.probe_federations; surfaced by cli.py at startup+quit.
-CLIENT_VERSION = 1
+# version) — bump it when a federation-protocol change makes older clients' contributions incompatible,
+# or when a build must be force-adopted for compliance reasons the server needs to enforce (e.g. the
+# privacy notice added in cli._ensure_privacy_notice: bumping here + raising the deployed server's
+# ROGER_MIN_CLIENT retroactively blocks pre-notice clients from contributing, same mechanism as an
+# actual protocol break). Federations advertise `min_client` (hard floor: below it we skip contributing
+# to that fed, exactly like an unsupported model) and `latest_client` (advisory: below it we print an
+# update notice) at /status. Derived per-fed in client.probe_federations; surfaced by cli.py at startup+quit.
+CLIENT_VERSION = 2
