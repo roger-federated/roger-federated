@@ -43,10 +43,13 @@ uv tool install . --torch-backend auto   # installs `roger` globally; auto-picks
 uvx --from . --torch-backend auto roger
 ```
 
+<details>
+<summary>Platform-dependent caveats</summary>
 
-**GPU notes:**
-  - `bitsandbytes` (4/8-bit quantization) is installed automatically only where PyPI ships a wheel: x86-64 Linux and Windows. On other CUDA platforms (e.g. aarch64 Jetson/GH200) install a preview wheel manually, e.g. `pip install --force-reinstall https://github.com/bitsandbytes-foundation/bitsandbytes/releases/download/continuous-release_main/bitsandbytes-1.33.7.preview-py3-none-manylinux_2_24_aarch64.whl`.
-  - Apple Silicon: GPU (MPS/Metal) is not used yet — only the CUDA path is wired up, so macOS runs unquantized on CPU. PRs adding an MPS check alongside the CUDA check in `src/roger/loading/model_setup.py` are welcome.
+- `bitsandbytes` (4/8-bit quantization) is installed automatically only where PyPI ships a wheel: x86-64 Linux and Windows. On other CUDA platforms (e.g. aarch64 Jetson/GH200) install a custom wheel manually, e.g. `pip install --force-reinstall https://github.com/bitsandbytes-foundation/bitsandbytes/releases/download/continuous-release_main/bitsandbytes-1.33.7.preview-py3-none-manylinux_2_24_aarch64.whl`.
+
+- Apple Silicon: GPU (MPS/Metal) is not used yet — only the CUDA path is wired up, so macOS runs unquantized on CPU. PRs adding an MPS check alongside the CUDA check in `src/roger/loading/model_setup.py` are welcome.
+</details>
 
 **Run:**
 
@@ -59,14 +62,14 @@ For self-improvement purposes, it is of paramount importance that you end a sess
 <details>
 <summary>Remote execution on a trusted machine over SSH</summary>
 
-Roger installs and runs identically on any machine you can SSH into, so a rented GPU instance works exactly like your local one. Purely as an example, we use [Scaleway](https://www.scaleway.com/), but any on-demand GPU provider works the same way, e.g. [Hetzner](https://www.hetzner.com/).
+Roger installs and runs identically on any machine you can SSH into, so a rented GPU instance works exactly like your local one. We use [Scaleway](https://www.scaleway.com/), but any provider works the same way, e.g. [Hetzner](https://www.hetzner.com/).
 
-- Rent a GPU instance from a provider offering on-demand GPU compute
-- Install the same way as the local steps above: clone the repo and run `uv tool install . --torch-backend auto`.
+- Rent a GPU instance from a provider offering on-demand GPU compute.
+- On the remote, install the same way, by cloning the repo and running `uv tool install . --torch-backend auto`.
 - Use `ssh -A` agent forwarding for `git clone`/`pull`, so your key is used but never copied onto the remote disk.
-- Use `tmux` so the session survives an SSH disconnect.
+- Run from `tmux` so the session survives an SSH disconnect.
 
-*Important:* Keep `~/.roger` state on your local machine. Rollout data, memory, skills and config should stay owned by your durable local machine rather than getting siloed on an ephemeral remote machine. Mount your local `~/.roger` back onto the remote through the same SSH connection, and symlink everything into it except `scratch/` (this only works while the SSH session is alive):
+*Important:* Keep `~/.roger` state on your local machine. Rollout data, memory, skills and config should stay owned by your durable local machine rather than getting siloed on an ephemeral remote machine. Mount your local `~/.roger` back onto the remote through the same SSH connection, and symlink everything into it except `scratch/` (this only works while the SSH connection is live):
 
 ```bash
 # from local: reverse-tunnel local sshd through the same connection you use the remote with
@@ -82,7 +85,6 @@ done
 # afterwards, launch roger on the remote
 roger
 ```
-
 </details>
 
 **MCP servers:**
@@ -90,9 +92,9 @@ roger
 It is strongly recommended to introduce additional functionalities and tools to Roger by extending the list of MCP services in `~/.roger/mcp.json`. This file uses the standard `mcpServers`-format, and the exact schema can therefore be found at your MCP server's provider.
 
 <details>
-<summary>Popular servers to get you started</summary>
+<summary>Popular servers to get started</summary>
 
-Drop any of the entries below or more into `~/.roger/mcp.json` and restart Roger. Replace any `<token>`/`<api-key>` placeholder with your own credential, attained from the respective MCP server. Some stdio servers need a one-off install first. Note that the `_comment` field is ignored.
+Drop any of the entries below or others into `~/.roger/mcp.json` and restart Roger. Replace any `<token>`/`<api-key>` placeholder with your own credential, attained from the respective MCP server. Some stdio servers need a one-off install first. Note that the `_comment` field is ignored.
 
 ```json
 {
@@ -202,7 +204,7 @@ Drop any of the entries below or more into `~/.roger/mcp.json` and restart Roger
 Roger has the potential to perform any digital task. In other words, there is no limit to what you can do with (or delegate to) Roger. Here is a severely non-exhaustive list of examples.
 
 <details>
-<summary>Initialize an agent loop for a 24/7 unsupervised e-marketeer</summary>
+<summary>Set up a native agent loop for a 24/7 unsupervised e-marketeer</summary>
 ...
 </details>
 
@@ -217,7 +219,7 @@ Roger has the potential to perform any digital task. In other words, there is no
 </details>
 
 <details>
-<summary>Develop e.g. a steam game fully autonomously as a coding agent</summary>
+<summary>Develop e.g. a Steam game fully autonomously as a coding agent</summary>
 ...
 </details>
 
@@ -258,6 +260,7 @@ Deferred:
 - [ ] Shamir dropout recovery.
 - [ ] Sandboxed docker environments.
 - [ ] Native support for agent loops.
+- [ ] Integrate spoken instructions.
 - [ ] Remote control: copy a session code, enter it on our website, continue interacting encrypted through the browser.
 - [ ] Always-on mode: always listen, look, and read, and when a keyboard shortcut is entered, automatically infer and continue the user's task using e.g. Touchpoint.
 - [ ] Dynalang-style world model for embedded state roll-forward.
