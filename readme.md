@@ -56,6 +56,37 @@ Any config key can be overridden for a single run with a flag, e.g. `roger --mod
 
 For self-improvement purposes, it is of paramount importance that you end a session using Ctrl+D. This will nudge the model to write its memory, and to evaluate its performance.
 
+<details>
+<summary>Remote execution on a trusted machine over SSH</summary>
+
+Roger installs and runs identically on any machine you can SSH into, so a rented GPU instance works exactly like your local one. Purely as an example, we use [Scaleway](https://www.scaleway.com/), but any on-demand GPU provider works the same way, e.g. [Hetzner](https://www.hetzner.com/).
+
+- Rent a GPU instance from a provider offering on-demand GPU compute
+- Install the same way as the local steps above: clone the repo and run `uv tool install . --torch-backend auto`.
+- Use `ssh -A` agent forwarding for `git clone`/`pull`, so your key is used but never copied onto the remote disk.
+- Use `tmux` so the session survives an SSH disconnect.
+
+*Important: keep `~/.roger` state on your local machine.* Rollout data, memory, skills and config should stay owned by your durable local machine rather than getting siloed on an ephemeral remote machine. Mount your local `~/.roger` back onto the remote through the same SSH connection, and symlink everything into it except `scratch/` (model-loading disk-offload spill space, which must stay on fast local disk):
+
+```bash
+# from local: reverse-tunnel local sshd through the same connection you use the remote with
+ssh -R <port>:localhost:22 user@remote
+
+# on the remote:
+mkdir -p ~/.roger/scratch ~/mnt/local-roger
+sshfs -p <port> <you>@localhost:$HOME/.roger ~/mnt/local-roger
+for d in config.json memory skills oauth federated runs backups history; do
+  ln -sfn ~/mnt/local-roger/$d ~/.roger/$d
+done
+
+# afterwards, launch roger
+roger
+```
+
+This only works while the SSH session is alive, by design: the remote should never accumulate state disconnected from home.
+
+</details>
+
 **MCP servers:**
 
 It is strongly recommended to introduce additional functionalities and tools to Roger by extending the list of MCP services in `~/.roger/mcp.json`. This file uses the standard `mcpServers`-format, and the exact schema can therefore be found at your MCP server's provider.
@@ -226,13 +257,12 @@ The ecosystem is still in development. Below is a non-exhaustive list of to-do i
 - [x] Build the aggregation server: FedAvg, peer-key distribution, aggregate norm-bounding.
 - [x] Use DP without accountant until server is busy, then switch to SMPC.
 - [x] Launch the default server as a scale-to-zero container on Scaleway with S3 storage.
+- [x] Use signatures and tokens (per-registration secret token proves cohort membership at upload).
 - [x] <ins>Huzzah, the beta version can now be shipped.</ins>
 
 Deferred:
-- [ ] Remote SSH execution.
-- [ ] Zero-knowledge integrity proof (scale, mod, keys, clip).
+- [ ] Zero-knowledge integrity proof to verify scale, mod, keys, clip, model fork.
 - [ ] Shamir dropout recovery.
-- [ ] Use signatures and tokens.
 - [ ] Sandboxed docker environments.
 - [ ] Native support for agent loops.
 - [ ] Remote control: copy a session code, enter it on our website, continue interacting encrypted through the browser.

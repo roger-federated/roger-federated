@@ -1,5 +1,5 @@
 {
-  "model_id": "OBLITERATUS/Gemma-4-12B-OBLITERATED",
+  "model_id": "google/gemma-4-12B-it",
   "max_steps": 10,
   "max_new_tokens": 4096,
   "enable_rag": true,
