@@ -79,7 +79,7 @@ for d in config.json memory skills oauth federated runs backups history; do
   ln -sfn ~/mnt/local-roger/$d ~/.roger/$d
 done
 
-# afterwards, launch roger
+# afterwards, launch roger on the remote
 roger
 ```
 
@@ -202,12 +202,12 @@ Drop any of the entries below or more into `~/.roger/mcp.json` and restart Roger
 Roger has the potential to perform any digital task. In other words, there is no limit to what you can do with (or delegate to) Roger. Here is a severely non-exhaustive list of examples.
 
 <details>
-<summary>Use always-on mode for a 24/7 unsupervised e-marketeer</summary>
+<summary>Initialize an agent loop for a 24/7 unsupervised e-marketeer</summary>
 ...
 </details>
 
 <details>
-<summary>Connect Touchpoint MCP for assistance in e.g. music production</summary>
+<summary>Use always-on mode (with Touchpoint MCP) for assistance in e.g. music production</summary>
 ...
 </details>
 
@@ -217,12 +217,7 @@ Roger has the potential to perform any digital task. In other words, there is no
 </details>
 
 <details>
-<summary>Develop e.g. a social media app fully autonomously as a coding agent</summary>
-...
-</details>
-
-<details>
-<summary>Use a native agent loop for end-to-end development of e.g. a Steam game</summary>
+<summary>Develop e.g. a steam game fully autonomously as a coding agent</summary>
 ...
 </details>
 
