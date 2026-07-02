@@ -14,8 +14,11 @@ Endpoints (all under a federation's base URL, served over HTTPS):
                               the CLI can warn on an unsupported model before wasting a session's gradient.
                               min_client/latest_client advertise the protocol version this federation
                               requires/prefers, so an out-of-date client self-skips + nudges an update)
-  POST {url}/round/register   {model_id, pubkey(hex)} -> {peers: [hex, ...]}   (server distributes
-                              the round's peer X25519 public keys; keys are collected centrally)
+  POST {url}/round/register   {model_id, pubkey(hex)} -> {round_id, token, peers: [hex, ...]}   (server
+                              distributes the round's peer X25519 public keys; keys are collected
+                              centrally. `token` is this registration's secret, echoed back on
+                              /contribute so the server can verify we're the same party that sealed
+                              into this cohort)
   POST {url}/contribute       octet-stream = the masked, packed contribution -> 200
   POST {url}/contribute_dp    octet-stream = a single DP-noised, UNMASKED dense ΔW (bootstrap mode) -> 200
   GET  {url}/global?since=&model_id=  -> 200 octet-stream (re-factored global adapter) + X-Cursor
@@ -101,17 +104,20 @@ def contribute_dp(url: str, blob: bytes) -> str:
         return f"failed: {e}"
 
 
-def register_and_peers(url: str, my_pub: bytes, model_id: str) -> tuple[str, list[bytes]] | None:
-    """Announce our round public key and get back (round_id, peer keys). The round_id identifies the
-    sealed cohort we were placed in; we echo it on the upload so the server routes our contribution to
-    the right round (several cohorts of a model can collect at once). None on any failure (so the
-    caller skips this federation rather than uploading an unmaskable contribution)."""
+def register_and_peers(url: str, my_pub: bytes, model_id: str) -> tuple[str, str, list[bytes]] | None:
+    """Announce our round public key and get back (round_id, token, peer keys). The round_id identifies
+    the sealed cohort we were placed in; we echo it on the upload so the server routes our contribution
+    to the right round (several cohorts of a model can collect at once). The token is our proof of
+    cohort membership, echoed alongside it so the server can verify the upload comes from the same
+    party that registered (not just anyone sharing our IP). None on any failure (so the caller skips
+    this federation rather than uploading an unmaskable contribution)."""
     try:
         r = httpx.post(f"{url.rstrip('/')}/round/register", timeout=_TIMEOUT,
                        json={"model_id": model_id, "pubkey": my_pub.hex()})
         r.raise_for_status()
         data = r.json()
-        return data.get("round_id", ""), [bytes.fromhex(h) for h in data.get("peers", [])]
+        return (data.get("round_id", ""), data.get("token", ""),
+                [bytes.fromhex(h) for h in data.get("peers", [])])
     except Exception:
         return None
 
