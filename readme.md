@@ -24,7 +24,7 @@ On top of the basic agentic capabilities listed further [below](#progress--contr
 First, download the repo and navigate to the folder. For Windows users: install under WSL2 for to support Flash Attention 2 and get the best performance.
 
 ```bash
-git clone git@github.com:thijs-vanweezel/roger-federated.git # or extract from https://github.com/thijs-vanweezel/roger-federated/archive/refs/heads/main.zip
+git clone git@github.com:roger-federated/roger-federated.git # or extract from https://github.com/roger-federated/roger-federated/archive/refs/heads/main.zip
 cd roger-federated
 ```
 
@@ -222,6 +222,14 @@ Roger has the potential to perform any digital task. In other words, there is no
 <summary>Develop e.g. a Steam game fully autonomously as a coding agent</summary>
 ...
 </details>
+
+![](assets/divider.PNG)
+
+## Pricing
+
+- **Individual**: Free. No strings attached.
+- **Leechers**: Free for now. Per-pull charges may apply in the future.
+- **Enterprise**: Free for now. In the future, pulling model-update may require a license depending on company size.
 
 ![](assets/divider.PNG)
 

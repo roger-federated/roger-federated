@@ -12,6 +12,6 @@
   "train_every": 8,
   "contribute": true,
   "federations": [
-    "https://rogeragg06d9ff26-roger-aggregator.functions.fnc.nl-ams.scw.cloud"
+    "server.rogerfederated.com"
   ]
 }
