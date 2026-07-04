@@ -1,0 +1,38 @@
+name: Review Issue
+
+on:
+  issues:
+    types: [opened]
+  issue_comment:
+    types: [created]
+
+jobs:
+  claude:
+    if: github.event.comment.user.type != 'Bot'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      id-token: write
+      actions: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Main
+        id: claude
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            Review this issue. Check if it's clear, reproducible, and not a duplicate of an existing issue.
+            Reference the codebase and AGENTS.md if relevant to understand context.
+            Leave a comment on the issue with your findings: ask for missing details (e.g. repro steps, environment)
+            if needed, or note relevant files/context if you can identify the likely cause.
+            If the issue is clear and actionable, suggest opening a pull request to address it.
+            Post your comment with `gh issue comment`.
+          claude_args: |
+            --allowedTools "Bash(gh issue comment:*)"
