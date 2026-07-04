@@ -35,4 +35,4 @@ jobs:
             If the issue is clear and actionable, suggest opening a pull request to address it.
             Post your comment with `gh issue comment`.
           claude_args: |
-            --allowedTools "Bash(gh issue comment:*)"
+            --allowedTools "Bash(gh issue comment:*),Bash(gh issue list:*),Bash(gh issue view:*),Bash(gh search:*)"

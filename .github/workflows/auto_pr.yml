@@ -31,4 +31,4 @@ jobs:
             If you can safely fix an issue, commit and push the fix. Otherwise, leave a comment on the PR with your findings.
             If the PR is correct and complete, approve it with `gh pr review --approve`.
           claude_args: |
-            --allowedTools "Bash(git commit:*),Bash(git push:*),Bash(gh pr review:*)"
+            --allowedTools "Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr comment:*),Bash(gh pr review:*),Bash(git diff:*),Bash(git log:*),Bash(git add:*),Bash(git commit:*),Bash(git push:*)"
