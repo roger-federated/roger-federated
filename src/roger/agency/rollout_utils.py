@@ -79,11 +79,12 @@ def _allowed_tokens(inner, tokenizer, tool_tokens, sent_tokens: torch.Tensor, ne
     """Returns allowed token IDs at current step, conditioned on sent_tokens, or return None when unconstrained.
 
     Count open/close tokens to determine constraints:
-    - num open tokens == num close tokens: free generation → None (full vocab; nothing built on the hot path)
+    - num open tokens <= num close tokens: free generation → None (full vocab; nothing built on the hot path)
     - num open tokens == num close tokens + 1: inside a block → constrain to valid JSON, force-close instead of EOS
     """
     tokens = sent_tokens.squeeze()[new_idx:].tolist()
-    if tokens.count(tool_tokens[0]) == tokens.count(tool_tokens[1]):
+    # <=, not ==: a stray close from the unconstrained drafter (open<close) is also outside a block
+    if tokens.count(tool_tokens[0]) <= tokens.count(tool_tokens[1]):
         return None
     # Inside a block: find last open token, constrain JSON content after it
     last_open_idx = len(tokens) - 1 - tokens[::-1].index(tool_tokens[0])
