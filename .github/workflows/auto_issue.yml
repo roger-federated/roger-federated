@@ -33,6 +33,7 @@ jobs:
             Leave a comment on the issue with your findings: ask for missing details (e.g. repro steps, environment)
             if needed, or note relevant files/context if you can identify the likely cause.
             If the issue is clear and actionable, suggest opening a pull request to address it.
+            Be authoritative; do not expect or request further instructions from users. Be brief.
             Post your comment with `gh issue comment`.
           claude_args: |
             --allowedTools "Bash(gh issue comment:*),Bash(gh issue list:*),Bash(gh issue view:*),Bash(gh search:*)"
