@@ -65,26 +65,10 @@ For self-improvement purposes, it is of paramount importance that you end a sess
 Roger installs and runs identically on any machine you can SSH into, so a rented GPU instance works exactly like your local one. We use [Scaleway](https://www.scaleway.com/), but any provider works the same way, e.g. [Hetzner](https://www.hetzner.com/).
 
 - Rent a GPU instance from a provider offering on-demand GPU compute.
+- *Important*: Attach block storage that survives instance deletion, in order to persist the state that lives under `~/.roger/`. You could optionally reverse-tunnel and symlink so that the state is mounted to your local machine.
 - On the remote, install the same way, by cloning the repo and running `uv tool install . --torch-backend auto`.
-- Use `ssh -A` agent forwarding for `git clone`/`pull`, so your key is used but never copied onto the remote disk.
-- Run from `tmux` so the session survives an SSH disconnect.
+- Optionally run from `tmux` so the session survives an SSH disconnect.
 
-*Important:* Keep `~/.roger` state on your local machine. Rollout data, memory, skills and config should stay owned by your durable local machine rather than getting siloed on an ephemeral remote machine. Mount your local `~/.roger` back onto the remote through the same SSH connection, and symlink everything into it except `scratch/` (this only works while the SSH connection is live):
-
-```bash
-# from local: reverse-tunnel local sshd through the same connection you use the remote with
-ssh -R <port>:localhost:22 user@remote
-
-# on the remote:
-mkdir -p ~/.roger/scratch ~/mnt/local-roger
-sshfs -p <port> <you>@localhost:$HOME/.roger ~/mnt/local-roger
-for d in config.json memory skills oauth federated runs backups history; do
-  ln -sfn ~/mnt/local-roger/$d ~/.roger/$d
-done
-
-# afterwards, launch roger on the remote
-roger
-```
 </details>
 
 **MCP servers:**
@@ -94,7 +78,7 @@ It is strongly recommended to introduce additional functionalities and tools to 
 <details>
 <summary>Popular servers to get started</summary>
 
-Drop any of the entries below or others into `~/.roger/mcp.json` and restart Roger. Replace any `<token>`/`<api-key>` placeholder with your own credential, attained from the respective MCP server. Some stdio servers need a one-off install first. Notice that the `_comment` field is ignored.
+Drop any of the entries below or others into `~/.roger/mcp.json` and restart Roger. Replace any `<token>`/`<api-key>` placeholder with your own credential, attained from the respective MCP server. Make sure npx is installed for some of these. Additionally, some stdio servers need a one-off install first. Notice that the `_comment` field is ignored.
 
 ```json
 {
@@ -192,6 +176,41 @@ Drop any of the entries below or others into `~/.roger/mcp.json` and restart Rog
       "_comment": "Search Airbnb listings and property details; unofficial, no key needed",
       "command": "npx",
       "args": ["-y", "@openbnb/mcp-server-airbnb"]
+    },
+    "Canva": {
+      "_comment": "create simple designs for e.g. social media",
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "mcp-remote@latest",
+        "https://mcp.canva.com/mcp"
+      ]
+    },
+    "zerolib-email": {
+      "_comment": "send email. fill in credentials.",
+      "command": "uvx",
+      "args": ["mcp-email-server@latest", "stdio"],
+      "env": {
+        "MCP_EMAIL_SERVER_ACCOUNT_NAME": "default",
+        "MCP_EMAIL_SERVER_EMAIL_ADDRESS": "you@domain.com",
+        "MCP_EMAIL_SERVER_USER_NAME": "you@domain.com",
+        "MCP_EMAIL_SERVER_PASSWORD": "<password>",
+        "MCP_EMAIL_SERVER_IMAP_HOST": "<host>",
+        "MCP_EMAIL_SERVER_IMAP_PORT": "<port>",
+        "MCP_EMAIL_SERVER_SMTP_HOST": "<host>",
+        "MCP_EMAIL_SERVER_SMTP_PORT": "<port>",
+      }
+    },
+    "twitter-mcp": {
+      "command": "npx",
+      "args": ["-y", "@enescinar/twitter-mcp"],
+      "env": {
+        "API_KEY": "your_api_key_here",
+        "API_SECRET_KEY": "your_api_secret_key_here",
+        "ACCESS_TOKEN": "your_access_token_here",
+        "ACCESS_TOKEN_SECRET": "your_access_token_secret_here"
+      }
     }
   }
 }
