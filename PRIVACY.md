@@ -1,4 +1,4 @@
-# Privacy Notice: Roger Federation Server
+# Privacy Notice: default federation server
 
 **Last updated: 2026-07-02**
 
@@ -6,7 +6,7 @@ This privacy notice applies to the default federation server operated by the rog
 
 ## 1. Controller Identity and Contact
 
-The data controller for the default roger federation server is:
+The data controller for the default federation server is:
 
 Thijs van Weezel  
 Email: contact@rogerfederated.com
@@ -33,7 +33,7 @@ When a user calls `/contribute` to upload a gradient update, the following proto
 - Round identifier
 - Masked ΔW share: a cryptographic secret-share of the user's local gradient update, produced via secure multi-party computation (Bonawitz-style X25519 key exchange and SHAKE-based pairwise masking)
 
-### What Is Explicitly Not Collected
+### What Is Explicitly Not Collected (best effort)
 - Raw conversation or session content from the user's machine
 - Unencrypted model weights, deltas, or unmasked gradient contributions from individual users
 - Any account, identity, or authentication data (no user accounts, no email collection, no login system)
@@ -103,7 +103,7 @@ You also have the right to lodge a complaint with a supervisory data protection 
 
 ## 10. Automated Decision-Making and Profiling (Article 22)
 
-No automated decision-making or profiling of any person occurs within the roger federation system. Your contributions are aggregated into a shared model update; no individual scoring, behavioral profiling, or automated classification of users is performed.
+No automated decision-making or profiling of any person occurs within the federation system. Your contributions are aggregated into a shared model update; no individual scoring, behavioral profiling, or automated classification of users is performed.
 
 ## 11. Children
 
