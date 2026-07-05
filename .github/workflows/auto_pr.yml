@@ -25,6 +25,13 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          settings: |
+            {
+              "attribution": {
+                "commit": "",
+                "pr": ""
+              }
+            }
           prompt: |
             Review this pull request for bugs, correctness issues, and code quality.
             Make sure that the code is compatible with the rest of the codebase and follows best practices as detailed in e.g. AGENTS.md.
