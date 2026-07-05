@@ -21,17 +21,17 @@ On top of the basic agentic capabilities listed further [below](#progress--contr
 
 ## Installation
 
-First, download the repo and navigate to the folder. For Windows users: install under WSL2 for to support Flash Attention 2 and get the best performance.
+First, download the repo and navigate to the folder. For Windows users: install under WSL2 to use Flash Attention 2 and get the best performance.
 
 ```bash
-git clone git@github.com:roger-federated/roger-federated.git # or extract from https://github.com/roger-federated/roger-federated/archive/refs/heads/main.zip
+git clone https://github.com/roger-federated/roger-federated.git # or extract from https://github.com/roger-federated/roger-federated/archive/refs/heads/main.zip
 cd roger-federated
 ```
 
-**Requirements:**
+Note:
+
 - Compatible GPU strongly recommended for quantization and speed.
 - First run downloads the selected model (several GB) and writes settings under `~/.roger/config.json`. These can be changed at any time.
-- Linux: `apt install python3-tk` enables the native folder picker; otherwise a text-prompt fallback is used automatically.
 
 **Recommended method:**
 
@@ -94,7 +94,7 @@ It is strongly recommended to introduce additional functionalities and tools to 
 <details>
 <summary>Popular servers to get started</summary>
 
-Drop any of the entries below or others into `~/.roger/mcp.json` and restart Roger. Replace any `<token>`/`<api-key>` placeholder with your own credential, attained from the respective MCP server. Some stdio servers need a one-off install first. Note that the `_comment` field is ignored.
+Drop any of the entries below or others into `~/.roger/mcp.json` and restart Roger. Replace any `<token>`/`<api-key>` placeholder with your own credential, attained from the respective MCP server. Some stdio servers need a one-off install first. Notice that the `_comment` field is ignored.
 
 ```json
 {
