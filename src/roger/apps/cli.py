@@ -48,9 +48,8 @@ def _ensure_privacy_notice(cfg: dict) -> None:
     if os.path.exists(sentinel):
         return
     console.print(
-        "[yellow]Roger contributes an encrypted, secret-shared gradient update to your configured "
-        "federation server(s) by default (never raw data). The server also logs ordinary connection "
-        f"metadata (IP, timestamp) for every request, like any web service. Details: {_PRIVACY_URL}\n"
+        "[yellow]Roger contributes an encrypted gradient update to your configured "
+        "federation server(s) by default (never raw data). Details: {_PRIVACY_URL}\n"
         "Opt out anytime by setting \"federations\": [] in ~/.roger/config.json.[/yellow]\n")
     os.makedirs(os.path.dirname(sentinel), exist_ok=True)
     open(sentinel, "w").close()
