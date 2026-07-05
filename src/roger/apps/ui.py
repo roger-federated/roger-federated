@@ -28,7 +28,7 @@ from prompt_toolkit.styles import Style as PTStyle
 # Background highlight for the user's typed turn. SimpleLexer paints this style over every
 # character of the buffer, so the tint hugs the typed text (not the whole line) and persists
 # in the scrollback after submit — visually marking each user turn.
-_USER_TURN_STYLE = "bg:#1e1e1e #f5f5f5"
+_USER_TURN_STYLE = "bg:#2a2a2a #f5f5f5"
 
 from roger.agency.path_utils import state_dir
 
