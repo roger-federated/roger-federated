@@ -27,8 +27,13 @@ Usage with rollout():
         await stack.aclose()
 """
 
-import contextlib, subprocess, base64, io, json, os, warnings
+import contextlib, subprocess, base64, io, json, os, sys, warnings
 import asyncio, http.server, threading, urllib.parse, webbrowser
+
+# Per-server connect budget (transport up + initialize + list_tools). Guards against a server
+# that hangs before responding — e.g. mcp-remote blocking on an OAuth browser callback on a
+# headless box. Bump it (e.g. =300) for a run where you must complete a first-time interactive login.
+CONNECT_TIMEOUT = float(os.environ.get("ROGER_MCP_CONNECT_TIMEOUT", "30"))
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.client.sse import sse_client
@@ -234,6 +239,17 @@ def _build_oauth_auth(name: str, spec: dict, stack: contextlib.AsyncExitStack):
     )
 
 
+def _stdio_errlog():
+    """Where a stdio subprocess's stderr goes. Surface it (real fd) so tools like mcp-remote can
+    print their OAuth login URL where you can see it; fall back to DEVNULL where our stderr isn't a
+    real fd (e.g. Jupyter), since stdio_client calls .fileno() on it and would otherwise crash."""
+    try:
+        sys.stderr.fileno()
+        return sys.stderr
+    except (AttributeError, io.UnsupportedOperation, OSError):
+        return subprocess.DEVNULL
+
+
 class MCPConnection:
     """Async context manager: connects to one MCP server (stdio subprocess or remote
     SSE / streamable-HTTP), discovers its tools, and exposes them in rollout()-compatible
@@ -263,11 +279,10 @@ class MCPConnection:
         stdio/SSE yield a 2-tuple; streamable-HTTP yields (read, write, get_session_id)."""
         spec = self._spec
         if spec.get("command"):
-            # errlog=DEVNULL avoids fileno() crash where sys.stderr isn't a real fd (e.g. Jupyter)
             params = StdioServerParameters(command=spec["command"],
                                            args=spec.get("args", []), env=spec.get("env"))
             read, write = await self._stack.enter_async_context(
-                stdio_client(params, errlog=subprocess.DEVNULL))
+                stdio_client(params, errlog=_stdio_errlog()))
             return read, write
         url, headers = _remote_url(spec), spec.get("headers")
         # `auth` is None unless the spec carries an `oauth` block; the transports accept it as
@@ -284,13 +299,20 @@ class MCPConnection:
         return read, write
 
     async def __aenter__(self):
-        read, write = await self._open_transport()
-        self._session = await self._stack.enter_async_context(ClientSession(read, write))
-        await self._session.initialize()
-        tools = (await self._session.list_tools()).tools
-        self._discovered = [t for t in tools if self._only is None or t.name in self._only]
-        self._orig = {self._prefixed(t.name): t.name for t in self._discovered}
-        return self
+        try:
+            read, write = await self._open_transport()
+            self._session = await self._stack.enter_async_context(ClientSession(read, write))
+            await self._session.initialize()
+            tools = (await self._session.list_tools()).tools
+            self._discovered = [t for t in tools if self._only is None or t.name in self._only]
+            self._orig = {self._prefixed(t.name): t.name for t in self._discovered}
+            return self
+        except BaseException:
+            # Tear down whatever transport/session we opened before failing. BaseException (not
+            # Exception) so a wait_for() timeout — delivered as CancelledError — also cleans up,
+            # e.g. killing a stdio subprocess left blocking on an OAuth callback.
+            await self._stack.aclose()
+            raise
 
     async def __aexit__(self, *exc):
         await self._stack.aclose()
@@ -349,17 +371,21 @@ async def connect_servers(servers: dict) -> tuple[contextlib.AsyncExitStack, lis
     Returns:
         (exit_stack, merged_tools, merged_handlers) — caller must await stack.aclose().
 
-    A server that fails to start (bad command, unreachable URL, init error) is warned about
-    and skipped so one broken entry can't abort the whole session; namespacing keeps the
-    merge collision-free.
+    A server that fails to start (bad command, unreachable URL, init error) or takes longer than
+    CONNECT_TIMEOUT to respond is warned about and skipped so one broken/hanging entry can't abort
+    the whole session; namespacing keeps the merge collision-free.
     """
     stack = contextlib.AsyncExitStack()
     all_tools, all_handlers = [], {}
     for name, spec in servers.items():
+        conn = MCPConnection(name, spec)
         try:
-            conn = await stack.enter_async_context(MCPConnection(name, spec))
+            # enter conn on its own so a timeout cancels __aenter__ (which cleans up its transport);
+            # only reaches `stack` once fully connected, so aclose() never double-frees a failed one.
+            await asyncio.wait_for(stack.enter_async_context(conn), CONNECT_TIMEOUT)
         except Exception as e:
-            warnings.warn(f"MCP server '{name}' failed to connect; skipping. ({e})")
+            reason = f"timed out after {CONNECT_TIMEOUT:g}s" if isinstance(e, asyncio.TimeoutError) else e
+            warnings.warn(f"MCP server '{name}' failed to connect; skipping. ({reason})")
             continue
         all_tools.extend(conn.tools)
         all_handlers.update(conn.handlers)
