@@ -33,7 +33,7 @@ import asyncio, http.server, threading, urllib.parse, webbrowser
 # Per-server connect budget (transport up + initialize + list_tools). Guards against a server
 # that hangs before responding — e.g. mcp-remote blocking on an OAuth browser callback on a
 # headless box. Bump it (e.g. =300) for a run where you must complete a first-time interactive login.
-CONNECT_TIMEOUT = float(os.environ.get("ROGER_MCP_CONNECT_TIMEOUT", "30"))
+CONNECT_TIMEOUT = float(os.environ.get("ROGER_MCP_CONNECT_TIMEOUT", "120"))
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.client.sse import sse_client
