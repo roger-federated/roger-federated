@@ -78,7 +78,7 @@ It is strongly recommended to introduce additional functionalities and tools to 
 <details>
 <summary>Popular servers to get started</summary>
 
-Drop any of the entries below or others into `~/.roger/mcp.json` and restart Roger. Replace any `<token>`/`<api-key>` placeholder with your own credential, attained from the respective MCP server. Make sure npx is installed for some of these. Additionally, some stdio servers need a one-off install first. Notice that the `_comment` field is ignored.
+Drop any of the entries below or others into `~/.roger/mcp.json` and restart Roger. Replace any `<token>`/`<api-key>` placeholder with your own credential, attained from the respective MCP server. Make sure npx is installed for some of these. Additionally, some stdio servers need a one-off install first. Notice that the `_comment` field is ignored. P.S.: if on a remote machine OAuth is required, instead of adding a SSH port forward, it is easier to omit `mcp-remote` wrapper and (e.g., in the case of Canva) replace it with `"canva": { "url": "https://mcp.canva.com/mcp", "oauth": {} }`.
 
 ```json
 {
