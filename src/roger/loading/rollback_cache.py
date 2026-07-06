@@ -21,8 +21,9 @@ import torch
 from transformers.cache_utils import DynamicSlidingWindowLayer
 
 # Max tokens we can roll back. Must exceed the largest tentative span: the grade-nudge seed
-# (~35 tokens) + its <=32 generated tokens, and any speculative lookahead (a handful). 128 is a
-# comfortable margin; the extra VRAM is ROLLBACK_WINDOW tokens of K/V per sliding layer (tiny).
+# (think-open + ~72 tokens) + its <=48 generated tokens (~121 total; see _run_grade_nudge's
+# max_new_tokens), and any speculative lookahead (a handful). Raise this if that budget grows;
+# the extra VRAM is ROLLBACK_WINDOW tokens of K/V per sliding layer (tiny).
 ROLLBACK_WINDOW = 128
 
 

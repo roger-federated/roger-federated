@@ -14,7 +14,8 @@ from collections.abc import Callable
 from roger.tools.std_tools import get_standard_tools, maxsteps_checkin
 from roger.tools.shell_tools import shell_idioms
 from roger.tools.session import ToolSession
-from roger.loading.model_setup import find_gen_prompt, find_tool_res_id, find_tool_call_tokens, find_think_tokens
+from roger.loading.model_setup import (find_gen_prompt, find_gen_prompt_after_tool, find_turn_end,
+                                       find_tool_res_id, find_tool_call_tokens, find_think_tokens)
 from roger.training import recording
 from datetime import datetime, timezone
 
@@ -147,6 +148,23 @@ def _build_seed(tokenizer, text: str, think_tokens, tool_tokens, force_tool: boo
     if think_tokens is not None:
         return [think_tokens[0]] + body            # reason first; force (if any) fires after think_close
     return (body + [tool_tokens[0]]) if force_tool else body
+
+
+def _close_turn(ids: torch.Tensor, turn_end: list[int]) -> torch.Tensor:
+    """Splice the canonical turn-close tail onto a generated turn. Generation halts *at* the close
+    token (its trailing glue, e.g. Gemma's '\\n', is never emitted), an eos-trimmed or interrupted
+    turn ends bare — so before the next turn opens, append whatever suffix of `turn_end` is
+    missing. No-op when the stream already ends fully closed (template-built segments)."""
+    if not turn_end:
+        return ids
+    last = ids[0, -1].item()
+    if last == turn_end[-1]:
+        return ids                                   # already fully closed
+    try:
+        k = turn_end.index(last) + 1                 # stopped at the close token → add the glue
+    except ValueError:
+        k = 0                                        # bare turn (eos trim / interrupt) → full close
+    return torch.cat([ids, torch.tensor([turn_end[k:]], device=ids.device, dtype=torch.long)], dim=1)
 
 
 def _parse_perpetual(text: str) -> tuple[bool, str]:
@@ -414,13 +432,19 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
     tool_res_id = find_tool_res_id(processor.tokenizer)
     asst_msg = [{"role": "assistant", "tool_calls": [   # reused in feedback injection below
         {"id": "0", "type": "function", "function": {"name": "_", "arguments": {}}}]}]
-    # gen_prompt: assistant-turn cue (e.g. <start_of_turn>model\n). MUST be derived from a
-    # user-terminated diff — after a tool_call, Gemma-4's template suppresses the cue even with
-    # add_generation_prompt=True (the asst_msg diff yields an empty tensor; verified).
+    # gen_prompt: assistant-turn cue after a *user* turn (e.g. <start_of_turn>model\n).
+    # gen_prompt_tool: the cue after a *tool response* — [] on templates where the model turn
+    # simply continues (Gemma-4), non-empty where tool results live in a user-style turn (Qwen).
+    # Using the right cue per boundary keeps the stream identical to the canonical template render.
     _gp = find_gen_prompt(processor.tokenizer)
     if not _gp:
         import warnings; warnings.warn("gen_prompt is empty — chat template did not append a model-turn cue; model may emit immediate <eos>")
     gen_prompt = torch.tensor([_gp], device=model.device, dtype=torch.long)
+    gen_prompt_tool = torch.tensor([find_gen_prompt_after_tool(processor.tokenizer)],
+                                   device=model.device, dtype=torch.long)
+    # turn_end: canonical close of an assistant turn (e.g. <end_of_turn>\n); generation stops at
+    # the close token so _close_turn re-splices the never-generated tail at turn boundaries.
+    turn_end = find_turn_end(processor.tokenizer)
 
     # Perpetual (/perpetual) standing task: parsed off the initial prompt. When on, the done-boundary
     # re-seeds a continuation nudge instead of yielding to the user; only Ctrl-C stops it.
@@ -617,7 +641,8 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
     # processor emits the mm tensors; pre-fill them into the cache so the first generate sees them.
     i = 0
     past_key_values = None
-    pending_mm = None # mm kwargs
+    pending_mm = None       # mm kwargs
+    pending_mm_start = 0    # absolute position where pending_mm's token-aligned tensors begin
     inputs = processor.apply_chat_template(
         messages, add_generation_prompt=False, tokenize=True,
         return_tensors="pt", return_dict=True,
@@ -635,9 +660,13 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
     except (ValueError, OSError):
         _prev_sigint = None
 
+    # next_cue: which assistant cue the coming turn needs — gen_prompt after user-style turns,
+    # gen_prompt_tool (possibly empty: turn continues) after tool-result deltas.
+    next_cue = gen_prompt
     while True:
-        # Prepend generation prompt once per turn; every delta is prompt-free
-        input_ids = torch.cat([input_ids, gen_prompt], dim=1)
+        # Prepend the boundary-appropriate generation cue once per turn; every delta is prompt-free
+        input_ids = torch.cat([input_ids, next_cue], dim=1)
+        next_cue = gen_prompt
         base_fn = inner_fn_perp if perpetual else inner_fn   # perpetual forbids prompt_user in the enum
         seed_close, seed_force = None, False
         if saving_mem:
@@ -677,13 +706,18 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
             "max_new_tokens": max_new_tokens,
             **gen_kwargs,   # assistant_model (drafter) or prompt_lookup_num_tokens (n-gram)
         }
-        # Zero-pad token_type_ids to match the length of the appended messages
+        # Zero-pad token_type_ids to span the uncached window, placing the delta's ids at their
+        # true offset (the window may start before the delta: the last generated token is never
+        # fed during decoding, and _close_turn splices unfed glue tokens).
         if pending_mm is not None:
             mm = dict(pending_mm)
             if "token_type_ids" in mm:
-                win = input_ids.shape[1] - (past_key_values.get_seq_length() if past_key_values is not None else 0)
+                cached = past_key_values.get_seq_length() if past_key_values is not None else 0
+                win = input_ids.shape[1] - cached
                 t = mm["token_type_ids"]
-                mm["token_type_ids"] = torch.cat([t, t.new_zeros(1, win - t.shape[1])], dim=1)
+                lead = pending_mm_start - cached
+                mm["token_type_ids"] = torch.cat(
+                    [t.new_zeros(1, lead), t, t.new_zeros(1, win - lead - t.shape[1])], dim=1)
             kwargs.update(mm)
         # Generate with a fresh streamer; _drain() forwards tokens to on_token concurrently.
         # suppress=saving_mem: that turn's open delim is seeded into the prompt (never streamed).
@@ -697,9 +731,15 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
             _drain()
         )
         if on_gen_end: on_gen_end()
+        # Trim the trailing stop token when the continuation re-supplies it: a bare eos (end of
+        # conversation; the next turn opens fresh) or the tool-response opener (Gemma-4 stops *at*
+        # <tool_response> — the _result_to_ids delta starts with that same token, so keeping it
+        # would double it in the stream). A turn-close stop (e.g. <end_of_turn>) is kept.
+        _last = outputs.sequences[0, -1].item()
         gen_ids = (outputs.sequences[:, :-1]
-                   if outputs.sequences[0, -1] == processor.tokenizer.eos_token_id
+                   if _last in (processor.tokenizer.eos_token_id, tool_res_id)
                    else outputs.sequences)
+        awaiting_tool_res = _last == tool_res_id   # the model turn is still open, expecting results
         new_ids = gen_ids.squeeze()[new_idx:].detach().cpu()
         past_key_values = outputs.past_key_values
 
@@ -736,6 +776,10 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
         stopping = stop_flag.is_set()             # Ctrl-C: wrap up now, regardless of pending work
         if stopping or (not results and not pending and not children_active):
             # task done (no tool calls / no pending background jobs / no live sub-agents) — or Ctrl-C
+            # Close the turn canonically before anything else builds on gen_ids (user delta,
+            # grade-nudge base, perpetual/memory re-seed): generation stopped at the close token
+            # (glue missing) or bare (eos trim / interrupt). Recorded positions precede the splice.
+            gen_ids = _close_turn(gen_ids, turn_end)
             seg_end = len(trajectory)
             if perpetual and not stopping:
                 # Standing task: never yield to the user. Grade this iteration into the one session
@@ -803,6 +847,9 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
             # answers as tool-result deltas; also drain any finished background commands.
             # (This branch isn't hit right after a background=True command or a spawn, which return
             # a job/handle id — those count as tool results and take the else branch below.)
+            # The turn ended without a call → close it; injected results then open a fresh model
+            # turn via the default gen_prompt cue (there is no canonical render for this seam).
+            gen_ids = _close_turn(gen_ids, turn_end)
             parts = [gen_ids]
             if children_active:
                 if on_subagent_update:
@@ -819,7 +866,16 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
                 parts.append(bg)
             input_ids = torch.cat(parts, dim=1) if len(parts) > 1 else gen_ids
         else:
+            # Normal case: the turn stopped at the tool-response opener (trimmed above) and the
+            # delta re-supplies it — the model turn is still open, so the next cue is the
+            # (possibly empty) after-tool cue. If the model instead closed its turn after the
+            # call(s), close it canonically and open a fresh turn with the user-style cue.
+            if awaiting_tool_res:
+                next_cue = gen_prompt_tool
+            else:
+                gen_ids = _close_turn(gen_ids, turn_end)
             tool_ids, pending_mm = _result_to_ids(results, processor, tool_res_id, model.device)  # mm (or None) → next generate
+            pending_mm_start = gen_ids.shape[1]      # absolute position where the mm delta begins
             bg = _bg_msgs(session, processor, tool_res_id, model.device)
             parts = [gen_ids, tool_ids] + ([bg] if isinstance(bg, torch.Tensor) else [])
             input_ids = torch.cat(parts, dim=1)
@@ -837,6 +893,7 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
                 trajectory[-1]["reward"] -= reward_utils.W_FEEDBACK
                 fb_delta = _user_turn_delta(processor.tokenizer, asst_msg, feedback_text, model.device)
                 input_ids = torch.cat([input_ids, fb_delta], dim=1)
+                next_cue = gen_prompt        # a user turn follows the tool results → user-style cue
             else: # continue
                 trajectory[-1]["reward"] += reward_utils.W_CONTINUE
 

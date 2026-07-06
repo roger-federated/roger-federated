@@ -73,6 +73,34 @@ def find_gen_prompt(tokenizer) -> list[int]:
         [{"role": "user", "content": "_"}], tokenize=True, add_generation_prompt=True)
     return full["input_ids"][len(base["input_ids"]):]
 
+def find_gen_prompt_after_tool(tokenizer) -> list[int]:
+    """Assistant-turn cue *after a tool response* (add_generation_prompt diff over a tool-terminated
+    conversation). Templates differ here: Gemma-4 continues the model turn directly after the tool
+    response (→ []), Qwen-style templates wrap tool responses in a user turn and re-cue the
+    assistant (→ non-empty). The rollout uses this instead of the user-turn cue when the last
+    delta was a tool result, so no spurious turn-open tokens enter the stream."""
+    msgs = [{"role": "user", "content": "_"},
+            {"role": "assistant", "tool_calls": [
+                {"id": "0", "type": "function", "function": {"name": "_", "arguments": {}}}]},
+            {"role": "tool", "tool_call_id": "0", "content": [{"type": "text", "text": "_"}]}]
+    base = tokenizer.apply_chat_template(msgs, tokenize=True, add_generation_prompt=False)
+    full = tokenizer.apply_chat_template(msgs, tokenize=True, add_generation_prompt=True)
+    return full["input_ids"][len(base["input_ids"]):]
+
+def find_turn_end(tokenizer) -> list[int]:
+    """Tokens that close a plain assistant turn (e.g. Gemma's <turn|>\\n). Generation stops *at*
+    the turn-close token, so the trailing glue (and, after an eos trim or an interrupt, the close
+    itself) is never generated; the rollout splices the missing tail back in so turn boundaries
+    match the canonical template rendering. [] if the render isn't prefix-stable (fall back to
+    appending nothing, i.e. the old behaviour)."""
+    prefix = tokenizer.apply_chat_template(
+        [{"role": "user", "content": "_"}], tokenize=True, add_generation_prompt=True
+    )["input_ids"] + tokenizer.encode("x", add_special_tokens=False)
+    full = tokenizer.apply_chat_template(
+        [{"role": "user", "content": "_"}, {"role": "assistant", "content": "x"}],
+        tokenize=True, add_generation_prompt=False)["input_ids"]
+    return full[len(prefix):] if full[:len(prefix)] == prefix else []
+
 def find_tool_res_id(tokenizer) -> int:
     """Last token of a dummy tool-call assistant turn — the tool_response boundary token."""
     out = tokenizer.apply_chat_template(

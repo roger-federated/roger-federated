@@ -54,6 +54,8 @@ class SubAgent:
     emitted_tool_call: bool = False
     parent: "SubAgent" = None             # the slot that spawned this one; None ⇒ spawned by the main agent
     phase: str = "ready"                  # "ready" (will generate this turn) | "parked" (awaiting own children)
+    cue: str = "user"                     # next turn's cue: "user" (fresh model turn) | "tool" (turn continues)
+    stop_tok: int = None                  # stop token the last turn ended at (None = ran to length/interrupt)
     steps: int = 0
     done: bool = False
     collected: bool = False               # result already delivered to parent/main
@@ -73,13 +75,15 @@ def _stop_ids(model) -> set:
     return ids
 
 
-def _cut_at_stop(gen: list[int], stop: set) -> list[int]:
-    """Trim a row's generated tokens at the first stop token (exclusive), matching the single-agent
-    loop's 'drop the trailing eos' behaviour. Rows that finished early are pad-filled by generate."""
+def _cut_at_stop(gen: list[int], stop: set, drop: set) -> tuple[list[int], int | None]:
+    """Trim a row's generated tokens at its first stop token, matching the single-agent loop:
+    stops in `drop` (eos, tool-response opener — the tool delta re-supplies it) are excluded,
+    a turn-close stop is kept. Returns (tokens, stop_token | None). Rows that finished early are
+    pad-filled by generate; cutting at the stop discards the pads too."""
     for i, t in enumerate(gen):
         if t in stop:
-            return gen[:i]
-    return gen
+            return (gen[:i] if t in drop else gen[:i + 1]), t
+    return gen, None
 
 
 def batched_generate(slots: list[SubAgent], model, processor, tool_tokens, max_new_tokens: int):
@@ -90,7 +94,9 @@ def batched_generate(slots: list[SubAgent], model, processor, tool_tokens, max_n
     (slot.new_ids / step_logits / masks). No KV cache is persisted across turns.
     """
     from roger.agency.rollout_utils import _allowed_tokens   # lazy: avoid import cycle
+    from roger.loading.model_setup import find_tool_res_id
     tok = processor.tokenizer
+    drop = {tok.eos_token_id, find_tool_res_id(tok)}
     pad = tok.pad_token_id if tok.pad_token_id is not None else tok.eos_token_id
     stop = _stop_ids(model)
     Smax = max(s.input_ids.shape[1] for s in slots)
@@ -125,7 +131,7 @@ def batched_generate(slots: list[SubAgent], model, processor, tool_tokens, max_n
     )
     for b, s in enumerate(slots):
         gen = out.sequences[b, Smax:].tolist()
-        new = _cut_at_stop(gen, stop)
+        new, s.stop_tok = _cut_at_stop(gen, stop, drop)
         n = len(new)
         s.new_ids = torch.tensor(new, dtype=torch.long)
         s.step_logits = [out.logits[t][b:b+1] for t in range(n)]   # [1, V] per generated step
@@ -199,11 +205,16 @@ class SubAgentScheduler:
                  enable_skills: bool = True, skills_root: str = None,
                  policy_file: str = "command_policy.txt",
                  on_tool_call: Callable = None, on_tool_result: Callable = None):
-        from roger.loading.model_setup import find_tool_call_tokens, find_tool_res_id, find_gen_prompt
+        from roger.loading.model_setup import (find_tool_call_tokens, find_tool_res_id,
+                                               find_gen_prompt, find_gen_prompt_after_tool, find_turn_end)
         self.model = model; self.processor = processor; self.tok = processor.tokenizer
         self.tool_tokens = find_tool_call_tokens(self.tok)
         self.tool_res_id = find_tool_res_id(self.tok)
         self.gen_prompt = torch.tensor([find_gen_prompt(self.tok)], device=model.device, dtype=torch.long)
+        # After-tool cue + canonical turn close: same boundary discipline as the main loop.
+        self.gen_prompt_tool = torch.tensor([find_gen_prompt_after_tool(self.tok)],
+                                            device=model.device, dtype=torch.long)
+        self.turn_end = find_turn_end(self.tok)
         self.max_alive = max_alive; self.max_steps = max_steps; self.root = root
         self.max_new_tokens = max_new_tokens
         self.mcp_tools = list(mcp_tools); self.mcp_handlers = dict(mcp_handlers or {})
@@ -250,8 +261,10 @@ class SubAgentScheduler:
             self.tok, [t["function"]["name"] if isinstance(t, dict) else t.__name__ for t in tools])
         msgs = [{"role": "system", "content": sys_content},
                 {"role": "user", "content": task + SUMMARY_SUFFIX}]
+        # No generation prompt here: _one_turn prepends the cue each turn (adding it twice would
+        # double the model-turn opener on the first turn).
         slot.input_ids = self.processor.apply_chat_template(
-            msgs, add_generation_prompt=True, tokenize=True, return_tensors="pt",
+            msgs, add_generation_prompt=False, tokenize=True, return_tensors="pt",
             tools=tools).to(self.model.device)
         self.slots.append(slot)
         return handle
@@ -262,7 +275,11 @@ class SubAgentScheduler:
         if not ready:
             return
         for s in ready:
-            s.input_ids = torch.cat([s.input_ids, self.gen_prompt], dim=1)
+            # Boundary-appropriate cue: fresh model turn after user-style content, the (possibly
+            # empty) after-tool cue when the model turn continues past its tool results.
+            s.input_ids = torch.cat(
+                [s.input_ids, self.gen_prompt if s.cue == "user" else self.gen_prompt_tool], dim=1)
+            s.cue = "user"
         batched_generate(ready, self.model, self.processor, self.tool_tokens, self.max_new_tokens)
         await asyncio.gather(*(self._after_generate(s) for s in ready))
         # Deliver freshly-finished sub-agents to their parent (recursion) or the main agent.
@@ -277,7 +294,7 @@ class SubAgentScheduler:
 
     async def _after_generate(self, slot: SubAgent) -> None:
         """Post-generate step for one sub-agent: record, run tools, then continue / park / finish."""
-        from roger.agency.rollout_utils import _old_logps, _execute_tools, _result_to_ids, _bg_msgs
+        from roger.agency.rollout_utils import _old_logps, _execute_tools, _result_to_ids, _bg_msgs, _close_turn
         tok = self.tok; dev = self.model.device
         gen_start = slot.input_ids.shape[1]
         slot.input_ids = torch.cat([slot.input_ids, slot.new_ids.unsqueeze(0).to(dev)], dim=1)
@@ -296,18 +313,28 @@ class SubAgentScheduler:
         pending = slot.session.pending_jobs()
         has_children = any(c.parent is slot and not c.done for c in self.slots)
         if results:
+            # Same boundary rule as the main loop: a turn that stopped at the tool-response opener
+            # continues past its results ("tool" cue); one that closed itself gets closed
+            # canonically and a fresh turn opens after the results.
+            if slot.stop_tok == self.tool_res_id:
+                slot.cue = "tool"
+            else:
+                slot.input_ids = _close_turn(slot.input_ids, self.turn_end)
             tool_ids, _mm = _result_to_ids(results, self.processor, self.tool_res_id, dev)
             bg = _bg_msgs(slot.session, self.processor, self.tool_res_id, dev)
             parts = [slot.input_ids, tool_ids] + ([bg] if isinstance(bg, torch.Tensor) else [])
             slot.input_ids = torch.cat(parts, dim=1)
             slot.phase = "ready"
         elif pending:
+            slot.input_ids = _close_turn(slot.input_ids, self.turn_end)   # plain turn ended
             await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
             bg = _bg_msgs(slot.session, self.processor, self.tool_res_id, dev)
             if isinstance(bg, torch.Tensor):
                 slot.input_ids = torch.cat([slot.input_ids, bg], dim=1)
             slot.phase = "ready"
         elif has_children:
+            # Close now; child results are injected later and must not trigger a second close.
+            slot.input_ids = _close_turn(slot.input_ids, self.turn_end)
             slot.phase = "parked"          # unparked when a child result is injected
         else:
             await self._finish(slot)
