@@ -1,5 +1,7 @@
 {
   "model_id": "google/gemma-4-12B-it",
+  "quantization": "4bit",
+  "max_subagents": 4,
   "max_steps": 10,
   "max_new_tokens": 4096,
   "enable_rag": true,

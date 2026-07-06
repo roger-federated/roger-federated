@@ -1,4 +1,4 @@
-import asyncio, os, sys, torch, transformers, json, inspect, numpy as np
+import asyncio, os, sys, torch, transformers, json, inspect, functools, numpy as np
 import roger.training.reward_utils as reward_utils
 from roger.agency.retrieval import build_index, retrieve, format_context
 from roger.agency.skill_utils import load_instructions, load_memory, discover_skills, make_skill_loader, project_mem_file
@@ -180,8 +180,15 @@ async def _execute_tools(sequences: torch.Tensor, tokenizer: transformers.PreTra
             result = f"No tool handler provided for '{name}'. Perhaps you misspelled the tool name?"
         else:
             try:
-                result = (await handler(**args) if inspect.iscoroutinefunction(handler)
-                          else handler(**args))
+                if inspect.iscoroutinefunction(handler):
+                    result = await handler(**args)
+                else:
+                    # Run sync handlers in a worker thread so a blocking tool (foreground shell,
+                    # web fetch) doesn't stall the event loop — this lets concurrently-scheduled
+                    # sub-agents' tool calls actually overlap. A single agent's own calls still run
+                    # sequentially (each is awaited before the next).
+                    result = await asyncio.get_running_loop().run_in_executor(
+                        None, functools.partial(handler, **args))
             except TypeError as e:
                 result = f"Error calling '{name}': wrong arguments — {e}"
             except Exception as e:
@@ -318,14 +325,19 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
                   on_tool_result: Callable = None, # (name, result, args) → None; fired after
                   prompt_backend: Callable = None, # replaces input() for all user prompts
                   session: ToolSession = None,     # per-agent tool state; created fresh if not supplied
+                  on_subagent_update: Callable = None,  # (n_alive: int) → None; fired while parked driving sub-agents
                   read_turn: Callable = None,      # async (preamble="") -> next user turn | None (Ctrl-D)
                   root: str = None,                # project root; defaults to os.getcwd()
                   enable_rag: bool = True, rag_k: int = 3,
                   rag_root: str = None,
                   enable_skills: bool = True, skills_root: str = None,
                   enable_memory: bool = True,
+                  max_subagents: int = 4,          # max concurrently-alive sub-agents; 0 disables spawning
                   gen_kwargs: dict = {}) -> list: # extra generate() kwargs (e.g. speculative-decoding: drafter / n-gram)
 
+    # Caller-supplied tools are the MCP set (cli passes mcp_tools/mcp_handlers); capture them raw —
+    # before the >15 deferral rewrites `tools` — so spawned sub-agents get the real MCP schemas.
+    _mcp_tools, _mcp_handlers = list(tools), dict(tool_handlers)
     # tool_tokens: (open, close) ids bracketing a tool call; probed from the chat template.
     tool_tokens = find_tool_call_tokens(processor.tokenizer)
     # think_tokens: (open, close) reasoning-channel ids, or None; the finish-nudge seeds the open id.
@@ -380,6 +392,25 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
             skill_catalog, load_skill_fn = make_skill_loader(_skills)
             tools.append(load_skill_fn)
             tool_handlers["load_skill"] = load_skill_fn
+
+    # Sub-agent spawning: register spawn_subagent so the model can fan out concurrent sub-agents
+    # that reuse this in-VRAM model. The scheduler is driven by the main agent while it parks
+    # awaiting results (see the pending/park branch below). Added before the grammar is built so
+    # its name enters the tool-name enum.
+    scheduler = None
+    if max_subagents >= 1:
+        from roger.agency.subagents import SubAgentScheduler, make_subagent_tool
+        scheduler = SubAgentScheduler(
+            model, processor, max_alive=max_subagents, max_steps=max_steps,
+            root=root or os.getcwd(), max_new_tokens=max_new_tokens or 4096,
+            mcp_tools=_mcp_tools, mcp_handlers=_mcp_handlers, prompt_backend=prompt_backend,
+            enable_skills=enable_skills, skills_root=skills_root,
+            # Sub-agents don't stream tokens and their internal tool steps stay silent to keep the
+            # UI clean under concurrency; the user sees the spawn call + the returned summary panel.
+            on_tool_call=None, on_tool_result=None)
+        spawn_tool = make_subagent_tool(scheduler, parent=None)
+        tools.append(spawn_tool)
+        tool_handlers["spawn_subagent"] = spawn_tool
 
     # Build constrained-decoding inner fn once for this rollout (schema uses full name list)
     tool_names = [t["function"]["name"] if isinstance(t, dict) else t.__name__ for t in tools]
@@ -576,8 +607,9 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
 
         # Mutually exclusive: bg-wait (another model turn) | task done (await user) | tool results.
         pending = session.pending_jobs()
-        if not results and not pending:
-            # task done: no tool calls, no pending background jobs
+        children_active = scheduler.active() if scheduler else False
+        if not results and not pending and not children_active:
+            # task done: no tool calls, no pending background jobs, no live sub-agents
             seg_end = len(trajectory)
             session.set_gradeable(emitted_tool_call)
             next_text = await _await_user_turn(session, read_turn, trajectory, seg_start) if read_turn else None
@@ -610,11 +642,27 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
             i = 0
             emitted_tool_call = False
             continue
-        elif not results and pending:
-            # Note: branch not immediately activated when a command is emitted with background=True, because it returns job id
-            await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+        elif not results and (pending or children_active):
+            # Parked: the model emitted no new call but has pending background jobs and/or live
+            # sub-agents. Drive the sub-agent scheduler to progress and inject finished sub-agents'
+            # answers as tool-result deltas; also drain any finished background commands.
+            # (This branch isn't hit right after a background=True command or a spawn, which return
+            # a job/handle id — those count as tool results and take the else branch below.)
+            parts = [gen_ids]
+            if children_active:
+                if on_subagent_update:
+                    on_subagent_update(scheduler.alive())
+                finished = await scheduler.run_until_progress()
+                if finished:
+                    msgs = [("spawn_subagent", f"[sub-agent {h}] {r}") for h, r in finished]
+                    cids, _ = _result_to_ids(msgs, processor, tool_res_id, model.device)
+                    parts.append(cids)
+            if pending and not children_active:   # driving children already blocked; don't double-wait
+                await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
             bg = _bg_msgs(session, processor, tool_res_id, model.device)
-            input_ids = torch.cat([gen_ids, bg], dim=1) if isinstance(bg, torch.Tensor) else gen_ids
+            if isinstance(bg, torch.Tensor):
+                parts.append(bg)
+            input_ids = torch.cat(parts, dim=1) if len(parts) > 1 else gen_ids
         else:
             tool_ids, pending_mm = _result_to_ids(results, processor, tool_res_id, model.device)  # mm (or None) → next generate
             bg = _bg_msgs(session, processor, tool_res_id, model.device)
@@ -637,5 +685,8 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
                 trajectory[-1]["reward"] += reward_utils.W_CONTINUE
 
     session.terminate_jobs()  # for safety, kill any still-running background commands
+    if scheduler is not None:
+        for s in scheduler.slots:
+            s.session.terminate_jobs()
 
     return trajectory

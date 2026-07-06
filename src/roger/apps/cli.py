@@ -230,12 +230,14 @@ async def _repl(cfg: dict, root: str) -> None:
             on_tool_result = ui.render_tool_result,
             prompt_backend = pt_backend,
             session        = tool_session,
+            on_subagent_update = lambda n: console.print(f"[dim]  … {n} sub-agent(s) working[/dim]"),
             read_turn      = read_turn,
             root           = root,
             enable_rag     = cfg["enable_rag"],
             rag_k          = cfg["rag_k"],
             enable_skills  = cfg["enable_skills"],
             enable_memory  = cfg["enable_memory"],
+            max_subagents  = cfg.get("max_subagents", 4),
             gen_kwargs     = gen_kwargs,
         )
     finally:
