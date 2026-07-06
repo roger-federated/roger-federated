@@ -26,7 +26,7 @@ from roger.tools.session import ToolSession
 from roger.tools.std_tools import get_standard_tools
 from roger.tools.shell_tools import shell_idioms
 from roger.agency.skill_utils import load_instructions, discover_skills, make_skill_loader
-from roger.agency.path_utils import expand_at_references, state_dir
+from roger.agency.path_utils import expand_at_references
 from roger.training import recording
 
 

@@ -8,7 +8,7 @@ Public API:
   select_root(default)             — interactive folder selection (tkinter or text)
   read_prompt(session)             — multi-line prompt_toolkit input
 """
-import os, sys, difflib, re, threading
+import os, difflib, re, threading
 from typing import Callable
 
 from rich.console import Console
@@ -407,7 +407,7 @@ def select_root(default: str) -> str:
     to a text prompt if no display is available (headless/SSH).
     """
     console.print(
-        f"\n[bold]Select the folder from which the agent will be working.[/bold]"
+        "\n[bold]Select the folder from which the agent will be working.[/bold]"
     )
     # Try native folder dialog
     path = None
