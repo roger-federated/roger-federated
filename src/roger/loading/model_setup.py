@@ -102,29 +102,43 @@ def _4bit(compute_dtype) -> BitsAndBytesConfig:
         load_in_4bit=True, bnb_4bit_quant_type="nf4", bnb_4bit_use_double_quant=True,
         bnb_4bit_compute_dtype=compute_dtype, llm_int8_enable_fp32_cpu_offload=True)
 
-def _select_quant(model_id, gpu_available, for_training): 
-    """Pick the highest-precision tier that fits VRAM: (quantization_config | None, dtype, fits).
+def _8bit() -> BitsAndBytesConfig:
+    return BitsAndBytesConfig(load_in_8bit=True, llm_int8_enable_fp32_cpu_offload=True)
 
-    Estimates the model footprint from its param count and compares each tier
-    (bf16 → int8 → nf4) against ~VRAM_UTIL of *free* VRAM, inflated by TRAIN_HEADROOM when
-    loading for RL. `fits` is True when the chosen tier's weights sit within that budget, so
-    the caller can pin the whole model to the GPU; it's False for the unknown-size fallback
-    and the 4-bit-still-too-big case, where Accelerate must place + offload the remainder.
-    bitsandbytes needs CUDA, so the no-GPU path loads unquantized.
+def _select_quant(model_id, gpu_available, for_training, quant="auto"):
+    """Pick a quantization tier: (quantization_config | None, dtype, fits).
+
+    `quant` is the config knob: "auto" keeps the VRAM-aware ladder below; "4bit"/"8bit"/"none"
+    force that tier regardless of headroom (the default is "4bit" — sub-agents each cost a KV
+    cache, so we trade weight precision for cache VRAM). Even a forced tier computes `fits`
+    against the same *free*-VRAM budget so placement/offload stays correct.
+
+    Auto path estimates the footprint from param count and compares each tier (bf16 → int8 → nf4)
+    against ~VRAM_UTIL of free VRAM, inflated by TRAIN_HEADROOM when loading for RL. `fits` True
+    means the weights sit within budget (pin to GPU); False means Accelerate must place + offload
+    the remainder. bitsandbytes needs CUDA, so the no-GPU path always loads unquantized.
     """
     if not gpu_available:
-        return None, torch.float32, False
+        return None, torch.float32, False               # bnb needs CUDA → no quant off-GPU
     compute_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
     P = _param_count(model_id)
+    budget = sum(_vram_budget().values())               # free VRAM (matches the pin/offload budget)
+    factor = TRAIN_HEADROOM if for_training else 1.0
+    # bytes-per-param: bf16=2, int8=1, nf4=0.5; fits is unknown (→ False, let auto offload) when P is None
+    _fits = lambda bpp: P is not None and bpp * P * factor <= budget
+    if quant != "auto":                                 # forced tier from the config knob
+        if quant == "none":
+            return None, compute_dtype, _fits(2.0)
+        if quant == "8bit":
+            return _8bit(), compute_dtype, _fits(1.0)
+        return _4bit(compute_dtype), compute_dtype, _fits(0.5)   # "4bit" (default) or unrecognised
     if P is None:
         return _4bit(compute_dtype), compute_dtype, False   # unknown size → let auto offload
-    budget = sum(_vram_budget().values())              # free VRAM (matches the pin/offload budget)
-    factor = TRAIN_HEADROOM if for_training else 1.0
-    if 2.0 * P * factor <= budget:                     # bf16 weights fit → no quant
+    if _fits(2.0):                                       # bf16 weights fit → no quant
         return None, compute_dtype, True
-    if 1.0 * P * factor <= budget:                     # int8 fits
-        return BitsAndBytesConfig(load_in_8bit=True, llm_int8_enable_fp32_cpu_offload=True), compute_dtype, True
-    return _4bit(compute_dtype), compute_dtype, 0.5 * P * factor <= budget   # nf4; fits unless still too big
+    if _fits(1.0):                                       # int8 fits
+        return _8bit(), compute_dtype, True
+    return _4bit(compute_dtype), compute_dtype, _fits(0.5)  # nf4; fits unless still too big
 
 def placement_summary(model) -> tuple[str, str]:
     """Where did the weights land? Returns (message, rich_style), derived from hf_device_map.
@@ -258,15 +272,16 @@ def _resolve_model_cls(model_id: str):
 
 def fetch_model(model_id="google/gemma-4-E2B-it", for_training: bool = False,
                 model_cls=None,
-                weight_deltas: dict | None = None) -> tuple[AutoModelForImageTextToText, AutoProcessor]:
+                weight_deltas: dict | None = None,
+                quant: str = "auto") -> tuple[AutoModelForImageTextToText, AutoProcessor]:
     if model_cls is None:
         model_cls = _resolve_model_cls(model_id)
     # `model_cls` lets non-generative models reuse this loader (e.g. the privacy filter's
     # AutoModelForTokenClassification) so they get the same VRAM-aware quant/placement.
     # `weight_deltas` (federated): a dense ΔW per module folded into the base before quantization.
-    # VRAM-aware quantization: choose tier from model size vs available VRAM
+    # `quant` (config knob): "auto" | "4bit" | "8bit" | "none" — force a tier or size it to VRAM.
     gpu_available = torch.cuda.is_available()
-    quant_cfg, dtype, fits = _select_quant(model_id, gpu_available, for_training)
+    quant_cfg, dtype, fits = _select_quant(model_id, gpu_available, for_training, quant)
     n_gpu = torch.cuda.device_count() if gpu_available else 0
     if weight_deltas:
         model = _load_folded(model_id, weight_deltas, model_cls, quant_cfg, dtype, fits, gpu_available, n_gpu)
