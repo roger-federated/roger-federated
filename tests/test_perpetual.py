@@ -22,24 +22,32 @@ def test_parse_perpetual_strips_marker():
 
 # --- varied, comprehensive continuation seed ------------------------------------------------
 
-_ASPECTS = ("satisf", "adjacent", "not", "sleep")   # continuously-satisfied / adjacent / untried / pace
+# autonomy / completion / error-recovery / adjacent / untried / sleep-and-recheck — every beat, every variant
+_ASPECTS = ("autonom", "satisf", "error", "adjacent", "tried", "sleep")
 
 def test_seed_is_randomly_varied():
     draws = {r._perpetual_seed_text("t", "web_fetch", 0) for _ in range(50)}
     assert len(draws) >= 3   # random.choice over the pool → not the same opener every time
 
-def test_every_seed_variant_covers_all_aspects():
-    # Sample enough to surface all variants; each must touch every aspect (no dropped coverage).
+def test_every_seed_variant_covers_all_beats():
+    # Sample enough to surface all variants; each must touch every beat (no dropped coverage).
     for _ in range(200):
         s = r._perpetual_seed_text("my task", "run_command", 1).lower()
         for a in _ASPECTS:
-            assert a in s, f"aspect {a!r} missing from: {s}"
+            assert a in s, f"beat {a!r} missing from: {s}"
 
-def test_seed_grounds_on_last_tool_and_paces_on_idle():
+def test_seed_restates_task_and_grounds_on_last_tool_and_paces_on_idle():
+    assert "my task" in r._perpetual_seed_text("my task", None, 0)          # re-anchors the goal every time
     assert "`web_fetch`" in r._perpetual_seed_text("t", "web_fetch", 0)
     assert "last used" not in r._perpetual_seed_text("t", None, 0)          # no tool yet → no claim
     assert "sleep 10" in r._perpetual_seed_text("t", None, 1)               # idle escalates pacing
     assert "sleep 60" in r._perpetual_seed_text("t", None, 9)               # capped at 60s
+
+def test_seed_subagent_nudge_gated_on_availability():
+    # The spawn nudge only appears when spawning is actually available (scheduler present).
+    for _ in range(50):
+        assert "sub-agent" in r._perpetual_seed_text("t", None, 0, can_spawn=True)
+        assert "sub-agent" not in r._perpetual_seed_text("t", None, 0, can_spawn=False)
 
 
 # --- soft-prefill seed builder --------------------------------------------------------------

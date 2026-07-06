@@ -158,37 +158,40 @@ def _parse_perpetual(text: str) -> tuple[bool, str]:
     return False, text
 
 
-def _perpetual_seed_text(task: str, last_tool: str | None, idle_streak: int) -> str:
+def _perpetual_seed_text(task: str, last_tool: str | None, idle_streak: int, can_spawn: bool = False) -> str:
     """A comprehensive continuation nudge for a standing (/perpetual) task, chosen at RANDOM each
     iteration so the think channel never sees the same opener twice (a fixed opener biases the model
-    into a repetition loop). Every variant covers the same ground — is the task fully and continuously
-    satisfied, what is the next or an adjacent step, what have I not tried, and the option to briefly
-    sleep and re-check — differing only in wording/emphasis. `last_tool` grounds it in what just
-    happened; `idle_streak` escalates the pacing hint when nothing actionable is being found so a model
-    that keeps concluding 'nothing to do' paces its re-checks instead of hot-spinning the GPU."""
+    into a repetition loop). Every variant walks the same beats — act autonomously; re-anchor the task
+    (restated each time, so it survives the original prompt scrolling out of the sliding window); did I
+    already satisfy it and, if not, drive it to completion; if an error blocks me find a fix/workaround
+    myself; look for related/adjacent work and what I have not tried; (when spawning is available) fan
+    a sizable sub-task out to a sub-agent; else briefly sleep and re-check — differing only in wording
+    and order. `last_tool` grounds it in what just happened; `idle_streak` escalates the pacing hint so
+    a model that keeps concluding 'nothing to do' paces its re-checks instead of hot-spinning the GPU."""
     did = f" I last used `{last_tool}`." if last_tool else ""
     secs = min(60, 5 * (2 ** idle_streak)) if idle_streak else 0
-    sleep = ((f" If there is genuinely nothing to do right now I should briefly wait "
-              f"(`sleep {secs}` / `Start-Sleep -Seconds {secs}`) and then re-check, not stop.") if secs else
-             " If there is genuinely nothing to do right now I should briefly wait (a short `sleep`) and re-check, not stop.")
-    # Every variant covers the same four aspects (continuously satisfied / next-or-adjacent step /
-    # what I have not tried / sleep-and-re-check); they differ only in wording, emphasis and order.
+    sleep = ((f"if there is genuinely nothing to do right now I briefly wait "
+              f"(`sleep {secs}` / `Start-Sleep -Seconds {secs}`) and re-check, not stop") if secs else
+             "if there is genuinely nothing to do right now I briefly wait (a short `sleep`) and re-check, not stop")
+    spawn = (" For any sizable, self-contained sub-task I can spawn a sub-agent to work on it in parallel."
+             if can_spawn else "")
     variants = [
-        (f"This is a standing task I keep working on continuously: {task}.{did} I do not stop and hand back "
-         f"to the user. Let me verify it is fully and continuously satisfied, decide the next or an adjacent "
-         f"step, and consider anything I have not yet tried.{sleep}"),
-        (f"I am running this task perpetually: {task}.{did} Rather than concluding I am done, let me re-check "
-         f"whether it is still fully satisfied, what the next move or an adjacent improvement is, and any "
-         f"approach I have not tried.{sleep}"),
-        (f"Continuing my ongoing task: {task}.{did} There is no hand-off to the user here. Let me confirm it is "
-         f"fully and continuously satisfied, look for the next step or a useful adjacent task, and reconsider "
-         f"options I have not tried.{sleep}"),
-        (f"Standing objective, worked on without stopping: {task}.{did} Let me reassess from scratch: is it truly "
-         f"and continuously satisfied? what is the next or an adjacent task worth doing? what have I not tried "
-         f"yet?{sleep}"),
-        (f"I keep iterating on this perpetual task: {task}.{did} Instead of finishing, let me confirm it is still "
-         f"fully satisfied (nothing regressed or gone stale), find the most useful next or adjacent action, and "
-         f"think about what I have not tried.{sleep}"),
+        (f"Let me recall that I act entirely autonomously and never wait for the user. My standing task is: "
+         f"{task}.{did} Have I already satisfied it? If not, I push to complete it now; if an error is blocking "
+         f"me I find a fix or workaround myself rather than giving up. Then: are there related or adjacent tasks "
+         f"worth doing, and what have I not tried yet?{spawn} Otherwise, {sleep}. Let me think."),
+        (f"Reminder: I am fully autonomous here and do not hand back to the user. The task I keep working on is: "
+         f"{task}.{did} First, is it truly and continuously satisfied? If not I complete it; if something errored, "
+         f"I resolve it or route around it myself. Next, which adjacent or follow-up work helps, and what approach "
+         f"have I not tried?{spawn} Otherwise, {sleep}. Let me think."),
+        (f"I operate autonomously and do not stop for the user. Standing task: {task}.{did} Did I already satisfy "
+         f"it? If it is incomplete I keep going until it is done; if an error obstructs me I debug a fix or a "
+         f"workaround on my own. Beyond that, which related or adjacent tasks are worth doing, and what have I not "
+         f"tried yet?{spawn} Otherwise, {sleep}. Let me think."),
+        (f"Let me re-centre: act autonomously, no waiting on the user. My ongoing task is: {task}.{did} Is it fully "
+         f"satisfied right now? If not I drive it to completion, and if an error blocks the way I find my own fix "
+         f"or workaround. Then I look for adjacent or related work and anything I have not tried yet.{spawn} If "
+         f"nothing remains, {sleep}. Let me think."),
     ]
     return random.choice(variants)
 
@@ -644,7 +647,8 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
         elif perpetual_pending:
             # Standing-task continuation: a varied nudge in the think channel; the model freely acts or sleeps.
             _seed = _build_seed(processor.tokenizer,
-                                _perpetual_seed_text(perpetual_task, last_tool, idle_streak),
+                                _perpetual_seed_text(perpetual_task, last_tool, idle_streak,
+                                                     can_spawn=scheduler is not None),
                                 think_tokens, tool_tokens, force_tool=False)
             input_ids = torch.cat(
                 [input_ids, torch.tensor([_seed], device=model.device, dtype=torch.long)], dim=1)
