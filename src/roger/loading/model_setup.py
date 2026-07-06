@@ -318,38 +318,19 @@ def uses_sliding_window(model) -> bool:
     return lt is None or any("sliding" in str(t) for t in lt)
 
 
-def _patch_sliding_crop():
-    """Make DynamicSlidingWindowLayer.crop() work for small rollbacks (speculative rejection, grade nudge).
+def _install_rollback_cache():
+    """Route sliding/chunked cache layers to RollbackSlidingWindowLayer (retains recently-evicted
+    K/V so a bounded crop can roll back — needed by the grade nudge and speculative rejection).
 
-    The layer evicts tokens at update time (keeps only sliding_window-1), so the stock crop() raises
-    once cumulative_length >= sliding_window — even for a 1-token rollback. But the physical buffer
-    always contains the most-recent tokens, so a crop that stays within it is safe: truncate the tensor
-    and update cumulative_length (absolute position, unlike the base class which tracks physical length).
-    Crops deeper than the physical buffer (>sliding_window tokens into the past) still raise — that
-    would require restoring evicted states.
-    NOTE: upstream transformers bug — dynamic_full path still builds sliding layers (utils.py:1911);
-    tracked in memory for potential upstream issue filing."""
-    from transformers.cache_utils import DynamicSlidingWindowLayer
+    transformers builds a DynamicCache by looking each config layer_type up in this registry at
+    construction time (cache_utils.py), so substituting the class here is picked up by every cache
+    generate() builds — the normal rollout loop *and* assisted/speculative decoding — with no caller
+    changes. Global to the process, which only ever runs our own model. Supersedes the previous
+    in-place crop monkeypatch (which corrupted a full window); the dynamic_full-still-builds-sliding
+    quirk is now moot, since our sliding layer crops correctly."""
+    from transformers.cache_utils import LAYER_TYPE_CACHE_MAPPING
+    from roger.loading.rollback_cache import RollbackSlidingWindowLayer
+    LAYER_TYPE_CACHE_MAPPING["sliding_attention"] = RollbackSlidingWindowLayer
+    LAYER_TYPE_CACHE_MAPPING["chunked_attention"] = RollbackSlidingWindowLayer
 
-    def _crop(self, max_length: int) -> None:
-        if max_length < 0:
-            max_length = self.cumulative_length + max_length
-        if max_length >= self.cumulative_length:
-            return
-        if not self.is_initialized:
-            return
-        physical = self.keys.shape[-2]
-        evicted  = self.cumulative_length - physical
-        if max_length < evicted:
-            raise ValueError(
-                f"Cannot crop DynamicSlidingWindowLayer to {max_length}: "
-                f"{evicted} tokens already evicted from the sliding window."
-            )
-        new_physical = max_length - evicted
-        self.keys   = self.keys[...,   :new_physical, :]
-        self.values = self.values[..., :new_physical, :]
-        self.cumulative_length = max_length   # abs position, NOT physical length (unlike base DynamicLayer)
-
-    DynamicSlidingWindowLayer.crop = _crop
-
-_patch_sliding_crop()   # install once at import time
+_install_rollback_cache()   # install once at import time
