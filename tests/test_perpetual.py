@@ -23,6 +23,7 @@ def test_parse_perpetual_strips_marker():
 # --- varied, comprehensive continuation seed ------------------------------------------------
 
 # autonomy / completion / error-recovery / adjacent / untried / sleep-and-recheck — every beat, every variant
+# (sub-agent fan-out is nudged in the main system prompt when spawning is enabled, not in this seed)
 _ASPECTS = ("autonom", "satisf", "error", "adjacent", "tried", "sleep")
 
 def test_seed_is_randomly_varied():
@@ -43,11 +44,10 @@ def test_seed_restates_task_and_grounds_on_last_tool_and_paces_on_idle():
     assert "sleep 10" in r._perpetual_seed_text("t", None, 1)               # idle escalates pacing
     assert "sleep 60" in r._perpetual_seed_text("t", None, 9)               # capped at 60s
 
-def test_seed_subagent_nudge_gated_on_availability():
-    # The spawn nudge only appears when spawning is actually available (scheduler present).
+def test_seed_has_no_subagent_nudge():
+    # Sub-agent fan-out lives in the system prompt now, not the per-iteration seed.
     for _ in range(50):
-        assert "sub-agent" in r._perpetual_seed_text("t", None, 0, can_spawn=True)
-        assert "sub-agent" not in r._perpetual_seed_text("t", None, 0, can_spawn=False)
+        assert "sub-agent" not in r._perpetual_seed_text("t", "run_command", 0).lower()
 
 
 # --- soft-prefill seed builder --------------------------------------------------------------
