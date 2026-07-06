@@ -191,7 +191,8 @@ async def _repl(cfg: dict, root: str) -> None:
             console.print()
             console.print(preamble, style="dim", markup=False)  # paths may contain []; don't parse markup
         return await ui.read_prompt(session, suggest_revert=tool_session.pending_backups,
-                                    placeholder=placeholder, suggest_grade=tool_session.gradeable)
+                                    placeholder=placeholder, suggest_grade=tool_session.gradeable,
+                                    suggest_perpetual=True)
 
     # First task: read until a non-empty prompt (or quit on Ctrl-D)
     while True:
@@ -231,6 +232,7 @@ async def _repl(cfg: dict, root: str) -> None:
             prompt_backend = pt_backend,
             session        = tool_session,
             on_subagent_update = lambda n: console.print(f"[dim]  … {n} sub-agent(s) working[/dim]"),
+            notify         = lambda m: console.print(f"[dim]{m}[/dim]"),
             read_turn      = read_turn,
             root           = root,
             enable_rag     = cfg["enable_rag"],

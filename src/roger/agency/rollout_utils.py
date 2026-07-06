@@ -1,4 +1,4 @@
-import asyncio, os, sys, torch, transformers, json, inspect, functools, numpy as np
+import asyncio, os, sys, torch, transformers, json, inspect, functools, random, signal, threading, numpy as np
 import roger.training.reward_utils as reward_utils
 from roger.agency.retrieval import build_index, retrieve, format_context
 from roger.agency.skill_utils import load_instructions, load_memory, discover_skills, make_skill_loader, project_mem_file
@@ -81,16 +81,23 @@ def _build_inner_fn(tokenizer: transformers.PreTrainedTokenizer, tool_names: lis
     return build_transformers_prefix_allowed_tokens_fn(tokenizer, JsonSchemaParser(schema))
 
 
-def _allowed_tokens(inner, tokenizer, tool_tokens, sent_tokens: torch.Tensor, new_idx: int):
+def _allowed_tokens(inner, tokenizer, tool_tokens, sent_tokens: torch.Tensor, new_idx: int,
+                    think_close: int = None, force_tool: bool = False):
     """Returns allowed token IDs at current step, conditioned on sent_tokens, or return None when unconstrained.
 
     Count open/close tokens to determine constraints:
     - num open tokens <= num close tokens: free generation → None (full vocab; nothing built on the hot path)
     - num open tokens == num close tokens + 1: inside a block → constrain to valid JSON, force-close instead of EOS
+
+    "reason-then-force" seeds (force_tool, reasoning models): the seed opens the think channel and lets
+    the model reason freely; once it emits its own think_close and has not yet started a call, force the
+    mandatory tool-open exactly once (n_open==0 guard prevents re-forcing after the call).
     """
     tokens = sent_tokens.squeeze()[new_idx:].tolist()
     # <=, not ==: a stray close from the unconstrained drafter (open<close) is also outside a block
     if tokens.count(tool_tokens[0]) <= tokens.count(tool_tokens[1]):
+        if force_tool and think_close is not None and tokens.count(tool_tokens[0]) == 0 and think_close in tokens:
+            return [tool_tokens[0]]     # model closed its thought → commit to the required call
         return None
     # Inside a block: find last open token, constrain JSON content after it
     last_open_idx = len(tokens) - 1 - tokens[::-1].index(tool_tokens[0])
@@ -102,18 +109,22 @@ def _allowed_tokens(inner, tokenizer, tool_tokens, sent_tokens: torch.Tensor, ne
     return allowed
 
 
-def _make_constraint_processor(inner, tokenizer, tool_tokens, new_idx):
+def _make_constraint_processor(inner, tokenizer, tool_tokens, new_idx,
+                               think_close: int = None, force_tool: bool = False):
     """Logits processor enforcing the tool-call grammar, plus a position-keyed mask log.
 
     Returns (processor, mask_by_pos). Scores pass through untouched on unconstrained steps (the hot
     path); inside a block they're -inf-masked to the allowed set. The allowed set (or None) is
     recorded into mask_by_pos keyed by the predicted position (input_ids.shape[1]) — keying by
     position, not call order, keeps masks aligned under speculative decoding.
+
+    think_close/force_tool: for "reason-then-force" seeds, force the tool-open once the model closes
+    its own thought (see _allowed_tokens).
     """
     mask_by_pos: dict = {}
 
     def processor(input_ids: torch.Tensor, scores: torch.Tensor) -> torch.Tensor:
-        allowed = _allowed_tokens(inner, tokenizer, tool_tokens, input_ids, new_idx)
+        allowed = _allowed_tokens(inner, tokenizer, tool_tokens, input_ids, new_idx, think_close, force_tool)
         # Record None for near-full-vocab steps too (free JSON-string positions): avoids storing
         # ~vocab-sized lists, and ~full vocab ≈ unconstrained. Enforcement still uses the precise set.
         mask_by_pos[input_ids.shape[1]] = (None if allowed is None or len(allowed) > tokenizer.vocab_size * 0.9
@@ -125,6 +136,61 @@ def _make_constraint_processor(inner, tokenizer, tool_tokens, new_idx):
         return scores + mask
 
     return processor, mask_by_pos
+
+
+def _build_seed(tokenizer, text: str, think_tokens, tool_tokens, force_tool: bool) -> list[int]:
+    """Soft-prefill seed token-ids. On a reasoning model, open the think channel with priming `text`
+    so the model reasons and closes its own thought before any (forced) tool call. On a non-reasoning
+    model there is no think channel, so fall back to the original immediate splice: `text` then, for a
+    mandatory-side-effect seed, the tool-open token (the JSON grammar engages at once)."""
+    body = tokenizer.encode(text, add_special_tokens=False)
+    if think_tokens is not None:
+        return [think_tokens[0]] + body            # reason first; force (if any) fires after think_close
+    return (body + [tool_tokens[0]]) if force_tool else body
+
+
+def _parse_perpetual(text: str) -> tuple[bool, str]:
+    """Strip a leading /perpetual (or /loop alias) marker. Returns (is_perpetual, task_text)."""
+    s = text.strip()
+    for pfx in ("/perpetual", "/loop"):
+        if s.lower().startswith(pfx):
+            return True, s[len(pfx):].strip()
+    return False, text
+
+
+def _perpetual_seed_text(task: str, last_tool: str | None, idle_streak: int) -> str:
+    """A comprehensive continuation nudge for a standing (/perpetual) task, chosen at RANDOM each
+    iteration so the think channel never sees the same opener twice (a fixed opener biases the model
+    into a repetition loop). Every variant covers the same ground — is the task fully and continuously
+    satisfied, what is the next or an adjacent step, what have I not tried, and the option to briefly
+    sleep and re-check — differing only in wording/emphasis. `last_tool` grounds it in what just
+    happened; `idle_streak` escalates the pacing hint when nothing actionable is being found so a model
+    that keeps concluding 'nothing to do' paces its re-checks instead of hot-spinning the GPU."""
+    did = f" I last used `{last_tool}`." if last_tool else ""
+    secs = min(60, 5 * (2 ** idle_streak)) if idle_streak else 0
+    sleep = ((f" If there is genuinely nothing to do right now I should briefly wait "
+              f"(`sleep {secs}` / `Start-Sleep -Seconds {secs}`) and then re-check, not stop.") if secs else
+             " If there is genuinely nothing to do right now I should briefly wait (a short `sleep`) and re-check, not stop.")
+    # Every variant covers the same four aspects (continuously satisfied / next-or-adjacent step /
+    # what I have not tried / sleep-and-re-check); they differ only in wording, emphasis and order.
+    variants = [
+        (f"This is a standing task I keep working on continuously: {task}.{did} I do not stop and hand back "
+         f"to the user. Let me verify it is fully and continuously satisfied, decide the next or an adjacent "
+         f"step, and consider anything I have not yet tried.{sleep}"),
+        (f"I am running this task perpetually: {task}.{did} Rather than concluding I am done, let me re-check "
+         f"whether it is still fully satisfied, what the next move or an adjacent improvement is, and any "
+         f"approach I have not tried.{sleep}"),
+        (f"Continuing my ongoing task: {task}.{did} There is no hand-off to the user here. Let me confirm it is "
+         f"fully and continuously satisfied, look for the next step or a useful adjacent task, and reconsider "
+         f"options I have not tried.{sleep}"),
+        (f"Standing objective, worked on without stopping: {task}.{did} Let me reassess from scratch: is it truly "
+         f"and continuously satisfied? what is the next or an adjacent task worth doing? what have I not tried "
+         f"yet?{sleep}"),
+        (f"I keep iterating on this perpetual task: {task}.{did} Instead of finishing, let me confirm it is still "
+         f"fully satisfied (nothing regressed or gone stale), find the most useful next or adjacent action, and "
+         f"think about what I have not tried.{sleep}"),
+    ]
+    return random.choice(variants)
 
 
 def _old_logps(step_logits, masks, token_ids: torch.Tensor, device) -> torch.Tensor:
@@ -326,6 +392,7 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
                   prompt_backend: Callable = None, # replaces input() for all user prompts
                   session: ToolSession = None,     # per-agent tool state; created fresh if not supplied
                   on_subagent_update: Callable = None,  # (n_alive: int) → None; fired while parked driving sub-agents
+                  notify: Callable = None,         # (msg: str) → None; dim out-of-band notices (perpetual re-seed, interrupt)
                   read_turn: Callable = None,      # async (preamble="") -> next user turn | None (Ctrl-D)
                   root: str = None,                # project root; defaults to os.getcwd()
                   enable_rag: bool = True, rag_k: int = 3,
@@ -354,6 +421,22 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
         import warnings; warnings.warn("gen_prompt is empty — chat template did not append a model-turn cue; model may emit immediate <eos>")
     gen_prompt = torch.tensor([_gp], device=model.device, dtype=torch.long)
 
+    # Perpetual (/perpetual) standing task: parsed off the initial prompt. When on, the done-boundary
+    # re-seeds a continuation nudge instead of yielding to the user; only Ctrl-C stops it.
+    perpetual, text = _parse_perpetual(text)
+    perpetual_task    = text if perpetual else None
+    perpetual_pending = False    # set at a done-boundary; consumed at the top of the loop to inject the seed
+    idle_streak       = 0        # consecutive perpetual iterations with no action (escalates the sleep hint)
+    last_tool         = None     # most recently executed tool name (grounds the varied continuation seed)
+
+    # Graceful stop: SIGINT sets stop_flag; a StoppingCriteria halts the in-flight generate at the next
+    # token, and the loop wraps up (grade + checkpoint) at the next boundary. Works for every rollout,
+    # and is the authoritative stop for a perpetual loop.
+    stop_flag = threading.Event()
+    class _StopOnFlag(transformers.StoppingCriteria):
+        def __call__(self, input_ids, scores, **kwargs): return stop_flag.is_set()
+    stop_criteria = transformers.StoppingCriteriaList([_StopOnFlag()])
+
     trajectory = []
     first_prompt = text          # session-origin prompt, used as the saved transcript header
     seg_start = 0                # index into trajectory where the current task's steps begin
@@ -378,7 +461,9 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
         catalog_text, tools = None, list(tools)
     if session is None:                       # top-level rollout; sub-agents pass their own
         session = ToolSession(prompt_backend=prompt_backend)
-    std_tools_list, std_handlers = get_standard_tools(session)
+    # A from-start perpetual session drops prompt_user from the schemas too; a mid-session /perpetual
+    # relies on grammar suppression (inner_fn_perp below) since the schemas are already in the cache.
+    std_tools_list, std_handlers = get_standard_tools(session, expose_prompt_user=not perpetual)
     tools += std_tools_list
     tool_handlers = tool_handlers | std_handlers
 
@@ -415,6 +500,9 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
     # Build constrained-decoding inner fn once for this rollout (schema uses full name list)
     tool_names = [t["function"]["name"] if isinstance(t, dict) else t.__name__ for t in tools]
     inner_fn = _build_inner_fn(processor.tokenizer, tool_names)
+    # Perpetual mode forbids prompt_user in the name-enum so the agent can't yield to the human
+    # (Ctrl-C is the only stop). Built once; selected per-turn while perpetual is active.
+    inner_fn_perp = _build_inner_fn(processor.tokenizer, [n for n in tool_names if n != "prompt_user"])
     # Forced side-effect-only memory turn: one extra loop iteration after task completion with the
     # name-enum restricted to file ops. Not recorded to trajectory (avoids policy-gradient bias).
     _glob_mem = os.path.join(state_dir(), "memory", "memory.md")
@@ -435,9 +523,13 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
         """Silent grade pass seeded on base_ids (incl. user reply when available).
         Calls _grade(...) → sets grade_value(). Rolls past_key_values back afterwards."""
         nonlocal past_key_values
-        seed = processor.tokenizer.encode(_GRADE_SEED, add_special_tokens=False) + [tool_tokens[0]]
+        # reason-then-force: open the think channel, let the model reason about the grade, then force the
+        # _grade call once it closes its own thought (falls back to the immediate splice on a plain model).
+        seed = _build_seed(processor.tokenizer, _GRADE_SEED, think_tokens, tool_tokens, force_tool=True)
         ids  = torch.cat([base_ids, torch.tensor([seed], device=model.device, dtype=torch.long)], dim=1)
-        lp, _ = _make_constraint_processor(grade_inner, processor.tokenizer, tool_tokens, base_ids.shape[1])
+        _tc  = think_tokens[1] if think_tokens else None
+        lp, _ = _make_constraint_processor(grade_inner, processor.tokenizer, tool_tokens, base_ids.shape[1],
+                                           think_close=_tc, force_tool=True)
         if on_gen_start: on_gen_start(suppress=True)
         _str = transformers.AsyncTextIteratorStreamer(processor.tokenizer, skip_prompt=True)
         async def _consume():
@@ -449,7 +541,11 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
                 past_key_values=past_key_values, use_cache=True,
                 output_logits=False, return_dict_in_generate=True,
                 logits_processor=transformers.LogitsProcessorList([lp]),
-                max_new_tokens=32, streamer=_str,
+                stopping_criteria=stop_criteria,
+                # Room to reason before the forced call, but bounded so seed(73)+generated stays within
+                # rollback_cache.ROLLBACK_WINDOW (128): crop() below then erases the whole nudge exactly
+                # instead of forcing a full recompute. Raise the ring if this budget is grown.
+                max_new_tokens=48, streamer=_str,
             )),
             _consume()
         )
@@ -525,22 +621,43 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
     if image is not None:   # feed the image to the first generate (empty cache → its prefill honors it)
         pending_mm = {k: v for k, v in inputs.items() if k not in ("input_ids", "attention_mask")}
 
+    # Route SIGINT to the stop flag for the life of the loop (main thread only; a worker-thread
+    # rollout, e.g. a test, silently skips). Restored in the cleanup below.
+    _prev_sigint = None
+    try:
+        _prev_sigint = signal.signal(signal.SIGINT, lambda *_: stop_flag.set())
+    except (ValueError, OSError):
+        _prev_sigint = None
+
     while True:
         # Prepend generation prompt once per turn; every delta is prompt-free
         input_ids = torch.cat([input_ids, gen_prompt], dim=1)
+        base_fn = inner_fn_perp if perpetual else inner_fn   # perpetual forbids prompt_user in the enum
+        seed_close, seed_force = None, False
         if saving_mem:
-            # Seed preamble + open token so the turn drives straight into a (restricted) file call
-            _seed = processor.tokenizer.encode(_MEM_SEED, add_special_tokens=False) + [tool_tokens[0]]
+            # reason-then-force memory turn: open the think channel, reason, then a forced (restricted) file call
+            _seed = _build_seed(processor.tokenizer, _MEM_SEED, think_tokens, tool_tokens, force_tool=True)
             input_ids = torch.cat(
                 [input_ids, torch.tensor([_seed], device=model.device, dtype=torch.long)], dim=1)
-            new_idx = input_ids.shape[1] - 1    # slice from the open token; constraint engages immediately
-            active_fn = mem_inner
+            new_idx = input_ids.shape[1] - len(_seed)   # count the whole seed (incl. think_open) to detect the close
+            active_fn, seed_close, seed_force = mem_inner, (think_tokens[1] if think_tokens else None), True
+        elif perpetual_pending:
+            # Standing-task continuation: a varied nudge in the think channel; the model freely acts or sleeps.
+            _seed = _build_seed(processor.tokenizer,
+                                _perpetual_seed_text(perpetual_task, last_tool, idle_streak),
+                                think_tokens, tool_tokens, force_tool=False)
+            input_ids = torch.cat(
+                [input_ids, torch.tensor([_seed], device=model.device, dtype=torch.long)], dim=1)
+            new_idx = input_ids.shape[1]                 # record only the model's continuation, not the injected seed
+            active_fn = base_fn
+            perpetual_pending = False
         else:
             new_idx   = input_ids.shape[1]
-            active_fn = inner_fn
+            active_fn = base_fn
         # Attention mask covers the full sequence; kv cache accounts for the already-processed prefix
         attn_mask = torch.ones(1, input_ids.shape[1], device=model.device, dtype=torch.long)
-        logits_proc, mask_by_pos = _make_constraint_processor(active_fn, processor.tokenizer, tool_tokens, new_idx)
+        logits_proc, mask_by_pos = _make_constraint_processor(active_fn, processor.tokenizer, tool_tokens,
+                                                              new_idx, think_close=seed_close, force_tool=seed_force)
         # Prepare inputs; model.generate slices the new tokens internally via past_key_values length
         kwargs = {
             "input_ids": input_ids,
@@ -550,6 +667,7 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
             "output_logits": True,
             "return_dict_in_generate": True,
             "logits_processor": transformers.LogitsProcessorList([logits_proc]),
+            "stopping_criteria": stop_criteria,   # Ctrl-C halts generation at the next token
             "max_new_tokens": max_new_tokens,
             **gen_kwargs,   # assistant_model (drafter) or prompt_lookup_num_tokens (n-gram)
         }
@@ -586,6 +704,7 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
             break # memory is now written; end
         if results:
             emitted_tool_call = True
+            last_tool = results[-1][0]   # grounds the next perpetual continuation seed
 
         # Step reward: sum auto_signal over all results in this turn, clamped to [-1, 1]
         step_reward = max(-1.0, min(1.0,
@@ -608,9 +727,35 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
         # Mutually exclusive: bg-wait (another model turn) | task done (await user) | tool results.
         pending = session.pending_jobs()
         children_active = scheduler.active() if scheduler else False
-        if not results and not pending and not children_active:
-            # task done: no tool calls, no pending background jobs, no live sub-agents
+        stopping = stop_flag.is_set()             # Ctrl-C: wrap up now, regardless of pending work
+        if stopping or (not results and not pending and not children_active):
+            # task done (no tool calls / no pending background jobs / no live sub-agents) — or Ctrl-C
             seg_end = len(trajectory)
+            if perpetual and not stopping:
+                # Standing task: never yield to the user. Grade this iteration into the one session
+                # trajectory (reused run_dir), then re-seed a varied continuation nudge and keep going.
+                if emitted_tool_call:
+                    user_preempted = session.grade_value() is not None
+                    if not user_preempted:
+                        await _run_grade_nudge(gen_ids)
+                    grade = session.grade_value() or 0.0
+                    for e in trajectory[seg_start:seg_end]: e["reward"] += grade
+                    _checkpoint(user_graded=user_preempted)
+                    idle_streak = 0
+                else:
+                    idle_streak += 1              # no action this cycle → pace the next re-check harder
+                seg_start = len(trajectory)
+                session.clear_grade()
+                emitted_tool_call = False
+                i = 0
+                perpetual_pending = True
+                input_ids = gen_ids
+                if notify: notify("⟳ perpetual — iterating (Ctrl-C to stop)")
+                continue
+            if stopping:                          # Ctrl-C ends the loop (and any perpetual run); back to prompt
+                if notify: notify("interrupting — wrapping up…")
+                perpetual = False
+                stop_flag.clear()
             session.set_gradeable(emitted_tool_call)
             next_text = await _await_user_turn(session, read_turn, trajectory, seg_start) if read_turn else None
             session.set_gradeable(False)
@@ -627,6 +772,10 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
                     input_ids = gen_ids
                     continue
                 break
+            # A new task may promote itself to a standing task with /perpetual (strip before injecting).
+            is_perp, next_text = _parse_perpetual(next_text)
+            if is_perp:
+                perpetual, perpetual_task, idle_streak = True, next_text, 0
             # Inject the user's turn as a prompt-free delta, retaining the KV-cache across tasks.
             input_ids = torch.cat([gen_ids, _user_turn_delta(processor.tokenizer, asst_msg, next_text, model.device)], dim=1)
             if emitted_tool_call:
@@ -669,10 +818,11 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
             parts = [gen_ids, tool_ids] + ([bg] if isinstance(bg, torch.Tensor) else [])
             input_ids = torch.cat(parts, dim=1)
 
-        # Max-steps check-in (interval doubles each time for exponential backoff)
+        # Max-steps check-in (interval doubles each time for exponential backoff). Perpetual mode
+        # auto-continues without the interactive prompt (the human's control is Ctrl-C, not the check-in).
         i += 1
         if i >= max_steps:
-            action, feedback_text = maxsteps_checkin(session.prompt_backend)
+            action, feedback_text = ("continue", "") if perpetual else maxsteps_checkin(session.prompt_backend)
             if action == "abort":
                 trajectory[-1]["reward"] -= reward_utils.W_ABORT
                 break
@@ -684,6 +834,9 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
             else: # continue
                 trajectory[-1]["reward"] += reward_utils.W_CONTINUE
 
+    if _prev_sigint is not None:              # restore the previous SIGINT handler (asyncio's / default)
+        try: signal.signal(signal.SIGINT, _prev_sigint)
+        except (ValueError, OSError): pass
     session.terminate_jobs()  # for safety, kill any still-running background commands
     if scheduler is not None:
         for s in scheduler.slots:

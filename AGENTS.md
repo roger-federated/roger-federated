@@ -12,7 +12,14 @@
 ## Current state (read before assuming)
 - Working semi-basic agent: rollout loop, tool use, reasoning, MCP connections, standard
   tools, deferred tool loading, auto-triggered RAG, skills + instruction files, `@path`
-  references, persistent memory, web search/fetch, and a CLI app (`roger`).
+  references, persistent memory, web search/fetch, sub-agent spawning, and a CLI app (`roger`).
+- Perpetual standing tasks (`/perpetual <task>`): at the done-boundary the rollout re-seeds a varied
+  (randomly-rotated, comprehensive) think-channel continuation nudge instead of yielding to the user,
+  grading+checkpointing each iteration into the one session trajectory; `prompt_user` is grammar-
+  suppressed and the max-steps check-in bypassed so the agent can't yield. A graceful **Ctrl-C**
+  (SIGINT → stop flag → `StoppingCriteria`) is the only stop and works for every rollout (wraps up at
+  the next boundary, back to the prompt). Seeds share a "reason-then-force" helper (open think, let
+  the model close its own thought, then force the mandatory call) also used by the grade/memory nudges.
 - LoRA REINFORCE++ trainer is built and wired (`training/trainer.py`, `lora_utils.py`); train-time
   PII anonymisation via `privacy_filter.py`. Gated Ctrl-D auto-train + `roger train` subcommand.
   `/grade` user override of `finish()` self-eval score + 10%-user-graded training gate.

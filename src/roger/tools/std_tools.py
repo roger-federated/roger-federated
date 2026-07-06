@@ -167,12 +167,16 @@ def maxsteps_checkin(prompt_fn) -> tuple[str, str]:
 # Convenience aggregator
 # ---------------------------------------------------------------------------
 
-def get_standard_tools(session) -> tuple[list, dict]:
+def get_standard_tools(session, expose_prompt_user: bool = True) -> tuple[list, dict]:
     """Return (tools_list, tool_handlers) bound to `session` for use with rollout().
 
     File/prompt tools mutate the session (backups, prompt backend); shell tools share its job
     registry; web tools are stateless. A fresh session per agent isolates all of this, so there
     is no per-rollout reset to do here anymore.
+
+    expose_prompt_user=False drops the prompt_user tool — used by perpetual mode, where the agent
+    must not be able to yield to the human (that would defeat the standing-task loop; the human's
+    only control is Ctrl-C).
     """
     def write_file(path: str, content: str, append: bool = False) -> str:
         """Write or append content to a file, creating parent directories as needed.
@@ -201,6 +205,7 @@ def get_standard_tools(session) -> tuple[list, dict]:
         return session.prompt_backend(question)
 
     tools = (shell_tools.make_shell_tools(session)
-             + [write_file, edit_file, web_search, web_fetch, prompt_user])
+             + [write_file, edit_file, web_search, web_fetch]
+             + ([prompt_user] if expose_prompt_user else []))
     handlers = {fn.__name__: fn for fn in tools}
     return tools, handlers

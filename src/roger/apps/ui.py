@@ -502,9 +502,21 @@ class _GradeSuggest(AutoSuggest):
         return Suggestion(cmd[len(text):] + "  ·  grade this task")
 
 
+class _PerpetualSuggest(AutoSuggest):
+    """Inline ghost text for `/perpetual`: mark the task as a standing task the agent keeps working on
+    (re-seeding past every apparent completion) until the user presses Ctrl-C. Always offered (unlike
+    /revert and /grade, which are gated on session state)."""
+    def get_suggestion(self, buffer, document):
+        text = document.text
+        cmd = "/perpetual"
+        if not text or not cmd.startswith(text.lower()):
+            return None
+        return Suggestion(cmd[len(text):] + " <task>  ·  keep working on this until Ctrl-C")
+
+
 class _AnySuggest(AutoSuggest):
     """First non-None suggestion among several — prompt_toolkit accepts a single auto_suggest, but we
-    want both /revert and /grade ghost text live at once."""
+    want /revert, /grade and /perpetual ghost text live at once."""
     def __init__(self, suggesters: list):
         self._suggesters = suggesters
 
@@ -518,7 +530,8 @@ class _AnySuggest(AutoSuggest):
 
 async def read_prompt(session: PromptSession, suggest_revert: Callable[[], list] | None = None,
                       placeholder: str | None = None,
-                      suggest_grade: Callable[[], float | None] | None = None) -> str | None:
+                      suggest_grade: Callable[[], float | None] | None = None,
+                      suggest_perpetual: bool = False) -> str | None:
     """Read a user prompt. Returns None only on EOF (Ctrl-D → quit); "" on empty input or Ctrl-C
     so the caller can re-prompt without quitting.
 
@@ -534,7 +547,8 @@ async def read_prompt(session: PromptSession, suggest_revert: Callable[[], list]
     # Tint the typed text so a submitted user turn stays visually distinct in the scrollback.
     kwargs = {"lexer": SimpleLexer(style=_USER_TURN_STYLE)}
     suggesters = ([_RevertSuggest(suggest_revert)] if suggest_revert is not None else []) + \
-                 ([_GradeSuggest(suggest_grade)] if suggest_grade is not None else [])
+                 ([_GradeSuggest(suggest_grade)] if suggest_grade is not None else []) + \
+                 ([_PerpetualSuggest()] if suggest_perpetual else [])
     if suggesters:
         kwargs["auto_suggest"] = _AnySuggest(suggesters)
     if placeholder:
