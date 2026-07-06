@@ -5,14 +5,14 @@ No real MCP server is started: MCPConnection is exercised with a stub session so
 namespacing / handler-resolution logic can be checked in isolation.
 """
 
-import asyncio, contextlib, json, os, types
+import asyncio, contextlib, json, threading, types
 import roger.tools.mcp_utils as mcp_utils
 from roger.tools.mcp_utils import (
     MCPConnection, load_mcp_config,
     _FileTokenStorage, _remote_url, _parse_callback, _build_oauth_auth,
 )
 from mcp.client.auth import OAuthClientProvider
-from mcp.shared.auth import OAuthToken, OAuthClientInformationFull
+from mcp.shared.auth import OAuthToken
 
 
 # ---------------------------------------------------------------------------
@@ -114,7 +114,66 @@ def test_parse_callback():
     # state is optional; a missing code surfaces as None so callback_handler can reject it
     assert _parse_callback("/callback?code=abc") == ("abc", None)
     assert _parse_callback("/callback?error=access_denied") == (None, None)
+    # full URL, as pasted from a browser address bar in the headless fallback
+    assert _parse_callback("http://127.0.0.1:5000/callback?code=abc&state=xyz") == ("abc", "xyz")
     print("PASS test_parse_callback")
+
+def test_needs_interactive_auth(tmp_path, monkeypatch):
+    monkeypatch.setattr(mcp_utils, "state_dir", lambda: str(tmp_path))
+    plain = {"fs": {"command": "npx"}, "http": {"url": "https://a/mcp"}}
+    oauthed = dict(plain, canva={"url": "https://mcp.canva.com/mcp", "oauth": {}})
+    assert not mcp_utils.needs_interactive_auth(plain)
+    # oauth block (even the empty DCR form), no cached tokens yet -> interactive login expected
+    assert mcp_utils.needs_interactive_auth(oauthed)
+    # once tokens are cached the login is silent, so no interactive connect expected
+    asyncio.run(_FileTokenStorage("canva", _OAUTH, "http://127.0.0.1:1/callback")
+                .set_tokens(OAuthToken(access_token="tok")))
+    assert not mcp_utils.needs_interactive_auth(oauthed)
+    print("PASS test_needs_interactive_auth")
+
+def test_callback_handler_paste_fallback(monkeypatch, capsys):
+    "Headless path: no browser opened, the user pastes the failed-redirect URL from their own box."
+    monkeypatch.setattr(mcp_utils.webbrowser, "open", lambda url: False)
+    pasted = iter(["not-a-url",   # junk first: handler must re-prompt, not crash
+                   "http://127.0.0.1:5000/callback?code=abc&state=xyz"])
+    monkeypatch.setattr("builtins.input", lambda prompt="": next(pasted))
+
+    async def go():
+        stack = contextlib.AsyncExitStack()
+        try:
+            _, redirect_handler, callback_handler = mcp_utils._loopback_oauth_handlers(stack)
+            await redirect_handler("https://auth.example/authorize")
+            assert await callback_handler() == ("abc", "xyz")
+        finally:
+            await stack.aclose()
+    asyncio.run(go())
+    out = capsys.readouterr().out
+    assert "https://auth.example/authorize" in out          # URL printed for the local browser
+    assert "Couldn't find an authorization code" in out     # junk line was rejected with guidance
+    print("PASS test_callback_handler_paste_fallback")
+
+def test_callback_handler_browser_path_untouched(monkeypatch):
+    "When a browser opens locally, the handler must await the loopback redirect, never stdin."
+    monkeypatch.setattr(mcp_utils.webbrowser, "open", lambda url: True)
+    monkeypatch.setattr("builtins.input",
+                        lambda prompt="": (_ for _ in ()).throw(AssertionError("stdin read")))
+
+    async def go():
+        stack = contextlib.AsyncExitStack()
+        try:
+            redirect_uri, redirect_handler, callback_handler = \
+                mcp_utils._loopback_oauth_handlers(stack)
+            await redirect_handler("https://auth.example/authorize")
+            # Simulate the provider's redirect landing on the real loopback listener
+            import urllib.request
+            def hit():
+                urllib.request.urlopen(f"{redirect_uri}?code=abc&state=xyz", timeout=5)
+            threading.Thread(target=hit, daemon=True).start()
+            assert await asyncio.wait_for(callback_handler(), 10) == ("abc", "xyz")
+        finally:
+            await stack.aclose()
+    asyncio.run(go())
+    print("PASS test_callback_handler_browser_path_untouched")
 
 def test_token_storage_roundtrip(tmp_path, monkeypatch):
     monkeypatch.setattr(mcp_utils, "state_dir", lambda: str(tmp_path))
@@ -130,6 +189,10 @@ def test_token_storage_roundtrip(tmp_path, monkeypatch):
         await store.set_tokens(OAuthToken(access_token="tok", refresh_token="ref"))
         reloaded = await store.get_tokens()
         assert reloaded.access_token == "tok" and reloaded.refresh_token == "ref"
+        # Empty oauth block (no pre-registered creds): get_client_info must return None so the
+        # SDK falls through to Dynamic Client Registration instead of KeyError'ing on clientId.
+        dcr = _FileTokenStorage("canva", {}, "http://127.0.0.1:5000/callback")
+        assert await dcr.get_client_info() is None
 
     asyncio.run(go())
     # Cache is keyed by server name under ~/.roger/oauth/<name>.json
@@ -156,6 +219,9 @@ def test_build_oauth_auth(tmp_path, monkeypatch):
         try:
             # No `oauth` block → no auth provider (existing header-only path is unaffected)
             assert _build_oauth_auth("plain", {"url": "https://a/mcp"}, stack) is None
+            # Empty `oauth` block → provider with no seeded creds, i.e. the DCR path
+            assert isinstance(_build_oauth_auth("canva", {"url": "https://a/mcp", "oauth": {}},
+                                                stack), OAuthClientProvider)
             # With `oauth` → an OAuthClientProvider pointed at the resolved server URL
             prov = _build_oauth_auth(
                 "gmail",

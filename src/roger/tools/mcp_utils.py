@@ -12,11 +12,13 @@ Servers are declared in ~/.roger/mcp.json using the standard `mcpServers` schema
     }}
 Each entry is either a local stdio subprocess (`command`/`args`/`env`) or a remote server
 (`url` (alias `serverUrl`) + optional `type` "sse"|"http" and `headers`). A remote server may
-also carry an `oauth` block (`{clientId, clientSecret}`, the format Google's Gmail MCP docs
-use): on first connect we run a browser-based Authorization Code + PKCE login and cache the
-resulting tokens under ~/.roger/oauth/<server>.json (auto-refreshed), so later runs don't
-re-prompt. The OAuth client must be registered with a loopback redirect URI (Google: a
-"Desktop app" client, which allows any 127.0.0.1 port). Tools are namespaced
+also carry an `oauth` block: on first connect we run a browser-based Authorization Code + PKCE
+login and cache the resulting tokens under ~/.roger/oauth/<server>.json (auto-refreshed), so
+later runs don't re-prompt. With `{clientId, clientSecret}` (the format Google's Gmail MCP docs
+use) the pre-registered client is used directly; that client must allow a loopback redirect URI
+(Google: a "Desktop app" client, which allows any 127.0.0.1 port). An *empty* `"oauth": {}`
+means Dynamic Client Registration: the SDK registers a client with the server on first login
+(the path servers like Canva expect) and we persist the grant. Tools are namespaced
 `mcp__<server>__<tool>` so same-named tools from different servers can't collide.
 
 Usage with rollout():
@@ -32,8 +34,10 @@ import asyncio, http.server, threading, urllib.parse, webbrowser
 
 # Per-server connect budget (transport up + initialize + list_tools). Guards against a server
 # that hangs before responding — e.g. mcp-remote blocking on an OAuth browser callback on a
-# headless box. Bump it (e.g. =300) for a run where you must complete a first-time interactive login.
+# headless box. connect_servers raises it to AUTH_TIMEOUT for a first-time interactive login
+# (browser round-trip + possibly pasting the redirect URL takes human time, not network time).
 CONNECT_TIMEOUT = float(os.environ.get("ROGER_MCP_CONNECT_TIMEOUT", "120"))
+AUTH_TIMEOUT = max(CONNECT_TIMEOUT, 600.0)
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.client.sse import sse_client
@@ -103,6 +107,13 @@ def _remote_url(spec: dict) -> str:
     return spec.get("url") or spec["serverUrl"]
 
 
+def _auth_method(oauth: dict) -> str:
+    """Token-endpoint auth for the spec: a confidential client (secret supplied) authenticates
+    with the secret; otherwise a public PKCE client ("none"), which is also what Dynamic Client
+    Registration should request (servers like Canva register public clients)."""
+    return "client_secret_post" if oauth.get("clientSecret") else "none"
+
+
 def _parse_callback(path: str) -> tuple[str | None, str | None]:
     "Pull (code, state) out of the OAuth redirect request path's query string."
     params = urllib.parse.parse_qs(urllib.parse.urlparse(path).query)
@@ -113,6 +124,15 @@ def _oauth_cache_path(server_name: str) -> str:
     "Per-server token cache file ~/.roger/oauth/<name>.json (name sanitised for the filesystem)."
     safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in server_name)
     return os.path.join(state_dir(), "oauth", f"{safe}.json")
+
+
+def needs_interactive_auth(servers: dict) -> bool:
+    """True when any spec carries an `oauth` block with no cached tokens yet, i.e. this connect
+    will run a first-time browser login with terminal prompts. Callers use it to keep the terminal
+    interactive (no spinner over stdin) and to grant a longer connect budget."""
+    return any(spec.get("oauth") is not None
+               and not _load_cache(_oauth_cache_path(name)).get("tokens")
+               for name, spec in servers.items())
 
 
 def _load_cache(path: str) -> dict:
@@ -156,6 +176,10 @@ class _FileTokenStorage:
         info = _load_cache(self._path).get("client_info")
         if info:
             return OAuthClientInformationFull.model_validate(info)
+        # No persisted registration and no pre-registered creds in the spec: return None so the
+        # SDK performs Dynamic Client Registration (set_client_info then persists the result).
+        if not self._oauth.get("clientId"):
+            return None
         # No persisted registration yet: hand back the spec's pre-registered credentials so the
         # SDK uses them directly instead of attempting Dynamic Client Registration.
         return OAuthClientInformationFull(
@@ -163,7 +187,7 @@ class _FileTokenStorage:
             client_secret=self._oauth.get("clientSecret"),
             redirect_uris=[self._redirect_uri],
             grant_types=["authorization_code", "refresh_token"],
-            token_endpoint_auth_method="client_secret_post",
+            token_endpoint_auth_method=_auth_method(self._oauth),
         )
 
     async def set_client_info(self, client_info: OAuthClientInformationFull) -> None:
@@ -200,12 +224,40 @@ def _loopback_oauth_handlers(stack: contextlib.AsyncExitStack):
     threading.Thread(target=server.serve_forever, daemon=True).start()
     stack.callback(lambda: (server.shutdown(), server.server_close()))
 
+    # Whether a local browser actually opened; decided by redirect_handler, read by
+    # callback_handler to pick between "wait for the redirect" and paste-fallback.
+    opened = {"browser": False}
+
     async def redirect_handler(authorization_url: str) -> None:
-        # Also print the URL: webbrowser.open() is a no-op on headless/remote boxes.
-        print(f"\nOpening browser to authorise MCP access:\n{authorization_url}\n")
-        webbrowser.open(authorization_url)
+        # Also print the URL: webbrowser.open() fails on headless/remote boxes.
+        print(f"\nAuthorise MCP access by visiting:\n{authorization_url}\n")
+        opened["browser"] = webbrowser.open(authorization_url)
+        if opened["browser"]:
+            print("Browser opened; approve access there.")
+        else:
+            print("No local browser here (remote/headless box?): open that URL in a browser on "
+                  "your own machine and approve access.")
 
     async def callback_handler() -> tuple[str, str | None]:
+        if not opened["browser"]:
+            # Headless box: the redirect targets 127.0.0.1 *here*, which the user's local browser
+            # can't reach (unless a tunnel forwards it). Fall back to paste-the-redirect-URL: the
+            # authorization code survives in the address bar even though the page fails to load,
+            # and _parse_callback pulls code/state from a full URL just as well as from a path.
+            print("After approving, the browser will try to open a 127.0.0.1 URL and show a "
+                  "connection error; that is expected.")
+            while not result.done():
+                line = (await asyncio.to_thread(
+                    input, "Paste that URL from the browser's address bar here (or press Enter "
+                           "if the page said 'Authentication complete'): ")).strip()
+                if result.done():   # redirect landed via a port-forward while input() blocked
+                    break
+                code, state = _parse_callback(line)
+                if code:
+                    return code, state
+                if line:
+                    print("Couldn't find an authorization code in that; paste the complete URL "
+                          "(it starts with http://127.0.0.1).")
         code, state = await result
         if not code:
             raise RuntimeError("OAuth redirect did not include an authorization code")
@@ -219,7 +271,7 @@ def _build_oauth_auth(name: str, spec: dict, stack: contextlib.AsyncExitStack):
     The provider is an httpx.Auth the transports accept; it triggers the browser login lazily on
     the first 401 from the server."""
     oauth = spec.get("oauth")
-    if not oauth:
+    if oauth is None:   # empty {} still counts: it selects Dynamic Client Registration
         return None
     redirect_uri, redirect_handler, callback_handler = _loopback_oauth_handlers(stack)
     metadata = OAuthClientMetadata(
@@ -227,7 +279,7 @@ def _build_oauth_auth(name: str, spec: dict, stack: contextlib.AsyncExitStack):
         redirect_uris=[redirect_uri],
         grant_types=["authorization_code", "refresh_token"],
         response_types=["code"],
-        token_endpoint_auth_method="client_secret_post",
+        token_endpoint_auth_method=_auth_method(oauth),
         scope=oauth.get("scope"),   # usually None — the SDK derives scopes from server metadata
     )
     return OAuthClientProvider(
@@ -379,12 +431,14 @@ async def connect_servers(servers: dict) -> tuple[contextlib.AsyncExitStack, lis
     all_tools, all_handlers = [], {}
     for name, spec in servers.items():
         conn = MCPConnection(name, spec)
+        # First-time OAuth logins get the human-scale budget; everything else the network-scale one.
+        budget = AUTH_TIMEOUT if needs_interactive_auth({name: spec}) else CONNECT_TIMEOUT
         try:
             # enter conn on its own so a timeout cancels __aenter__ (which cleans up its transport);
             # only reaches `stack` once fully connected, so aclose() never double-frees a failed one.
-            await asyncio.wait_for(stack.enter_async_context(conn), CONNECT_TIMEOUT)
+            await asyncio.wait_for(stack.enter_async_context(conn), budget)
         except Exception as e:
-            reason = f"timed out after {CONNECT_TIMEOUT:g}s" if isinstance(e, asyncio.TimeoutError) else e
+            reason = f"timed out after {budget:g}s" if isinstance(e, asyncio.TimeoutError) else e
             warnings.warn(f"MCP server '{name}' failed to connect; skipping. ({reason})")
             continue
         all_tools.extend(conn.tools)
