@@ -43,63 +43,61 @@ def test_auto_signal_clip():
     print("PASS test_auto_signal_clip")
 
 # ---------------------------------------------------------------------------
-# std_tools: pending_backups / apply_revert
+# ToolSession: pending_backups / apply_revert  (backup/revert state is now per-agent)
 # ---------------------------------------------------------------------------
 
 def test_apply_revert_no_backups():
-    import roger.tools.std_tools as std_tools
-    std_tools._backups.clear()
-    assert std_tools.pending_backups() == []
-    assert std_tools.apply_revert("all") == 0
+    from roger.tools.session import ToolSession
+    s = ToolSession()
+    assert s.pending_backups() == []
+    assert s.apply_revert("all") == 0
     print("PASS test_apply_revert_no_backups")
 
 def test_apply_revert_none_clears():
-    import roger.tools.std_tools as std_tools
-    std_tools._backups = [("/fake/orig.txt", "/fake/orig.txt.bak")]
-    assert len(std_tools.pending_backups()) == 1
-    assert std_tools.apply_revert("none") == 0
-    assert std_tools.pending_backups() == []      # decision is final → backups cleared
+    from roger.tools.session import ToolSession
+    s = ToolSession(backups=[("/fake/orig.txt", "/fake/orig.txt.bak")])
+    assert len(s.pending_backups()) == 1
+    assert s.apply_revert("none") == 0
+    assert s.pending_backups() == []              # decision is final → backups cleared
     print("PASS test_apply_revert_none_clears")
 
 def test_apply_revert_all_restores():
     import os, tempfile
-    import roger.tools.std_tools as std_tools
+    from roger.tools.session import ToolSession
     d = tempfile.mkdtemp()
     orig, bak = os.path.join(d, "f.txt"), os.path.join(d, "f.bak")
     open(orig, "w").write("NEW"); open(bak, "w").write("OLD")
-    std_tools._backups = [(orig, bak)]
-    assert std_tools.apply_revert("all") == 1
-    assert open(orig).read() == "OLD" and std_tools.pending_backups() == []
+    s = ToolSession(backups=[(orig, bak)])
+    assert s.apply_revert("all") == 1
+    assert open(orig).read() == "OLD" and s.pending_backups() == []
     print("PASS test_apply_revert_all_restores")
 
 def test_apply_revert_partial_keeps_rest():
     import os, tempfile
-    import roger.tools.std_tools as std_tools
+    from roger.tools.session import ToolSession
     d = tempfile.mkdtemp()
     o1, b1 = os.path.join(d, "a.txt"), os.path.join(d, "a.bak")
     o2, b2 = os.path.join(d, "b.txt"), os.path.join(d, "b.bak")
     open(o1, "w").write("NEW1"); open(b1, "w").write("OLD1")
     open(o2, "w").write("NEW2"); open(b2, "w").write("OLD2")
-    std_tools._backups = [(o1, b1), (o2, b2)]
-    assert std_tools.apply_revert("1") == 1                 # revert only file 1
+    s = ToolSession(backups=[(o1, b1), (o2, b2)])
+    assert s.apply_revert("1") == 1                         # revert only file 1
     assert open(o1).read() == "OLD1"                        # file 1 restored
     assert open(o2).read() == "NEW2"                        # file 2 untouched
-    assert std_tools.pending_backups() == [(o2, b2)]        # rest still pending, not discarded
+    assert s.pending_backups() == [(o2, b2)]                # rest still pending, not discarded
     print("PASS test_apply_revert_partial_keeps_rest")
 
 # ---------------------------------------------------------------------------
-# std_tools: maxsteps_checkin
+# std_tools: maxsteps_checkin  (stateless; takes a prompt_fn)
 # ---------------------------------------------------------------------------
 
 def test_maxsteps_checkin_options():
     import roger.tools.std_tools as std_tools
     for inp, expected in [("1", "continue"), ("2", "abort"), ("", "continue")]:
-        std_tools._prompt_backend = lambda q, _i=inp: _i
-        action, fb = std_tools.maxsteps_checkin()
+        action, fb = std_tools.maxsteps_checkin(lambda q, _i=inp: _i)
         assert action == expected, f"input {inp!r} → {action}"
     responses = iter(["3", "try a different approach"])
-    std_tools._prompt_backend = lambda q: next(responses)
-    action, fb = std_tools.maxsteps_checkin()
+    action, fb = std_tools.maxsteps_checkin(lambda q: next(responses))
     assert action == "feedback" and fb == "try a different approach"
     print("PASS test_maxsteps_checkin_options")
 

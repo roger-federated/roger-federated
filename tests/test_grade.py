@@ -1,13 +1,14 @@
 """Tests for the user grade override (/grade) + the 10%-user-graded training gate.
 Run with:  PYTHONPATH=src python -m pytest tests/test_grade.py
 
-No model is loaded: the std_tools grade state is a couple module globals, and the trainer's
+No model is loaded: the grade state is a couple of ToolSession fields, and the trainer's
 user-graded bookkeeping is stat-only (a `user_graded` sentinel file per run dir)."""
-import roger.tools.std_tools as st
+from roger.tools.session import ToolSession
 import roger.training.trainer as tr
 
 
 def test_grade_state_machine():
+    st = ToolSession()
     st.clear_grade()
     assert st.grade_value() is None
 

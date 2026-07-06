@@ -11,13 +11,19 @@ if not hasattr(_tu, "PreTrainedTokenizerBase"):
     _tu.PreTrainedTokenizerBase = transformers.PreTrainedTokenizerBase
 from lmformatenforcer.integrations.transformers import build_transformers_prefix_allowed_tokens_fn
 from collections.abc import Callable
-from roger.tools.std_tools import (get_standard_tools, grade_value, set_grade, clear_grade,
-                                    set_gradeable, record_grade,
-                                    pending_backups, apply_revert, maxsteps_checkin)
-from roger.tools.shell_tools import drain_finished_jobs, pending_jobs, terminate_jobs, shell_idioms
+from roger.tools.std_tools import get_standard_tools, maxsteps_checkin
+from roger.tools.shell_tools import shell_idioms
+from roger.tools.session import ToolSession
 from roger.loading.model_setup import find_gen_prompt, find_tool_res_id, find_tool_call_tokens, find_think_tokens
 from roger.training import recording
 from datetime import datetime, timezone
+
+# Seed for the silent self-grade nudge (main agent + sub-agents share it verbatim).
+_GRADE_SEED = ("Let me honestly grade how well I completed the task that I just performed. "
+               "I should weigh how directly and efficiently I reached the goal (preferring very few wasted, wrong, "
+               "or redundant steps), and how accurate and complete the result is. 1 for a clean, fully-"
+               "correct solve, around 0 for partial or clumsy, negative if I largely failed.")
+
 
 def _make_tool_loader(tools):
     """Build a terse catalog string + load_tools closure for deferred schema loading.
@@ -227,9 +233,9 @@ def _result_to_ids(call_results, processor, tool_res_id, device):
     return ids[:, s:], mm_extra
 
 
-def _bg_msgs(processor, tool_res_id, device):
+def _bg_msgs(session, processor, tool_res_id, device):
     """Finished background commands, as tool-result token deltas (empty list if none)."""
-    finished = drain_finished_jobs()
+    finished = session.drain_finished_jobs()
     if not finished:
         return []
     parts = [_result_to_ids([("run_command", f"[background] {jid} finished: {out}")],
@@ -255,10 +261,9 @@ def _revert_preamble(backups) -> str:
             "\nType '/revert' (or '/revert 1,3') to undo, or just enter your next task.")
 
 
-def _grade_preamble() -> str:
+def _grade_preamble(session) -> str:
     """Offer /grade when a task just completed. Escalates when the 10% gate would block training."""
-    from roger.tools.std_tools import gradeable
-    if not gradeable():
+    if not session.gradeable():
         return ""
     from roger.training.trainer import user_grade_shortfall   # lazy: don't pull the trainer stack at import
     hint = "Type '/grade <n>' (-1..1) to grade this task yourself."
@@ -267,19 +272,18 @@ def _grade_preamble() -> str:
     return hint
 
 
-def _user_turn_preamble() -> str:
+def _user_turn_preamble(session) -> str:
     """Both non-obstructing notices (revert listing + grade hint), blank-line-joined if both apply."""
-    return "\n".join(p for p in (_revert_preamble(pending_backups()), _grade_preamble()) if p)
+    return "\n".join(p for p in (_revert_preamble(session.pending_backups()), _grade_preamble(session)) if p)
 
 
-async def _await_user_turn(read_turn, trajectory, seg_start) -> str | None:
+async def _await_user_turn(session, read_turn, trajectory, seg_start) -> str | None:
     """Next user turn (None on Ctrl-D). Two non-obstructing commands, both staying in this loop:
       /revert[ 1,3]  undo changed files (penalised -n*W_REVERT over trajectory[seg_start:]);
       /grade <n>     pre-empt the model's self-grade for the just-finished task.
     Anything else is the user's next task. Backups persist across tasks (a partial revert keeps the
     rest), so the revert listing accumulates until each file is explicitly reverted."""
-    from roger.tools.std_tools import gradeable
-    preamble = _user_turn_preamble()
+    preamble = _user_turn_preamble(session)
     while True:
         nxt = await read_turn(preamble)
         preamble = ""                       # show the notice only once per offer
@@ -288,15 +292,15 @@ async def _await_user_turn(read_turn, trajectory, seg_start) -> str | None:
         nxt = nxt.strip()
         if not nxt:                         # empty line → re-prompt
             continue
-        if pending_backups() and nxt.lower().startswith("/revert"):
-            n = apply_revert(nxt[len("/revert"):].strip() or "all")
+        if session.pending_backups() and nxt.lower().startswith("/revert"):
+            n = session.apply_revert(nxt[len("/revert"):].strip() or "all")
             for entry in trajectory[seg_start:]:
                 entry["reward"] -= n * reward_utils.W_REVERT
-            preamble = _user_turn_preamble()                 # re-offer anything left
+            preamble = _user_turn_preamble(session)          # re-offer anything left
             continue
-        if gradeable() and nxt.lower().startswith("/grade"):
-            set_grade(nxt[len("/grade"):].strip())           # unparseable → no-op (grade stays None)
-            preamble = _user_turn_preamble()                 # reflect urgency / updated hint
+        if session.gradeable() and nxt.lower().startswith("/grade"):
+            session.set_grade(nxt[len("/grade"):].strip())   # unparseable → no-op (grade stays None)
+            preamble = _user_turn_preamble(session)          # reflect urgency / updated hint
             continue
         return nxt                          # moved on → backups stay pending for next time
 
@@ -313,6 +317,7 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
                   on_tool_call: Callable = None,   # (name, args) → None; fired before each call
                   on_tool_result: Callable = None, # (name, result, args) → None; fired after
                   prompt_backend: Callable = None, # replaces input() for all user prompts
+                  session: ToolSession = None,     # per-agent tool state; created fresh if not supplied
                   read_turn: Callable = None,      # async (preamble="") -> next user turn | None (Ctrl-D)
                   root: str = None,                # project root; defaults to os.getcwd()
                   enable_rag: bool = True, rag_k: int = 3,
@@ -359,7 +364,9 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
         tools = [load_tools_fn]
     else:
         catalog_text, tools = None, list(tools)
-    std_tools_list, std_handlers = get_standard_tools(prompt_backend=prompt_backend)
+    if session is None:                       # top-level rollout; sub-agents pass their own
+        session = ToolSession(prompt_backend=prompt_backend)
+    std_tools_list, std_handlers = get_standard_tools(session)
     tools += std_tools_list
     tool_handlers = tool_handlers | std_handlers
 
@@ -387,11 +394,8 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
     mem_inner  = _build_inner_fn(processor.tokenizer, ["write_file", "edit_file"]) if enable_memory else None
     saving_mem = False
     # Silent post-task grade nudge: constrained to a single _grade(...) call, erased from context
-    # after via KV-cache rollback (see _run_grade_nudge below).
-    _GRADE_SEED = ("Let me honestly grade how well I completed the task that I just performed. "
-                   "I should weigh how directly and efficiently I reached the goal (preferring very few wasted, wrong, "
-                   "or redundant steps), and how accurate and complete the result is. 1 for a clean, fully-"
-                   "correct solve, around 0 for partial or clumsy, negative if I largely failed.")
+    # after via KV-cache rollback (see _run_grade_nudge below). Seed at module scope (_GRADE_SEED)
+    # so sub-agents reuse the exact same wording.
     grade_inner = _build_inner_fn(processor.tokenizer, ["_grade"])
     emitted_tool_call = False   # tracks whether the current segment is a task (vs. pure conversation)
     loop = asyncio.get_event_loop()
@@ -420,7 +424,7 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
         )
         if on_gen_end: on_gen_end()
         await _execute_tools(out.sequences.squeeze()[base_ids.shape[1]:],
-                             processor.tokenizer, {"_grade": record_grade}, tool_tokens)
+                             processor.tokenizer, {"_grade": session.record_grade}, tool_tokens)
         if isinstance(past_key_values, transformers.DynamicCache):
             try:
                 past_key_values.crop(base_ids.shape[1])
@@ -571,19 +575,19 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
         trajectory.append(entry)
 
         # Mutually exclusive: bg-wait (another model turn) | task done (await user) | tool results.
-        pending = pending_jobs()
+        pending = session.pending_jobs()
         if not results and not pending:
             # task done: no tool calls, no pending background jobs
             seg_end = len(trajectory)
-            set_gradeable(emitted_tool_call)
-            next_text = await _await_user_turn(read_turn, trajectory, seg_start) if read_turn else None
-            set_gradeable(False)
+            session.set_gradeable(emitted_tool_call)
+            next_text = await _await_user_turn(session, read_turn, trajectory, seg_start) if read_turn else None
+            session.set_gradeable(False)
             if next_text is None:                 # Ctrl-D → grade (if task), memory turn, then end
                 if emitted_tool_call:
-                    user_preempted = grade_value() is not None
+                    user_preempted = session.grade_value() is not None
                     if not user_preempted:
                         await _run_grade_nudge(gen_ids)
-                    grade = grade_value() or 0.0
+                    grade = session.grade_value() or 0.0
                     for e in trajectory[seg_start:seg_end]: e["reward"] += grade
                     _checkpoint(user_graded=user_preempted)
                 if enable_memory and not saving_mem:
@@ -595,32 +599,32 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
             input_ids = torch.cat([gen_ids, _user_turn_delta(processor.tokenizer, asst_msg, next_text, model.device)], dim=1)
             if emitted_tool_call:
                 # Grade with the user's reply already visible; skip if user pre-empted with /grade.
-                user_preempted = grade_value() is not None
+                user_preempted = session.grade_value() is not None
                 if not user_preempted:
                     await _run_grade_nudge(input_ids)
-                grade = grade_value() or 0.0
+                grade = session.grade_value() or 0.0
                 for e in trajectory[seg_start:seg_end]: e["reward"] += grade
                 _checkpoint(user_graded=user_preempted)
             seg_start = len(trajectory)           # new segment starts here
-            clear_grade()
+            session.clear_grade()
             i = 0
             emitted_tool_call = False
             continue
         elif not results and pending:
             # Note: branch not immediately activated when a command is emitted with background=True, because it returns job id
             await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
-            bg = _bg_msgs(processor, tool_res_id, model.device)
+            bg = _bg_msgs(session, processor, tool_res_id, model.device)
             input_ids = torch.cat([gen_ids, bg], dim=1) if isinstance(bg, torch.Tensor) else gen_ids
         else:
             tool_ids, pending_mm = _result_to_ids(results, processor, tool_res_id, model.device)  # mm (or None) → next generate
-            bg = _bg_msgs(processor, tool_res_id, model.device)
+            bg = _bg_msgs(session, processor, tool_res_id, model.device)
             parts = [gen_ids, tool_ids] + ([bg] if isinstance(bg, torch.Tensor) else [])
             input_ids = torch.cat(parts, dim=1)
 
         # Max-steps check-in (interval doubles each time for exponential backoff)
         i += 1
         if i >= max_steps:
-            action, feedback_text = maxsteps_checkin()
+            action, feedback_text = maxsteps_checkin(session.prompt_backend)
             if action == "abort":
                 trajectory[-1]["reward"] -= reward_utils.W_ABORT
                 break
@@ -632,6 +636,6 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
             else: # continue
                 trajectory[-1]["reward"] += reward_utils.W_CONTINUE
 
-    terminate_jobs()  # for safety, kill any still-running background commands
+    session.terminate_jobs()  # for safety, kill any still-running background commands
 
     return trajectory

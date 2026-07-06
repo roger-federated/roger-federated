@@ -18,7 +18,8 @@ import roger.loading.model_setup as model_setup
 from roger.loading.model_setup import fetch_model
 from roger.agency.path_utils import state_dir
 from roger.agency.rollout_utils import rollout
-from roger.tools import mcp_utils, std_tools
+from roger.tools import mcp_utils
+from roger.tools.session import ToolSession
 
 console = Console(highlight=False)
 
@@ -60,7 +61,7 @@ def _ensure_privacy_notice(cfg: dict) -> None:
 
 def _configure_output(verbose: bool) -> None:
     """Quiet third-party noise unless --verbose. Our own warnings are always shown, pretty-printed."""
-    warnings.simplefilter("always")  # no per-location dedup — recurring notices fire every time
+    warnings.simplefilter("default")  # per-location dedup — each notice fires once, no duplicates
     if verbose:
         return  # leave defaults: raw warnings + tqdm bars visible for debugging
     # Match the real package dir, not the substring "roger" (the uv tool dir is itself named
@@ -129,7 +130,8 @@ async def _repl(cfg: dict, root: str) -> None:
     global_deltas = fed_client.pending_globals(cfg)
     # Spinner while loading
     with console.status("[bold]Loading model…[/bold]", spinner="dots"):
-        model, processor = fetch_model(cfg["model_id"], weight_deltas=global_deltas)
+        model, processor = fetch_model(cfg["model_id"], weight_deltas=global_deltas,
+                                       quant=cfg.get("quantization", "4bit"))
         # Speculative decoding: a user-set draft_model (must share the target's tokenizer) is used
         # as the assistant model; otherwise fall back to model-free n-gram prompt-lookup.
         # Off by default on sliding-window models ("auto") as it adds output_hidden_states overhead;
@@ -145,11 +147,11 @@ async def _repl(cfg: dict, root: str) -> None:
     tokenizer = processor.tokenizer
     if not speculate:
         if sliding:
-            console.print("[dim]Speculative decoding off (sliding-window model). "
-                          "Set \"speculative\": true in the config to enable it.[/dim]")
+            console.print("[dim]Speculative decoding off due to sliding-window. "
+                          "Set \"speculative\": true in the config to forcibly enable it.[/dim]")
     elif drafter:
         if sliding:
-            console.print("[dim]Speculative decoding: drafter active.[/dim]")
+            console.print("[dim]Speculative decoding: drafter active. Higher vRAM consumption.[/dim]")
         # else: non-sliding drafter; nothing to flag
     elif draft_id:
         console.print(f"[yellow]draft_model '{draft_id}' has a different tokenizer than the target; "
@@ -172,6 +174,9 @@ async def _repl(cfg: dict, root: str) -> None:
     # Prompt toolkit session (history + styled input)
     session    = ui.make_session()
     pt_backend = ui.make_prompt_backend(session)
+    # The root agent's tool state (backups, jobs, grade window). Created here so the read_turn
+    # closure can surface its revert/grade hints; passed into rollout so it owns the same instance.
+    tool_session = ToolSession(prompt_backend=pt_backend)
     renderer   = ui.StreamRenderer(verbose=cfg["verbose"], think_delims=think_delims,
                                    tool_delims=tool_delims, specials=specials)
 
@@ -185,8 +190,8 @@ async def _repl(cfg: dict, root: str) -> None:
         if preamble:
             console.print()
             console.print(preamble, style="dim", markup=False)  # paths may contain []; don't parse markup
-        return await ui.read_prompt(session, suggest_revert=std_tools.pending_backups,
-                                    placeholder=placeholder, suggest_grade=std_tools.gradeable)
+        return await ui.read_prompt(session, suggest_revert=tool_session.pending_backups,
+                                    placeholder=placeholder, suggest_grade=tool_session.gradeable)
 
     # First task: read until a non-empty prompt (or quit on Ctrl-D)
     while True:
@@ -224,6 +229,7 @@ async def _repl(cfg: dict, root: str) -> None:
             on_tool_call   = ui.render_tool_call,
             on_tool_result = ui.render_tool_result,
             prompt_backend = pt_backend,
+            session        = tool_session,
             read_turn      = read_turn,
             root           = root,
             enable_rag     = cfg["enable_rag"],

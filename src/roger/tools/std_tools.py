@@ -9,57 +9,31 @@ Only content-emitting operations (write_file, edit_file) are kept as tools;
 consuming/moving/computing operations are covered by run_command idioms
 described in the system prompt.
 
-Usage:
-    tools, handlers = get_standard_tools()
+Stateful tools (file writes, shell jobs, prompts) are bound to a ToolSession:
+    tools, handlers = get_standard_tools(session)
     await rollout(..., tools=tools, tool_handlers=handlers)
+so concurrent sub-agents never share backups / a job registry / a grade window.
+Grade + backup/revert state now live on ToolSession (see tools/session.py).
 """
 
-import os, re, shutil, time, tempfile
+import os, shutil, time, tempfile
 from ddgs import DDGS                  # keyless DuckDuckGo search + page fetch (web_search/web_fetch)
 from roger.tools import shell_tools   # shell execution + policy machinery lives here
 from roger.agency.path_utils import state_dir
 
 
 # ---------------------------------------------------------------------------
-# Module-level per-rollout state
+# File tools (emitters only — reading/searching goes through run_command).
+# The impls take the ToolSession explicitly; get_standard_tools wraps them in
+# schema-carrying closures bound to one session.
 # ---------------------------------------------------------------------------
 
-def _default_prompt(question: str) -> str:
-    try:
-        return input(question + " ")
-    except EOFError:
-        return "(no response — user input unavailable)"
-    except KeyboardInterrupt:
-        return "(user cancelled)"
-
-_prompt_backend = _default_prompt
-_policy_file: str = "command_policy.txt"   # kept here so write_file/_is_protected can read it
-
-# Write backups — (original_path, backup_path) for end-of-rollout revert
-_backups: list[tuple[str, str]] = []
-
-# Per-rollout grade state. grade_value() is None until the model or user grades the segment;
-# _gradeable opens/closes the /grade window for the current user turn.
-_grade_value: float | None = None
-_gradeable: bool = False
-
-
-# ---------------------------------------------------------------------------
-# File tools (emitters only — reading/searching goes through run_command)
-# ---------------------------------------------------------------------------
-
-def write_file(path: str, content: str, append: bool = False) -> str:
-    """Write or append content to a file, creating parent directories as needed.
-    Args:
-        path: Absolute or relative path to the target file.
-        content: The text content to write.
-        append: If true, append to existing file instead of overwriting.
-    """
-    if shell_tools._is_protected(path):
+def _write_file(session, path: str, content: str, append: bool) -> str:
+    if shell_tools._is_protected(path, session.policy_file):
         return f"Refused: {path} is the guardrail policy file and cannot be modified by the agent."
     try:
         if not append and os.path.isfile(path):
-            _backup_file(path)
+            _backup_file(session, path)
         parent = os.path.dirname(path)
         if parent:
             os.makedirs(parent, exist_ok=True)
@@ -74,15 +48,8 @@ def write_file(path: str, content: str, append: bool = False) -> str:
         return f"Error writing file: {e}"
 
 
-def edit_file(path: str, old: str, new: str, replace_all: bool = False) -> str:
-    """Replace an exact substring in a file. View the file first (e.g. `cat`/`Get-Content`) to get exact text.
-    Args:
-        path: File to edit.
-        old: Exact text to find (must be unique in the file unless replace_all is set).
-        new: Replacement text.
-        replace_all: If true, replace every occurrence instead of requiring uniqueness.
-    """
-    if shell_tools._is_protected(path):
+def _edit_file(session, path: str, old: str, new: str, replace_all: bool) -> str:
+    if shell_tools._is_protected(path, session.policy_file):
         return f"Refused: {path} is the guardrail policy file and cannot be modified by the agent."
     try:
         with open(path, encoding="utf-8", errors="replace") as f:
@@ -101,7 +68,7 @@ def edit_file(path: str, old: str, new: str, replace_all: bool = False) -> str:
         return f"Target text is not unique ({n} matches); add more context or set replace_all"
 
     new_content = content.replace(old, new) if replace_all else content.replace(old, new, 1)
-    _backup_file(path)
+    _backup_file(session, path)
     # Atomic write: temp file in same dir, then os.replace
     try:
         parent = os.path.dirname(os.path.abspath(path))
@@ -123,8 +90,8 @@ def edit_file(path: str, old: str, new: str, replace_all: bool = False) -> str:
     return f"Replaced {replaced} occurrence(s) in {path}"
 
 
-def _backup_file(path: str) -> None:
-    """Copy an existing file to ~/.roger/backups/{path}.{timestamp}.bak and record for revert."""
+def _backup_file(session, path: str) -> None:
+    """Copy an existing file to ~/.roger/backups/{path}.{timestamp}.bak and record it on the session."""
     # ~/.roger/ is Roger's own state (memory, runs, …) — never back up or revert its contents.
     if os.path.abspath(path).startswith(state_dir() + os.sep):
         return
@@ -136,61 +103,11 @@ def _backup_file(path: str) -> None:
     backup_path = os.path.join(state_dir(), "backups", f"{rel}.{ts}.bak")
     os.makedirs(os.path.dirname(backup_path), exist_ok=True)
     shutil.copy2(path, backup_path)
-    _backups.append((os.path.abspath(path), os.path.abspath(backup_path)))
+    session.backups.append((os.path.abspath(path), os.path.abspath(backup_path)))
 
 
 # ---------------------------------------------------------------------------
-# User interaction
-# ---------------------------------------------------------------------------
-
-def prompt_user(question: str) -> str:
-    """Ask the user a question and return their response.
-    Args:
-        question: The question or message to display to the user.
-    """
-    return _prompt_backend(question)
-
-
-def grade_value() -> float | None:
-    """Pending grade, or None when nothing has been graded yet / window is closed."""
-    return _grade_value
-
-
-def set_grade(score) -> float | None:
-    """Set the grade; returns the clamped value, or None on parse error."""
-    global _grade_value
-    try:
-        _grade_value = max(-1.0, min(1.0, float(score)))
-    except (TypeError, ValueError):
-        return None
-    return _grade_value
-
-
-def record_grade(score: float = 0.0) -> str:
-    """Tool handler for the silent grade nudge — sets grade_value() and returns '(done)'."""
-    set_grade(score)
-    return "(done)"
-
-
-def clear_grade() -> None:
-    """Close the grade window at a new task boundary."""
-    global _grade_value
-    _grade_value = None
-
-
-def gradeable() -> bool:
-    """True when the current user turn follows a task and /grade is active."""
-    return _gradeable
-
-
-def set_gradeable(value: bool) -> None:
-    """Open/close the /grade window (called by the rollout around _await_user_turn)."""
-    global _gradeable
-    _gradeable = value
-
-
-# ---------------------------------------------------------------------------
-# Web (keyless DuckDuckGo — ddgs handles request headers/UA rotation internally)
+# Web (keyless DuckDuckGo — stateless; the same callables are shared by every agent)
 # ---------------------------------------------------------------------------
 
 def web_search(query: str, max_results: int = 10) -> str:
@@ -225,51 +142,13 @@ def web_fetch(url: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# End-of-rollout revert
-# ---------------------------------------------------------------------------
-
-def pending_backups() -> list[tuple[str, str]]:
-    """Current (original_path, backup_path) pairs awaiting a revert decision; empty when nothing changed."""
-    return list(_backups)
-
-
-def apply_revert(answer: str) -> int:
-    """Revert backed-up files per `answer` ('all' / '1,3' / 'none'); return the count reverted.
-    Only the reverted entries are popped from _backups — a partial revert keeps the rest available
-    for a later offer (so the user can revert one file now and the others next time). 'none' discards
-    everything; an answer with no recognised index is a no-op (doesn't clear), so an accidental
-    ghost-text accept can't wipe the list."""
-    answer = (answer or "").strip().lower()
-    if answer == "none":
-        _backups.clear(); return 0
-    if answer in ("", "all"):
-        indices = set(range(len(_backups)))
-    else:
-        # Keep only integer tokens (split on commas/whitespace); ignore anything else.
-        indices = {int(t) - 1 for t in re.split(r"[,\s]+", answer) if t.isdigit()}
-        if not indices:
-            return 0
-    n_reverted = 0
-    kept: list[tuple[str, str]] = []
-    for idx, (orig, bak) in enumerate(_backups):
-        if idx in indices:
-            try: shutil.copy2(bak, orig); n_reverted += 1
-            except OSError: kept.append((orig, bak))   # restore failed → keep so the user can retry
-        else:
-            kept.append((orig, bak))                   # not selected → still pending
-    _backups[:] = kept
-    return n_reverted
-
-
-# ---------------------------------------------------------------------------
 # Max-steps check-in (called directly by rollout; not an agent tool)
 # ---------------------------------------------------------------------------
 
-def maxsteps_checkin(prompt_fn=None) -> tuple[str, str]:
-    """Present the three-option max-steps check-in to the user.
+def maxsteps_checkin(prompt_fn) -> tuple[str, str]:
+    """Present the three-option max-steps check-in to the user via prompt_fn.
     Returns (action, feedback_text): action in {'continue', 'abort', 'feedback'}."""
-    fn = prompt_fn or _prompt_backend
-    answer = fn(
+    answer = prompt_fn(
         "Max steps reached.\n"
         "  [1] Continue iterating\n"
         "  [2] Abort\n"
@@ -279,7 +158,7 @@ def maxsteps_checkin(prompt_fn=None) -> tuple[str, str]:
     if answer in ("2", "abort"):
         return "abort", ""
     if answer in ("3", "feedback", "3 continue with feedback"):
-        text = fn("Feedback:").strip()
+        text = prompt_fn("Feedback:").strip()
         return "feedback", text
     return "continue", ""
 
@@ -288,29 +167,40 @@ def maxsteps_checkin(prompt_fn=None) -> tuple[str, str]:
 # Convenience aggregator
 # ---------------------------------------------------------------------------
 
-def get_standard_tools(prompt_backend=None, policy_file="command_policy.txt") -> tuple[list, dict]:
-    """Return (tools_list, tool_handlers) for use with rollout().
-    Args:
-        prompt_backend: Optional callable(question: str) -> str replacing input().
-        policy_file: Path to the command policy file for run_command.
+def get_standard_tools(session) -> tuple[list, dict]:
+    """Return (tools_list, tool_handlers) bound to `session` for use with rollout().
+
+    File/prompt tools mutate the session (backups, prompt backend); shell tools share its job
+    registry; web tools are stateless. A fresh session per agent isolates all of this, so there
+    is no per-rollout reset to do here anymore.
     """
-    global _prompt_backend, _policy_file, _grade_value, _gradeable
-    if prompt_backend is not None:
-        _prompt_backend = prompt_backend
-    _policy_file = policy_file
+    def write_file(path: str, content: str, append: bool = False) -> str:
+        """Write or append content to a file, creating parent directories as needed.
+        Args:
+            path: Absolute or relative path to the target file.
+            content: The text content to write.
+            append: If true, append to existing file instead of overwriting.
+        """
+        return _write_file(session, path, content, append)
 
-    # Reset per-rollout state
-    _backups.clear()
-    _grade_value = None
-    _gradeable   = False
+    def edit_file(path: str, old: str, new: str, replace_all: bool = False) -> str:
+        """Replace an exact substring in a file. View the file first (e.g. `cat`/`Get-Content`) to get exact text.
+        Args:
+            path: File to edit.
+            old: Exact text to find (must be unique in the file unless replace_all is set).
+            new: Replacement text.
+            replace_all: If true, replace every occurrence instead of requiring uniqueness.
+        """
+        return _edit_file(session, path, old, new, replace_all)
 
-    # Configure shell_tools (sets its own prompt/policy globals, resets _jobs)
-    shell_tools.configure(prompt_backend=prompt_backend, policy_file=policy_file)
+    def prompt_user(question: str) -> str:
+        """Ask the user a question and return their response.
+        Args:
+            question: The question or message to display to the user.
+        """
+        return session.prompt_backend(question)
 
-    shell = [shell_tools.run_command, shell_tools.stop_command, shell_tools.check_command]
-    file  = [write_file, edit_file]
-    web   = [web_search, web_fetch]
-    misc  = [prompt_user]
-    tools = shell + file + web + misc
+    tools = (shell_tools.make_shell_tools(session)
+             + [write_file, edit_file, web_search, web_fetch, prompt_user])
     handlers = {fn.__name__: fn for fn in tools}
     return tools, handlers
