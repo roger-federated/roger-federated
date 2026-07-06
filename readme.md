@@ -280,16 +280,17 @@ The ecosystem is still in development. Below is a non-exhaustive list of to-do i
 - [x] Use DP without accountant until server is busy, then switch to SMPC.
 - [x] Launch the default server as a scale-to-zero container on Scaleway with S3 storage.
 - [x] Use signatures and tokens (per-registration secret token proves cohort membership at upload).
+- [x] Automatic subagent spawning (`spawn_subagent`) with concurrent tool dispatch.
+- [x] Native agent loops: `/perpetual` standing tasks with graceful Ctrl-C stop.
 - [x] <ins>Huzzah, the beta version can now be shipped.</ins>
 
 Deferred:
 - [ ] Zero-knowledge integrity proof to verify scale, mod, keys, clip, model fork.
 - [ ] Shamir dropout recovery.
 - [ ] Sandboxed docker environments.
-- [ ] Native support for agent loops.
 - [ ] Integrate spoken instructions.
 - [ ] Remote control: copy a session code, enter it on our website, continue interacting encrypted through the browser.
 - [ ] Always-on mode: always listen, look, and read, and when a keyboard shortcut is entered, automatically infer and continue the user's task using e.g. Touchpoint.
 - [ ] Dynalang-style world model for embedded state roll-forward.
 - [ ] Centrally coordinated ground-truth gradient injection.
-- [ ] Automatic subagent spawning and automatic git worktrees.
+- [ ] Automatic git worktrees for parallel subagent isolation.

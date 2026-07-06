@@ -82,17 +82,18 @@
 
 ## Package layout (src-layout; package = `roger`, console script = `roger`)
 - `agency/`   — rollout loop, tool/skill loaders, RAG retrieval, `@path` expansion
-                (`rollout_utils`, `retrieval`, `skill_utils`, `path_utils`)
+                (`rollout_utils`, `retrieval`, `skill_utils`, `path_utils`), sub-agent
+                spawning (`subagents`)
 - `apps/`     — CLI entry point, config, Rich/prompt_toolkit UI (`cli`, `config`, `ui`)
-- `loading/`  — model loading + VRAM-aware quantization tier selection (`model_setup`);
-                future home for subagent spawning
+- `loading/`  — model loading + VRAM-aware quantization tier selection (`model_setup`),
+                rollback sliding-window KV cache (`rollback_cache`)
 - `tools/`    — standard tools, shell execution + policy guardrails, MCP bridge
                 (`std_tools`, `shell_tools`, `mcp_utils`, `command_policy.txt`)
 - `training/` — RL machinery: reward shaping, trajectory recording, LoRA adapter + REINFORCE++
                 trainer, train-time PII anonymizer
                 (`reward_utils`, `recording`, `lora_utils`, `trainer`, `privacy_filter`)
 - `skills/`   — bundled default skills shipped as package-data (`ipynb`, `skill-creator`,
-                `git-workflow`, `code`); read in place as the lowest-priority `discover_skills` base
+                `git-workflow`, `code`, `lean`); read in place as the lowest-priority `discover_skills` base
 - `federated/`— gradient-sharing client: `delta` (densify ΔW [+ optional factor-space DP noise] +
                 (de)serialize + `fold_into` the base weights in bf16), `secure_agg` (X25519/EC-DH +
                 SHAKE pairwise masks, quantize mod R), `transport` (httpx per-federation, fail-soft,
