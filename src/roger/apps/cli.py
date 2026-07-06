@@ -27,7 +27,7 @@ _BANNER = """
 [bold cyan]Roger Federated:[/bold cyan] [dim] local agentic RL[/dim]
 Config: [cyan]{cfg_path}[/cyan]  |  Model: [cyan]{model}[/cyan]
 Tip 1: Before starting a long-running task, plug in your computer and disable sleep in your system settings.
-Tip 2: To avoid polluting the KV-cache, provide instructions incrementally and start a fresh session for new tasks.
+Tip 2: Type [cyan]/perpetual <task>[/cyan] to give Roger a standing task it keeps working on autonomously ([cyan]Ctrl-C[/cyan] to stop).
 """
 
 # Shown when a federation reports this client is out of date. There is no PyPI release (readme.md):
@@ -208,8 +208,15 @@ async def _repl(cfg: dict, root: str) -> None:
     mcp_servers = mcp_utils.load_mcp_config()
     mcp_stack, mcp_tools, mcp_handlers = None, [], {}
     if mcp_servers:
-        with console.status("[bold]Connecting MCP servers…[/bold]", spinner="dots"):
+        # A first-time OAuth login prints instructions and may read a pasted URL from stdin;
+        # a live spinner would repaint over the prompt, so run those connects without one.
+        if mcp_utils.needs_interactive_auth(mcp_servers):
+            console.print("[bold]Connecting MCP servers…[/bold] "
+                          "[dim](first-time login: follow the prompts below)[/dim]")
             mcp_stack, mcp_tools, mcp_handlers = await mcp_utils.connect_servers(mcp_servers)
+        else:
+            with console.status("[bold]Connecting MCP servers…[/bold]", spinner="dots"):
+                mcp_stack, mcp_tools, mcp_handlers = await mcp_utils.connect_servers(mcp_servers)
         console.print(f"[dim]MCP: {len(mcp_handlers)} tool(s) from "
                       f"{len(mcp_servers)} server(s).[/dim]")
 
