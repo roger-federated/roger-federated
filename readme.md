@@ -1,7 +1,7 @@
 ![Roger Federated](assets/banner.PNG)
 
 ## Overview
-The limitations of the AI transition are surfacing as a result of [far-fetched financial projections](https://futurumgroup.com/insights/ai-capex-2026-the-690b-infrastructure-sprint/); [closed models we cannot inspect nor steer](https://blog.mozilla.org/en/mozilla/mozilla-open-source-ai-strategy/); [and myopic hype that fails to recognize real adjacent progress](https://europe2031.ai/). _Luckily, we are at a crossroads where you, the consumer, can do better [with tiny models on your own hardware](https://newsletter.semianalysis.com/p/google-we-have-no-moat-and-neither)._
+A dichotomy in the AI transition is surfacing: Will we continue [to delegate our decisional capacity to closed source models we cannot inspect nor steer](https://blog.mozilla.org/en/mozilla/mozilla-open-source-ai-strategy/) and thus rely on [far-fetched financial projections](https://futurumgroup.com/insights/ai-capex-2026-the-690b-infrastructure-sprint/), or can we do better with [tiny models running on consumer hardware](https://newsletter.semianalysis.com/p/google-we-have-no-moat-and-neither)? *The answer is yes, we can do better.* And that's where Roger Federated comes in.
 
 You and the community can now contribute to the next generation of AI. Not just an LLM with tools, but a purpose-trained agent that is inherently omni-modal. How? By *locally* finetuning a selected *open-source* foundation model on *agentic rollout data*, and subsequently *aggregating* the resulting encrypted model updates (not the data itself) securely with your selected *federations*.
 
@@ -10,10 +10,10 @@ You and the community can now contribute to the next generation of AI. Not just 
 ## Features
 On top of the basic agentic capabilities listed further [below](#progress--contributing), Roger adds the following.
 
-- **Efficient local reinforcement learning**: Inference and finetuning run entirely on the user's own machine; raw data never leaves it. QLoRA REINFORCE++ makes on-device RL efficient on consumer GPUs.
-- **Self-evaluation rewards**: Rollouts are scored from implicit user signals, verifiable signals, and the model's own self-evaluation.
-- **Privacy filter**: Before any gradient is computed, a train-time anonymiser swaps personally identifiable information for consistent surrogates, so personal data can neither be learned nor transmitted.
 - **Federated learning using SMPC**: Based on secure multi-party computing, only encrypted weight updates are contributed to your chosen federations. No peer or server can decipher the update and no raw data is ever shared. The aggregated global update is folded back into your base model at load.
+- **Efficient local reinforcement learning**: Inference and finetuning run entirely on the user's own machine; raw data never leaves it. QLoRA REINFORCE++ makes on-device RL efficient on consumer GPUs.
+- **Privacy filter**: Before any gradient is computed, a train-time anonymiser swaps personally identifiable information for consistent surrogates, so personal data can neither be learned nor transmitted.
+- **Self-evaluation rewards**: Rollouts are scored from implicit user signals, verifiable signals, and the model's own self-evaluation.
 - **Scales to world models**: The same text-native, RL-safe interface extends from agency to world-models, which the federation can train collaboratively and deploy more cheaply than alternative centralized efforts.
 - **More than just software**: Federations, continuous model updating, and an exchange of community-trained adapters on top of basic MCP-driven agentic software make Roger a unique ecosystem that improves as more people contribute.
 
@@ -62,10 +62,10 @@ For self-improvement purposes, it is of paramount importance that you end a sess
 <details>
 <summary>Remote execution on a trusted machine over SSH</summary>
 
-Roger installs and runs identically on any machine you can SSH into, so a rented GPU instance works exactly like your local one. We use [Scaleway](https://www.scaleway.com/), but any provider works the same way, e.g. [Hetzner](https://www.hetzner.com/).
+Roger installs and runs identically on any machine you can SSH into, so a rented GPU instance works exactly like your local one. We use Scaleway, but any provider works the same way, e.g. Hetzner, Koyeb, Stackit.
 
 - Rent a GPU instance from a provider offering on-demand GPU compute.
-- *Important*: Attach block storage that survives instance deletion, in order to persist the state that lives under `~/.roger/`. You could optionally reverse-tunnel and symlink so that the state is mounted to your local machine.
+- *Important*: Attach block storage that survives instance deletion, in order to persist the state that lives under `~/.roger/`. Alternatively, you could reverse-tunnel and symlink so that the state is mounted to your local machine.
 - On the remote, install the same way, by cloning the repo and running `uv tool install . --torch-backend auto`.
 - Optionally run from `tmux` so the session survives an SSH disconnect.
 
@@ -280,9 +280,9 @@ The ecosystem is still in development. Below is a non-exhaustive list of to-do i
 - [x] Use DP without accountant until server is busy, then switch to SMPC.
 - [x] Launch the default server as a scale-to-zero container on Scaleway with S3 storage.
 - [x] Use signatures and tokens (per-registration secret token proves cohort membership at upload).
+- [x] <ins>Huzzah, the beta version can now be shipped.</ins>
 - [x] Automatic subagent spawning (`spawn_subagent`) with concurrent tool dispatch.
 - [x] Native agent loops: `/perpetual` standing tasks with graceful Ctrl-C stop.
-- [x] <ins>Huzzah, the beta version can now be shipped.</ins>
 
 Deferred:
 - [ ] Zero-knowledge integrity proof to verify scale, mod, keys, clip, model fork.
