@@ -63,6 +63,14 @@ def test_build_seed_reasoning_model_opens_think_channel():
     assert seed[0] == 10                       # think-open first
     assert 100 not in seed                     # tool-open NOT spliced (fires after the model closes think)
 
+def test_build_seed_carries_think_prefix():
+    # The template's channel header (e.g. Gemma-4's 'thought\n') must sit between the think-open
+    # and the seed text; without it the text lands where the channel name belongs.
+    tok, think, tool = _FakeTok(), (10, 11), (100, 101)
+    seed = r._build_seed(tok, "hi", think, tool, force_tool=False, think_prefix=[71, 72])
+    assert seed[:3] == [10, 71, 72]
+    assert seed[3:] == tok.encode("hi")
+
 def test_build_seed_non_reasoning_fallback():
     tok, tool = _FakeTok(), (100, 101)
     # No think channel → mandatory seed splices the tool-open immediately (old behaviour preserved).

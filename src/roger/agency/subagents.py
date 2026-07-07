@@ -138,24 +138,33 @@ def batched_generate(slots: list[SubAgent], model, processor, tool_tokens, max_n
         s.masks = [s.mask_by_pos.get(Smax + t) for t in range(n)]
 
 
-async def _grade_and_record(slot: SubAgent, seg_end: int, model, processor, tool_tokens, root):
-    """Self-grade the finished segment, fold the grade into its rewards, and checkpoint the run."""
-    from roger.agency.rollout_utils import _build_inner_fn, _allowed_tokens, _execute_tools, _GRADE_SEED
+async def _grade_and_record(slot: SubAgent, seg_end: int, model, processor, tool_tokens, root,
+                            gen_prompt=None, think_tokens=None, think_prefix=None):
+    """Self-grade the finished segment, fold the grade into its rewards, and checkpoint the run.
+    Same reason-then-force seed as the main loop's grade nudge: a fresh model-turn cue, the think
+    channel opened with its canonical header, and the _grade call forced once the model closes its
+    own thought (immediate text+call splice on a non-reasoning model)."""
+    from roger.agency.rollout_utils import _build_inner_fn, _build_seed, _allowed_tokens, _execute_tools, _GRADE_SEED
     tok = processor.tokenizer
     if slot.emitted_tool_call:
         grade_inner = _build_inner_fn(tok, ["_grade"])
-        seed = tok.encode(_GRADE_SEED, add_special_tokens=False) + [tool_tokens[0]]
-        ids = torch.cat([slot.input_ids, torch.tensor([seed], device=model.device, dtype=torch.long)], dim=1)
-        base = ids.shape[1]
+        seed = _build_seed(tok, _GRADE_SEED, think_tokens, tool_tokens, force_tool=True,
+                           think_prefix=think_prefix)
+        cue = gen_prompt.tolist()[0] if gen_prompt is not None else []
+        ids = torch.cat([slot.input_ids,
+                         torch.tensor([cue + seed], device=model.device, dtype=torch.long)], dim=1)
+        base = slot.input_ids.shape[1] + len(cue)   # constraint counting starts at the seed
+        think_close = think_tokens[1] if think_tokens else None
 
         def proc(input_ids, scores):
-            allowed = _allowed_tokens(grade_inner, tok, tool_tokens, input_ids, base)
+            allowed = _allowed_tokens(grade_inner, tok, tool_tokens, input_ids, base,
+                                      think_close=think_close, force_tool=True)
             if allowed is not None:
                 m = torch.full_like(scores[0], float("-inf")); m[allowed] = 0.0
                 scores[0] = scores[0] + m
             return scores
 
-        out = model.generate(ids, attention_mask=torch.ones_like(ids), max_new_tokens=32,
+        out = model.generate(ids, attention_mask=torch.ones_like(ids), max_new_tokens=48,
                              use_cache=True, return_dict_in_generate=True,
                              logits_processor=transformers.LogitsProcessorList([proc]))
         slot.session.clear_grade()
@@ -206,7 +215,8 @@ class SubAgentScheduler:
                  policy_file: str = "command_policy.txt",
                  on_tool_call: Callable = None, on_tool_result: Callable = None):
         from roger.loading.model_setup import (find_tool_call_tokens, find_tool_res_id,
-                                               find_gen_prompt, find_gen_prompt_after_tool, find_turn_end)
+                                               find_gen_prompt, find_gen_prompt_after_tool, find_turn_end,
+                                               find_think_tokens, find_think_prefix)
         self.model = model; self.processor = processor; self.tok = processor.tokenizer
         self.tool_tokens = find_tool_call_tokens(self.tok)
         self.tool_res_id = find_tool_res_id(self.tok)
@@ -215,6 +225,8 @@ class SubAgentScheduler:
         self.gen_prompt_tool = torch.tensor([find_gen_prompt_after_tool(self.tok)],
                                             device=model.device, dtype=torch.long)
         self.turn_end = find_turn_end(self.tok)
+        self.think_tokens = find_think_tokens(self.tok)
+        self.think_prefix = find_think_prefix(self.tok) if self.think_tokens else []
         self.max_alive = max_alive; self.max_steps = max_steps; self.root = root
         self.max_new_tokens = max_new_tokens
         self.mcp_tools = list(mcp_tools); self.mcp_handlers = dict(mcp_handlers or {})
@@ -346,7 +358,9 @@ class SubAgentScheduler:
         seg_end = len(slot.trajectory)
         answer = self.tok.decode(slot.new_ids, skip_special_tokens=True).strip()
         slot.result = answer or note or "(no answer)"
-        await _grade_and_record(slot, seg_end, self.model, self.processor, self.tool_tokens, self.root)
+        await _grade_and_record(slot, seg_end, self.model, self.processor, self.tool_tokens, self.root,
+                                gen_prompt=self.gen_prompt, think_tokens=self.think_tokens,
+                                think_prefix=self.think_prefix)
         slot.session.terminate_jobs()
         slot.done = True
 

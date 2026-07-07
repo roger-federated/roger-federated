@@ -65,6 +65,27 @@ def find_think_tokens(tokenizer) -> tuple[int, int] | None:
         return None
     return result
 
+def find_think_prefix(tokenizer) -> list[int]:
+    """Token ids the template puts between the think-open delimiter and the reasoning text
+    (e.g. Gemma-4's channel header 'thought\\n'; often [] on <think>-style templates). A seeded
+    thought must carry this header too — without it the seed text lands where the channel *name*
+    belongs, which is off-distribution and makes the model bail out of the thought immediately."""
+    marker = "XKQZW"                       # distinctive: survives tokenization as its own tokens
+    forcing = [{"role": "user", "content": "x"},
+               {"role": "assistant", "reasoning_content": marker,
+                "tool_calls": [{"id": "0", "type": "function",
+                                "function": {"name": "f", "arguments": {}}}]}]
+    toks = tokenizer.apply_chat_template(forcing, tokenize=True, add_generation_prompt=False)["input_ids"]
+    th = find_think_tokens(tokenizer)
+    if th is None or th[0] not in toks:
+        return []
+    start = toks.index(th[0]) + 1
+    mk = tokenizer.encode(marker, add_special_tokens=False)
+    for j in range(start, len(toks) - len(mk) + 1):     # first marker occurrence after the open
+        if toks[j:j + len(mk)] == mk:
+            return toks[start:j]
+    return []
+
 def find_gen_prompt(tokenizer) -> list[int]:
     """Token ids of the assistant-turn cue (add_generation_prompt diff). Returns [] if none."""
     base = tokenizer.apply_chat_template(

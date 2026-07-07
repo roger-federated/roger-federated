@@ -15,7 +15,8 @@ from roger.tools.std_tools import get_standard_tools, maxsteps_checkin
 from roger.tools.shell_tools import shell_idioms
 from roger.tools.session import ToolSession
 from roger.loading.model_setup import (find_gen_prompt, find_gen_prompt_after_tool, find_turn_end,
-                                       find_tool_res_id, find_tool_call_tokens, find_think_tokens)
+                                       find_tool_res_id, find_tool_call_tokens, find_think_tokens,
+                                       find_think_prefix)
 from roger.training import recording
 from datetime import datetime, timezone
 
@@ -56,7 +57,15 @@ def _make_tool_loader(tools):
         results = []
         for n in names:
             if n not in index:
-                results.append({"name": n, "error": "unknown tool name"})
+                # A common miss: passing an MCP *server* prefix instead of a tool name. List the
+                # tools under that prefix (names only, no schemas) — else fuzzy-suggest — so the
+                # model can immediately self-correct instead of dead-ending.
+                under = [k for k in index if k.startswith(n.rstrip("_") + "__")]
+                if not under:
+                    import difflib
+                    under = difflib.get_close_matches(n, index.keys(), n=5, cutoff=0.5)
+                results.append({"name": n, "error": "unknown tool name",
+                                **({"did_you_mean": under[:25]} if under else {})})
                 continue
             _, t = index[n]
             results.append(_strip_schema(t) if isinstance(t, dict) else
@@ -139,14 +148,18 @@ def _make_constraint_processor(inner, tokenizer, tool_tokens, new_idx,
     return processor, mask_by_pos
 
 
-def _build_seed(tokenizer, text: str, think_tokens, tool_tokens, force_tool: bool) -> list[int]:
-    """Soft-prefill seed token-ids. On a reasoning model, open the think channel with priming `text`
-    so the model reasons and closes its own thought before any (forced) tool call. On a non-reasoning
-    model there is no think channel, so fall back to the original immediate splice: `text` then, for a
-    mandatory-side-effect seed, the tool-open token (the JSON grammar engages at once)."""
+def _build_seed(tokenizer, text: str, think_tokens, tool_tokens, force_tool: bool,
+                think_prefix: list[int] = None) -> list[int]:
+    """Soft-prefill seed token-ids. On a reasoning model, open the think channel — including the
+    template's channel header (`think_prefix`, e.g. Gemma-4's 'thought\\n'; without it the seed text
+    sits where the channel name belongs and the model bails out of the thought immediately) — with
+    priming `text` so the model reasons and closes its own thought before any (forced) tool call.
+    On a non-reasoning model there is no think channel, so fall back to the original immediate
+    splice: `text` then, for a mandatory-side-effect seed, the tool-open token (the JSON grammar
+    engages at once)."""
     body = tokenizer.encode(text, add_special_tokens=False)
     if think_tokens is not None:
-        return [think_tokens[0]] + body            # reason first; force (if any) fires after think_close
+        return [think_tokens[0]] + (think_prefix or []) + body  # reason first; force fires after think_close
     return (body + [tool_tokens[0]]) if force_tool else body
 
 
@@ -428,6 +441,9 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
     tool_tokens = find_tool_call_tokens(processor.tokenizer)
     # think_tokens: (open, close) reasoning-channel ids, or None; the finish-nudge seeds the open id.
     think_tokens = find_think_tokens(processor.tokenizer)
+    # think_prefix: the channel header between the open id and the reasoning text (Gemma-4:
+    # 'thought\n'); every injected seed must carry it to stay on-distribution.
+    think_prefix = find_think_prefix(processor.tokenizer) if think_tokens else []
     # tool_res_id: <|tool_response> boundary; used to slice prompt-free deltas.
     tool_res_id = find_tool_res_id(processor.tokenizer)
     asst_msg = [{"role": "assistant", "tool_calls": [   # reused in feedback injection below
@@ -550,7 +566,8 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
         nonlocal past_key_values
         # reason-then-force: open the think channel, let the model reason about the grade, then force the
         # _grade call once it closes its own thought (falls back to the immediate splice on a plain model).
-        seed = _build_seed(processor.tokenizer, _GRADE_SEED, think_tokens, tool_tokens, force_tool=True)
+        seed = _build_seed(processor.tokenizer, _GRADE_SEED, think_tokens, tool_tokens, force_tool=True,
+                           think_prefix=think_prefix)
         ids  = torch.cat([base_ids, torch.tensor([seed], device=model.device, dtype=torch.long)], dim=1)
         _tc  = think_tokens[1] if think_tokens else None
         lp, _ = _make_constraint_processor(grade_inner, processor.tokenizer, tool_tokens, base_ids.shape[1],
@@ -671,7 +688,8 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
         seed_close, seed_force = None, False
         if saving_mem:
             # reason-then-force memory turn: open the think channel, reason, then a forced (restricted) file call
-            _seed = _build_seed(processor.tokenizer, _MEM_SEED, think_tokens, tool_tokens, force_tool=True)
+            _seed = _build_seed(processor.tokenizer, _MEM_SEED, think_tokens, tool_tokens, force_tool=True,
+                                think_prefix=think_prefix)
             input_ids = torch.cat(
                 [input_ids, torch.tensor([_seed], device=model.device, dtype=torch.long)], dim=1)
             new_idx = input_ids.shape[1] - len(_seed)   # count the whole seed (incl. think_open) to detect the close
@@ -680,7 +698,7 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
             # Standing-task continuation: a varied nudge in the think channel; the model freely acts or sleeps.
             _seed = _build_seed(processor.tokenizer,
                                 _perpetual_seed_text(perpetual_task, last_tool, idle_streak),
-                                think_tokens, tool_tokens, force_tool=False)
+                                think_tokens, tool_tokens, force_tool=False, think_prefix=think_prefix)
             input_ids = torch.cat(
                 [input_ids, torch.tensor([_seed], device=model.device, dtype=torch.long)], dim=1)
             new_idx = input_ids.shape[1]                 # record only the model's continuation, not the injected seed
@@ -794,6 +812,13 @@ async def rollout(model: transformers.modeling_utils.PreTrainedModel,
                     idle_streak = 0
                 else:
                     idle_streak += 1              # no action this cycle → pace the next re-check harder
+                    # Loop-side backoff: the in-seed sleep hint is advisory and a model that keeps
+                    # concluding "nothing to do" without running sleep would hot-spin the GPU with
+                    # instant empty thoughts. Pause here instead (1s granularity keeps Ctrl-C fast).
+                    for _ in range(min(60, 5 * (2 ** idle_streak))):
+                        if stop_flag.is_set():
+                            break
+                        await asyncio.sleep(1)
                 seg_start = len(trajectory)
                 session.clear_grade()
                 emitted_tool_call = False

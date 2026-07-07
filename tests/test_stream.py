@@ -150,6 +150,40 @@ def test_multi_call_flow_matches_template(proc, probes):
     assert ids[0].tolist() == _T(p["tok"], [SYS, U1, ac2, tr0, tr1], gen=True)
 
 
+def test_think_prefix_matches_canonical_header(proc, probes):
+    """find_think_prefix must recover exactly what the template puts between the think-open
+    delimiter and the reasoning text (gemma-4: 'thought\\n'), so seeded thoughts are canonical."""
+    from roger.loading.model_setup import find_think_prefix, find_think_tokens
+    p = probes
+    th = find_think_tokens(p["tok"])
+    prefix = find_think_prefix(p["tok"])
+    assert th is not None and prefix, "gemma-4 has a reasoning channel with a header"
+    marker = "QQXYZQ unique reasoning"
+    turn = _T(p["tok"], [U1, {"role": "assistant", "reasoning_content": marker,
+                              "tool_calls": [{"id": "0", "type": "function",
+                                              "function": {"name": "f", "arguments": {}}}]}])
+    body = p["tok"].encode(marker, add_special_tokens=False)
+    i = turn.index(th[0])
+    assert turn[i + 1:i + 1 + len(prefix) + len(body)] == prefix + body
+
+
+def test_load_tools_suggests_server_tools():
+    """Passing an MCP server prefix (not a tool name) must return the tools under it, not a
+    dead-end error (regression: the model called load_tools(['mcp__canva']) and got stuck)."""
+    import json as _json
+    from roger.agency.rollout_utils import _make_tool_loader
+    def _t(name):
+        d = {"type": "function", "function": {"name": name, "description": "d", "parameters": {}}}
+        return d
+    _, load_tools = _make_tool_loader([_t("mcp__canva__create_design"), _t("mcp__canva__get_asset"),
+                                       _t("mcp__twitter__post")])
+    out = _json.loads(load_tools(["mcp__canva"]))
+    assert out[0]["error"] and set(out[0]["did_you_mean"]) == {"mcp__canva__create_design",
+                                                               "mcp__canva__get_asset"}
+    out = _json.loads(load_tools(["mcp__twitter__post"]))   # exact name still loads the schema
+    assert out[0]["function"]["name"] == "mcp__twitter__post" and "error" not in out[0]
+
+
 def test_subagent_first_turn_has_single_cue(proc, probes):
     """_spawn templates without a gen cue; _one_turn adds exactly one (regression: it was doubled)."""
     p = probes
