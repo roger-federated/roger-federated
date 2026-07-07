@@ -224,7 +224,9 @@ Roger has the potential to perform any digital task. In other words, there is no
 
 <details>
 <summary>Set up a native agent loop for a 24/7 unsupervised e-marketeer</summary>
-[![video: 24/7 autonomous marketing agent](https://img.youtube.com/vi/8RU9dV9tiLc/0.jpg)](https://youtu.be/8RU9dV9tiLc)
+
+[![Watch: 24/7 autonomous marketing agent](https://img.youtube.com/vi/8RU9dV9tiLc/0.jpg)](https://youtu.be/8RU9dV9tiLc)
+
 </details>
 
 <details>
