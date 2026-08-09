@@ -90,6 +90,41 @@ def test_new_logps_alignment():
     print("PASS test_new_logps_alignment")
 
 
+def test_standalone_train_folds_the_federated_global(tmp_path, monkeypatch):
+    # The `roger train` path loads its own model, and must fold the cumulative global in first: a
+    # contribution computed against the bare base sits at a different point in weight space than
+    # every other member's, and disagrees with the old_logp recorded against the folded model.
+    import roger.training.trainer as tr
+
+    monkeypatch.setattr(tr, "state_dir", lambda: str(tmp_path))
+    for name, reward in (("runA", 1.0), ("runB", -1.0)):     # differing returns: non-zero variance
+        d = tmp_path / "runs" / name
+        d.mkdir(parents=True)
+        torch.save([{"gen_start": 1, "old_logp": torch.zeros(2), "masks": [None, None],
+                     "reward": reward}], d / "trajectory.pt")
+        torch.save(torch.zeros(4, dtype=torch.long), d / "sequence.pt")
+    (tmp_path / "runs" / "runA" / "user_graded").touch()     # clears the 10%-user-graded gate
+
+    sentinel = {"base_model.model.layers.0.self_attn.q_proj": torch.zeros(2, 2)}
+    monkeypatch.setattr("roger.apps.config.load", lambda: {"federations": ["http://f"]})
+    monkeypatch.setattr("roger.federated.client.pending_globals", lambda cfg: sentinel)
+
+    seen = {}
+
+    def fake_fetch(model_id=None, **kw):
+        seen.update(kw)
+        raise RuntimeError("stop after load")               # nothing past the load is under test
+
+    monkeypatch.setattr("roger.loading.model_setup.fetch_model", fake_fetch)
+    try:
+        tr.train("some/model")
+    except RuntimeError as e:
+        assert str(e) == "stop after load"
+    assert seen.get("weight_deltas") is sentinel, seen
+    assert seen.get("for_training") is True                 # VRAM headroom must survive the change
+    print("PASS test_standalone_train_folds_the_federated_global")
+
+
 def test_discard_runs(tmp_path):
     # The deletion was moved out of train() to here so a failed federated upload keeps the runs;
     # discard_runs only removes what it's handed, and tolerates already-gone dirs (ignore_errors).

@@ -130,7 +130,18 @@ def train(model_id: str | None = None, *, batch: int = 8, epochs: int = 1, lr: f
         return {"trained": False, "reason": "zero-variance returns", "n_ready": len(eps), "skipped_mm": skipped_mm}
     adv = centered / centered.std().clamp_min(1e-6) # z-norm; one scalar per episode
 
-    model, processor = reuse if reuse is not None else fetch_model(model_id, for_training=True)
+    if reuse is not None:
+        model, processor = reuse                # already loaded with the global folded (see cli._repl)
+    else:
+        # Fold the cumulative global into the base before the fresh adapter goes on top, exactly as
+        # the REPL loads it. Without this the standalone `roger train` computes the round's update at
+        # a stale point in weight space (every other member trains from base+global), and the recorded
+        # old_logp — collected against the folded model — disagrees with the recomputed log-probs, so
+        # the ratio leaves 1 and clipping bites over a base-weight difference rather than an update.
+        from roger.apps import config
+        from roger.federated import client as fed_client
+        model, processor = fetch_model(model_id, for_training=True,
+                                       weight_deltas=fed_client.pending_globals(config.load()))
 
     # Rewrite PII to surrogates before any gradient sees it; free the filter before training so it
     # doesn't hold VRAM. Detect/load failures propagate rather than train on raw PII.
