@@ -6,7 +6,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import httpx
 import pytest
 
-from roger.runtime import capture, proxy
+from roger.runtime import capture, grader, proxy
 
 # ---------------------------------------------------------------------------
 # plan(): argv rewriting
@@ -112,6 +112,8 @@ STREAM = [
 class _Upstream(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     gate = threading.Event()
+    evals: list = []                 # bodies of self-eval requests received
+    eval_mode = "ok"                 # "ok" | "strict" (400 on consecutive assistant msgs) | "garbage"
 
     def log_message(self, *_): pass
 
@@ -141,6 +143,17 @@ class _Upstream(BaseHTTPRequestHandler):
                              "host": self.headers.get("Host")})
             return
         req = json.loads(body)
+        msgs = req.get("messages") or []
+        if msgs and msgs[-1]["role"] == "assistant" and grader.SEED in (msgs[-1].get("content") or ""):
+            self.evals.append(req)
+            if self.eval_mode == "strict" and len(msgs) > 1 and msgs[-2]["role"] == "assistant":
+                self._json(400, {"error": "roles must alternate"})
+                return
+            content = ("not json" if self.eval_mode == "garbage" else json.dumps(
+                {"reasoning": "ok", "scores": {"efficiency": 0.7, "accuracy": 3, "completeness": -0.5}}))
+            self._json(200, {"object": "chat.completion", "model": "m",
+                             "choices": [{"index": 0, "message": {"role": "assistant", "content": content}}]})
+            return
         if req.get("model") == "bad":
             self._json(500, {"error": "boom"})
             return
@@ -166,6 +179,8 @@ class _Upstream(BaseHTTPRequestHandler):
 def stack(tmp_path, monkeypatch):
     monkeypatch.setattr(capture, "state_dir", lambda: str(tmp_path))
     _Upstream.gate.clear()
+    _Upstream.evals = []
+    _Upstream.eval_mode = "ok"
     up = ThreadingHTTPServer(("127.0.0.1", 0), _Upstream)
     threading.Thread(target=up.serve_forever, daemon=True).start()
     pub = proxy.free_port()
@@ -252,3 +267,105 @@ def test_upgrade_refused_and_dead_backend_is_502(stack, monkeypatch):
         assert r.status_code == 502 and b"not accepting connections" in r.content
     finally:
         proxy.stop(dead)
+
+
+# ---------------------------------------------------------------------------
+# Grader: conversation chaining + the self-eval call
+# ---------------------------------------------------------------------------
+
+def _rec(messages, reply="Hello", endpoint="/v1/chat/completions"):
+    return {"endpoint": endpoint, "model": "m", "request": {"model": "m", "messages": messages},
+            "response": {"choices": [{"index": 0, "message": {"role": "assistant", "content": reply}}]}}
+
+
+def test_track_chains_by_prefix_and_branches():
+    reg = []
+    a = [{"role": "system", "content": "s"}, {"role": "user", "content": "hi"}]
+    grader.track(reg, "A", _rec(a, "Hello"))
+    # Next request re-sends the history (reply content stripped by the client) + a new user turn.
+    b = a + [{"role": "assistant", "content": "Hello "}, {"role": "user", "content": "more"}]
+    grader.track(reg, "B", _rec(b, "Sure"))
+    assert len(reg) == 1 and reg[0]["path"] == "B" and reg[0]["graded"] is False
+    assert reg[0]["transcript"][-1] == ("assistant", "Sure")
+    # The user edited the second turn instead: not a prefix of A's transcript → its own conversation.
+    c = a + [{"role": "assistant", "content": "Hello"}, {"role": "user", "content": "different"}]
+    grader.track(reg, "C", _rec(c, "Ok"))
+    assert len(reg) == 2 and reg[1]["path"] == "C"
+    grader.track(reg, "D", _rec(a, endpoint="/v1/completions"))
+    grader.track(reg, "E", {"endpoint": "/v1/chat/completions", "request": {}, "response": None})
+    assert len(reg) == 2
+
+
+def test_due_uses_idle_threshold(monkeypatch):
+    monkeypatch.setattr(grader, "IDLE_S", 100)
+    reg = [{"path": "x", "transcript": [], "endpoint": "/v1/chat/completions", "last": 1000.0, "graded": False},
+           {"path": "y", "transcript": [], "endpoint": "/v1/chat/completions", "last": 1000.0, "graded": True}]
+    assert grader.due(reg, 1050.0) == []
+    assert [e["path"] for e in grader.due(reg, 1100.0)] == ["x"]
+
+
+def _captured_entry(stack, msgs_dir):
+    base, _, _ = stack
+    req = {"model": "m", "messages": [{"role": "user", "content": "hi"}], "tools": [{"type": "function"}]}
+    assert httpx.post(base + "/v1/chat/completions", json=req).status_code == 200
+    for _ in range(50):
+        if _files(msgs_dir):
+            break
+        time.sleep(0.05)
+    (path,) = _files(msgs_dir)
+    reg = []
+    grader.track(reg, str(path), json.loads(path.read_text()))
+    return path, reg[0]
+
+
+def test_grade_prefills_seed_forces_schema_and_persists_scores(stack):
+    base, backend_port, msgs = stack
+    path, entry = _captured_entry(stack, msgs)
+    with httpx.Client() as c:
+        res = grader.grade(c, f"http://127.0.0.1:{backend_port}", entry)
+    (sent,) = _Upstream.evals
+    assert "tools" not in sent and sent["stream"] is False and sent["max_tokens"] == grader.MAX_TOKENS
+    assert list(sent["response_format"]["json_schema"]["schema"]["properties"]) == ["reasoning", "scores"]
+    assert sent["messages"][-2:] == [{"role": "assistant", "content": "Hello"},
+                                     {"role": "assistant", "content": grader.SEED}]
+    rec = json.loads(path.read_text())
+    assert rec["self_eval"] == res and entry["graded"] is True
+    assert res["scores"] == {"efficiency": 0.7, "accuracy": 1.0, "completeness": -0.5}   # clamped
+    assert res["reasoning"] == "ok" and res["seed_placement"] == "message" and "score" not in res
+    assert res["graded_messages"] == 2
+    assert len(_files(msgs)) == 1                       # the eval itself was never captured
+
+
+def test_grade_falls_back_to_appended_seed_for_strict_templates(stack):
+    base, backend_port, msgs = stack
+    _Upstream.eval_mode = "strict"
+    path, entry = _captured_entry(stack, msgs)
+    with httpx.Client() as c:
+        res = grader.grade(c, f"http://127.0.0.1:{backend_port}", entry)
+    assert len(_Upstream.evals) == 2
+    assert _Upstream.evals[1]["messages"][-1] == {"role": "assistant", "content": "Hello\n\n" + grader.SEED}
+    assert res["seed_placement"] == "appended" and res["scores"]["efficiency"] == 0.7
+
+
+def test_grade_records_error_and_never_raises(stack):
+    base, backend_port, msgs = stack
+    _Upstream.eval_mode = "garbage"
+    path, entry = _captured_entry(stack, msgs)
+    with httpx.Client() as c:
+        res = grader.grade(c, f"http://127.0.0.1:{backend_port}", entry)
+    assert "error" in res and "scores" not in res and entry["graded"] is True
+    assert json.loads(path.read_text())["self_eval"]["error"] == res["error"]
+    # Dead backend: also an error, not an exception.
+    entry["graded"] = False
+    with httpx.Client() as c:
+        res = grader.grade(c, f"http://127.0.0.1:{proxy.free_port()}", entry)
+    assert res["error"].startswith("ConnectError") and entry["graded"] is True
+
+
+def test_grade_pending_only_grades_ungraded(stack):
+    base, backend_port, msgs = stack
+    path, entry = _captured_entry(stack, msgs)
+    reg = [entry, {"path": "none", "transcript": [], "endpoint": "/v1/chat/completions", "last": 0.0, "graded": True}]
+    assert grader.grade_pending(reg, f"http://127.0.0.1:{backend_port}") == 1
+    assert len(_Upstream.evals) == 1 and "scores" in json.loads(path.read_text())["self_eval"]
+    assert grader.grade_pending(reg, f"http://127.0.0.1:{backend_port}") == 0

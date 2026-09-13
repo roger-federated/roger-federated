@@ -150,8 +150,26 @@ def write_exchange(provider: str, record: dict) -> str:
     return path
 
 
-def make_sink(provider: str) -> Callable[[str, bytes, str, int, bytes], None]:
-    """proxy.Sink that records one file per chat exchange under messages/<provider>/."""
+def update_record(path: str, patch: dict) -> None:
+    """Merge top-level keys into an existing exchange file, atomically. A file that vanished
+    meanwhile (a dedup pass, the user tidying up) is simply skipped."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            record = json.load(f)
+    except FileNotFoundError:
+        return
+    record.update(patch)
+    d = os.path.dirname(path)
+    fd, tmp = tempfile.mkstemp(dir=d, suffix=".tmp")
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump(record, f, ensure_ascii=False, indent=1)
+    os.replace(tmp, path)
+
+
+def make_sink(provider: str, on_record: Callable[[str, dict], None] | None = None,
+              ) -> Callable[[str, bytes, str, int, bytes], None]:
+    """proxy.Sink that records one file per chat exchange under messages/<provider>/, then hands
+    (path, record) to `on_record` — the grader's conversation tracking."""
     def sink(path: str, request: bytes, content_type: str, status: int, response: bytes) -> None:
         try:
             req = json.loads(request)
@@ -171,5 +189,7 @@ def make_sink(provider: str) -> Callable[[str, bytes, str, int, bytes], None]:
         }
         if resp is None:                                         # never lose data to a parser gap
             record["raw_response"] = response.decode("utf-8", "replace")
-        write_exchange(provider, record)
+        written = write_exchange(provider, record)
+        if on_record is not None:
+            on_record(written, record)
     return sink

@@ -9,9 +9,9 @@ Usage:
   roger vllm serve meta-llama/Llama-3-8B --port 8000
   roger train …                               # legacy LoRA update over ~/.roger/runs
 """
-import os, shutil, subprocess, sys, threading
+import os, shutil, signal, subprocess, sys, threading
 
-from roger.runtime import capture, proxy
+from roger.runtime import capture, grader, proxy
 
 _USAGE = """usage: roger <runtime-command> [args…]     (e.g. roger llama-server -m x.gguf --port 8080)
        roger train [--batch N] [--epochs N] [--lr F]
@@ -40,8 +40,10 @@ def _wait(child: subprocess.Popen) -> int:
 
 
 def _stop(child: subprocess.Popen) -> int:
-    """After Ctrl-C. The child shares our console/process group so it already got the interrupt;
+    """After Ctrl-C. The runtime sits in its own process group (so the terminal's interrupt reached
+    only us and the pending self-grades could run first); now deliver the interrupt ourselves and
     give it time to shut down on its own before escalating."""
+    child.send_signal(signal.CTRL_BREAK_EVENT if sys.platform == "win32" else signal.SIGINT)
     try:
         rc = child.wait(timeout=10)
     except subprocess.TimeoutExpired:
@@ -71,24 +73,37 @@ def run(argv: list[str]) -> int:
         return _passthrough([binary, *argv[1:]])
 
     provider = os.path.basename(binary).removesuffix(".exe")
+    backend = f"http://127.0.0.1:{p.backend_port}"
+    registry: list[dict] = []                          # conversations seen this session (grader.track)
     # Bind before spawning the child so a taken port never leaves an orphaned runtime behind.
     try:
-        srv = proxy.start(p.public_host, p.public_port, f"http://127.0.0.1:{p.backend_port}",
-                          capture.make_sink(provider))
+        srv = proxy.start(p.public_host, p.public_port, backend,
+                          capture.make_sink(provider, lambda path, rec: grader.track(registry, path, rec)))
     except OSError as e:
         print(f"roger: cannot listen on {p.public_host}:{p.public_port} ({e.strerror or e}) — is "
               f"{argv[0]} already running there? Stop it or pass a different --port.", file=sys.stderr)
         return 1
     threading.Thread(target=srv.serve_forever, daemon=True).start()
+    stop = threading.Event()
+    threading.Thread(target=grader.run, args=(registry, backend, stop), daemon=True).start()
     print(f"roger: relaying {p.public_host}:{p.public_port} → 127.0.0.1:{p.backend_port}; "
-          f"saving chats to {capture.messages_dir(provider)}", file=sys.stderr)
+          f"saving chats to {capture.messages_dir(provider)}; self-grading chats idle for "
+          f"{grader.IDLE_S // 60} min", file=sys.stderr)
 
-    # Inherit stdio and the console/process group (no CREATE_NEW_PROCESS_GROUP): the runtime's own
-    # output and Ctrl-C handling stay exactly as if it had been launched directly.
-    child = subprocess.Popen([binary, *p.child_argv[1:]])
+    # Inherit stdio so the runtime's output is exactly as if launched directly, but put it in its
+    # own process group: the terminal's Ctrl-C must reach only roger, which grades the still-open
+    # conversations while the runtime is up and only then forwards the interrupt (_stop).
+    child = subprocess.Popen([binary, *p.child_argv[1:]],
+                             **({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+                                if sys.platform == "win32" else {"start_new_session": True}))
     try:
         rc = _wait(child)
     except KeyboardInterrupt:
+        stop.set()
+        try:
+            grader.grade_pending(registry, backend)
+        except KeyboardInterrupt:                      # second Ctrl-C: skip the remaining grades
+            print("roger: skipping remaining self-grades", file=sys.stderr)
         rc = _stop(child)
     finally:
         proxy.stop(srv)
