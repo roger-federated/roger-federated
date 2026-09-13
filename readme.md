@@ -53,11 +53,24 @@ uvx --from . --torch-backend auto roger
 
 **Run:**
 
-After installing, run `roger` from any terminal. First launch walks you through initial setup. Settings (including the model selection) can subsequently be adjusted in `~/.roger/config.json`.
+Roger wraps the local runtime you already use: prefix its usual command with `roger` and pass the arguments as normal. It relays the server's `--port` and saves every chat that flows through it under `~/.roger/messages/<runtime>/`.
+
+```bash
+roger llama-server -m model.gguf --port 8080
+roger vllm serve meta-llama/Llama-3.1-8B-Instruct --port 8000
+```
+
+Any OpenAI-compatible server that takes a `--port` flag works; runtimes with their own conventions (ollama's env-configured port, LM Studio's detached `lms server start`) are not supported yet.
+
+<details>
+<summary>Legacy in-process agent (being phased out)</summary>
+
+The interactive in-process agent is no longer launched (bare `roger` prints usage); only `roger train` — a LoRA update over previously recorded runs — still works. Settings live in `~/.roger/config.json`. The notes below describe the old behaviour for reference.
 
 Any config key can be overridden for a single run with a flag, e.g. `roger --model <hf-id> --max-steps 20 --verbose`. To persist a setting, edit the config file. The default federation server currently only accepts Gemma-4 models, so to partake in gradient contribution you must stay on a Gemma-4 base. The smaller `E2B`/`E4B` variants perform significantly worse than the recommended default 12B model, so use them only for low-VRAM experimentation.
 
 For self-improvement purposes, it is of paramount importance that you end a session using Ctrl+D. This will nudge the model to write its memory, and to evaluate its performance.
+</details>
 
 <details>
 <summary>Remote execution on a trusted machine over SSH</summary>
