@@ -10,6 +10,20 @@
   model becomes purpose-trained for agency, rather than just an LLM with tools bolted on.
 
 ## Current state (read before assuming)
+- **Paradigm change (2026-09): roger is a wrapper around local runtime providers**, not its own
+  harness/runtime. `roger <runtime-command> …` (e.g. `roger llama-server -m x.gguf --port 8080`,
+  `roger vllm serve … --port 8000`) runs the command untouched; `runtime/proxy.py` moves the server to
+  an ephemeral loopback port (rewrites `--port`) and listens on the user's port as a transparent
+  reverse proxy, and `runtime/capture.py` saves every 2xx `/v1/chat/completions` | `/v1/completions` |
+  `/v1/responses` exchange as one JSON file under `~/.roger/messages/<runtime>/` (streamed SSE replies
+  reassembled into the non-streaming object; request verbatim). **Only the standard surface is
+  supported**: a `--port` flag on the runtime and OpenAI-style JSON/SSE on the wire. Deliberately no
+  plumbing for non-standard runtimes — ollama (env-configured port, native NDJSON `/api/chat`) and
+  LM Studio (`lms server start` detaches) are not supported for now. A command without `--port` just
+  runs as-is (one stderr notice). Console script = `runtime/wrapper.py:main`; **bare `roger` prints
+  usage**, `roger train` delegates to the legacy `apps/cli.py` (which is otherwise obsolete and slated
+  for removal, as is the rest of the in-process harness below). Deferred: auto gradient pull, local
+  optimisation over `messages/`, deleting obsolete (prefix-superseded) exchange files.
 - Working semi-basic agent: rollout loop, tool use, reasoning, MCP connections, standard
   tools, deferred tool loading, auto-triggered RAG, skills + instruction files, `@path`
   references, persistent memory, web search/fetch, sub-agent spawning, and a CLI app (`roger`).
@@ -84,7 +98,11 @@
 - `agency/`   — rollout loop, tool/skill loaders, RAG retrieval, `@path` expansion
                 (`rollout_utils`, `retrieval`, `skill_utils`, `path_utils`), sub-agent
                 spawning (`subagents`)
-- `apps/`     — CLI entry point, config, Rich/prompt_toolkit UI (`cli`, `config`, `ui`)
+- `runtime/`  — the provider wrapper (current entry point): `wrapper` (console script `main`, process
+                lifecycle, Ctrl-C), `proxy` (`plan` = `--port` argv rewrite + stdlib `ThreadingHTTPServer`
+                reverse proxy over a shared `httpx.Client`, streaming relay), `capture` (chat-path
+                filter, SSE→non-stream reassembly, atomic JSON writes to `messages/`)
+- `apps/`     — legacy CLI (`cli`, reached only via `roger train`), config, Rich/prompt_toolkit UI
 - `loading/`  — model loading + VRAM-aware quantization tier selection (`model_setup`),
                 rollback sliding-window KV cache (`rollback_cache`)
 - `tools/`    — standard tools, shell execution + policy guardrails, MCP bridge
@@ -105,10 +123,11 @@
                 `secure_agg` additionally carries the server-only `dequantize` half).
 - `envs/`     — not created yet (concrete shell/browser/code environments are future work)
 - `tests/`    — `test_rewards.py`, `test_trainer.py`, `test_grade.py`, `test_privacy_filter.py`,
-                `test_mcp.py`, `test_multimodal.py`, `test_federated.py`
+                `test_mcp.py`, `test_multimodal.py`, `test_federated.py`, `test_runtime.py`
 
 Runtime artifacts all live under the global `~/.roger/` (never in the project): `config.json`,
-global `memory/memory.md` + per-project `memory/<dashed-abspath>.md`, `runs/`, `backups/`,
+global `memory/memory.md` + per-project `memory/<dashed-abspath>.md`, `messages/<runtime>/` (wrapper
+captures, text), `runs/` (legacy token-level episodes), `backups/`,
 `scratch/`, `history`, and user `skills/`. Project-level skill dirs (`.agents/`, `.claude/`)
 and instruction files (`AGENTS.md`/`CLAUDE.md`) are still read from the project. `build/` and
 `*.egg-info/` are build output — ignore them; edit only under `src/`.
