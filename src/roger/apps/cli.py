@@ -1,4 +1,5 @@
-"""cli.py — Roger Federated CLI entry point.
+"""cli.py — legacy in-process agent CLI. Reached only via `roger train` (runtime/wrapper.py is the
+console-script entry point now and prints usage for bare `roger`); slated for removal.
 
 Usage:
   roger                                    # use config defaults

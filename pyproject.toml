@@ -29,7 +29,7 @@ dependencies = [
 audio = ["pydub"]  # AudioSegment support in rollout_utils (guarded import)
 
 [project.scripts]
-roger = "roger.apps.cli:main"
+roger = "roger.runtime.wrapper:main"   # `roger <runtime> …` wrapper; `roger train` delegates to apps/cli.py
 
 [tool.setuptools.packages.find]
 where = ["src"]                          # single package `roger` + its subpackages
