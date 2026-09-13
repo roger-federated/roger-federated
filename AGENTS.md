@@ -24,6 +24,20 @@
   usage**, `roger train` delegates to the legacy `apps/cli.py` (which is otherwise obsolete and slated
   for removal, as is the rest of the in-process harness below). Deferred: auto gradient pull, local
   optimisation over `messages/`, deleting obsolete (prefix-superseded) exchange files.
+- **Self-evaluation over the wire (`runtime/grader.py`).** The reward source is the model's own
+  end-of-session grade, as in the legacy `_GRADE_SEED` → forced `_grade()`. The wrapper chains
+  exchanges into conversations by message-prefix (in-memory registry, `grader.track`; every request
+  carries the full history, so the previous exchange's transcript is a prefix of the next). Once a
+  conversation is idle `IDLE_S` (5 min) — or at Ctrl-C, before the runtime is stopped — one eval call
+  goes to the **backend port directly** (never relayed, never captured): the transcript + a final
+  assistant message holding the seed (prefill), `response_format` json_schema with properties ordered
+  `reasoning` then `scores` (= reason-then-force over the API), no `tools`. Per-metric scores
+  (`METRICS`: efficiency/accuracy/completeness, each clamped to [-1,1]) are persisted as `self_eval`
+  on the conversation's newest file; **no aggregate is stored** — the optimiser averages. One generic
+  fallback: a 4xx (alternation-strict templates reject two assistant messages) retries once with the
+  seed appended to the last reply. Failures land as `self_eval.error`, never retried. Because of the
+  Ctrl-C ordering the runtime child runs in its **own process group** (`start_new_session` /
+  `CREATE_NEW_PROCESS_GROUP`) and gets the interrupt from roger after grading; a second Ctrl-C skips.
 - Working semi-basic agent: rollout loop, tool use, reasoning, MCP connections, standard
   tools, deferred tool loading, auto-triggered RAG, skills + instruction files, `@path`
   references, persistent memory, web search/fetch, sub-agent spawning, and a CLI app (`roger`).
@@ -101,7 +115,8 @@
 - `runtime/`  — the provider wrapper (current entry point): `wrapper` (console script `main`, process
                 lifecycle, Ctrl-C), `proxy` (`plan` = `--port` argv rewrite + stdlib `ThreadingHTTPServer`
                 reverse proxy over a shared `httpx.Client`, streaming relay), `capture` (chat-path
-                filter, SSE→non-stream reassembly, atomic JSON writes to `messages/`)
+                filter, SSE→non-stream reassembly, atomic JSON writes + `update_record` to `messages/`),
+                `grader` (prefix-chain conversation registry, idle/shutdown self-eval call, `self_eval`)
 - `apps/`     — legacy CLI (`cli`, reached only via `roger train`), config, Rich/prompt_toolkit UI
 - `loading/`  — model loading + VRAM-aware quantization tier selection (`model_setup`),
                 rollback sliding-window KV cache (`rollback_cache`)
