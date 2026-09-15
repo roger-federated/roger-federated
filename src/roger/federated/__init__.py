@@ -19,3 +19,7 @@
 # rejected at /contribute, same as any other fail-soft skip — so it did not itself require one; the
 # bump to 2 here is the privacy-notice compliance adoption described above.)
 CLIENT_VERSION = 2
+
+# How to bring this client up to date when a federation's min_client/latest_client says so (printed by
+# the wrapper's notice and the legacy CLI alike).
+UPDATE_CMD = "git fetch origin && git reset --hard origin/main && uv tool install . --reinstall   (in your roger-federated clone)"

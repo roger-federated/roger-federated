@@ -62,6 +62,8 @@ roger vllm serve meta-llama/Llama-3.1-8B-Instruct --port 8000
 
 Any OpenAI-compatible server that takes a `--port` flag works; runtimes with their own conventions (ollama's env-configured port, LM Studio's detached `lms server start`) are not supported yet.
 
+Once the runtime is up, roger asks it which model it serves (`GET /v1/models`) and tells you whether your federations train that model — and if not, which models they do accept, so you can switch. The default federation currently only accepts Gemma-4 bases (any quantization of `google/gemma-4-12B-it` or `google/gemma-4-E2B-it`); chats through an unsupported model are still saved, they just won't feed the federation.
+
 <details>
 <summary>Legacy in-process agent (being phased out)</summary>
 

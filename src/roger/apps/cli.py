@@ -34,7 +34,7 @@ Tip 2: Type [cyan]/perpetual <task>[/cyan] to give Roger a standing task it keep
 # Shown when a federation reports this client is out of date. There is no PyPI release (readme.md):
 # roger is installed from a local clone, so the update is a git pull + reinstall of the tool. We can't
 # know where the user cloned it, so the instruction names the repo rather than a path.
-_UPDATE_CMD = "git fetch origin && git reset --hard origin/main && uv tool install . --reinstall   (in your roger-federated clone)"
+from roger.federated import UPDATE_CMD as _UPDATE_CMD
 
 _PRIVACY_URL = "https://github.com/roger-federated/roger-federated/blob/main/PRIVACY.md"
 

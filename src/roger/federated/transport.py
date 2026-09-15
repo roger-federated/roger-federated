@@ -6,12 +6,14 @@ misbehaving returns None / a status string rather than raising, so a sharing hic
 down the agent (same convention as the web_search/web_fetch tools).
 
 Endpoints (all under a federation's base URL, served over HTTPS):
-  GET  {url}/status?model_id= -> {mode: "bootstrap"|"busy"|"unsupported", min_client, latest_client, ...}
+  GET  {url}/status?model_id= -> {mode: "bootstrap"|"busy"|"unsupported", models, min_client, latest_client, ...}
                               (which aggregation regime this federation wants for the model — async DP
                               while sparse, secure-agg cohorts once busy, or "unsupported" when the
                               federation's allowlist excludes the model; probed before contributing so a
                               cold-start client skips the cohort barrier instead of 503-ing on it, and so
                               the CLI can warn on an unsupported model before wasting a session's gradient.
+                              `models` is the allowlist itself (null = any model), so the runtime
+                              wrapper can tell the user which models to run — see runtime/notice.py.
                               min_client/latest_client advertise the protocol version this federation
                               requires/prefers, so an out-of-date client self-skips + nudges an update)
   POST {url}/round/register   {model_id, pubkey(hex)} -> {round_id, token, peers: [hex, ...]}   (server
@@ -78,7 +80,7 @@ def load_global(url: str) -> bytes | None:
 
 
 def federation_status(url: str, model_id: str) -> dict:
-    """The full /status response for `model_id`: {mode, k_min, k_target, min_client, latest_client}.
+    """The full /status response for `model_id`: {mode, models, k_min, k_target, min_client, latest_client}.
     Fail-soft to {} so an unreachable server, or an older one that predates a field, yields the safe
     defaults its callers apply (mode "busy", no version opinion) instead of raising."""
     try:

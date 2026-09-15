@@ -20,7 +20,14 @@
   supported**: a `--port` flag on the runtime and OpenAI-style JSON/SSE on the wire. Deliberately no
   plumbing for non-standard runtimes — ollama (env-configured port, native NDJSON `/api/chat`) and
   LM Studio (`lms server start` detaches) are not supported for now. A command without `--port` just
-  runs as-is (one stderr notice). Console script = `runtime/wrapper.py:main`; **bare `roger` prints
+  runs as-is (one stderr notice). **Supported-model notice** (`runtime/notice.py`, daemon thread from the
+  wrapper): once the runtime answers `GET /v1/models` (the only standard way to learn the model — argv is
+  runtime-specific), each federation's `/status` is probed and one stderr line per federation says whether
+  it trains that model, and if not which it accepts (server advertises its allowlist as `models`, null =
+  any); runtime ids (gguf paths, aliases) are matched to accepted `org/name` ids by normalised [a-z0-9]
+  containment of `name`, longest wins. Fail-soft silent when a federation is unreachable; also carries the
+  legacy startup verdicts (outdated client / update available / leech). `transport._base` defaults a
+  scheme-less federation URL (the shipped default is a bare host) to https. Console script = `runtime/wrapper.py:main`; **bare `roger` prints
   usage**, `roger train` delegates to the legacy `apps/cli.py` (which is otherwise obsolete and slated
   for removal, as is the rest of the in-process harness below). Deferred: auto gradient pull, local
   optimisation over `messages/`, deleting obsolete (prefix-superseded) exchange files.
@@ -70,7 +77,8 @@
   (secure-agg only, no DP); quorum raised to **k_min=3 / k_target=5**. Client picks the path per
   federation in `contribute_delta`; no new client config. (Mode is "bootstrap"/"busy" — "busy" rather
   than "dense" to avoid clashing with the dense-matrix sense of ΔW.) `GET /status` also returns a third
-  mode, **"unsupported"**, when the server's allowlist (`ROGER_AGG_MODELS`) excludes the model: the
+  mode, **"unsupported"**, when the server's allowlist (`ROGER_AGG_MODELS`) excludes the model (plus
+  `models` = the allowlist itself, null when any model is accepted — part of the shared wire contract): the
   client then skips that federation and the CLI warns the user (at startup before a session's gradient is
   wasted, and again at quit, where it skips training but KEEPS the recorded runs). `federation_mode`
   fail-soft-defaults to "busy", so an unreachable server is never mistaken for an unsupported model.
@@ -101,7 +109,8 @@
 - `runtime/`  — the provider wrapper (current entry point): `wrapper` (console script `main`, process
                 lifecycle, Ctrl-C), `proxy` (`plan` = `--port` argv rewrite + stdlib `ThreadingHTTPServer`
                 reverse proxy over a shared `httpx.Client`, streaming relay), `capture` (chat-path
-                filter, SSE→non-stream reassembly, atomic JSON writes to `messages/`)
+                filter, SSE→non-stream reassembly, atomic JSON writes to `messages/`),
+                `notice` (runtime `/v1/models` → federation `/status` supported-model verdicts on stderr)
 - `apps/`     — legacy CLI (`cli`, reached only via `roger train`), config, Rich/prompt_toolkit UI
 - `loading/`  — model loading + VRAM-aware quantization tier selection (`model_setup`),
                 rollback sliding-window KV cache (`rollback_cache`)

@@ -11,12 +11,13 @@ Usage:
 """
 import os, shutil, subprocess, sys, threading
 
-from roger.runtime import capture, proxy
+from roger.runtime import capture, notice, proxy
 
 _USAGE = """usage: roger <runtime-command> [args…]     (e.g. roger llama-server -m x.gguf --port 8080)
        roger train [--batch N] [--epochs N] [--lr F]
 
-Runs the runtime as-is and relays its port; chats are saved under ~/.roger/messages/<runtime>/."""
+Runs the runtime as-is and relays its port; chats are saved under ~/.roger/messages/<runtime>/.
+Once the runtime is up, tells you whether your federations train the model it serves (and which ones they do)."""
 
 
 def _passthrough(argv: list[str]) -> int:
@@ -86,6 +87,10 @@ def run(argv: list[str]) -> int:
     # Inherit stdio and the console/process group (no CREATE_NEW_PROCESS_GROUP): the runtime's own
     # output and Ctrl-C handling stay exactly as if it had been launched directly.
     child = subprocess.Popen([binary, *p.child_argv[1:]])
+    # Once the runtime answers, say whether the federation trains the model it serves (and which models it
+    # does accept). Off-thread: the relay must not wait on a model load or a federation round-trip.
+    threading.Thread(target=notice.run, args=(f"http://127.0.0.1:{p.backend_port}", lambda: child.poll() is None),
+                     daemon=True).start()
     try:
         rc = _wait(child)
     except KeyboardInterrupt:

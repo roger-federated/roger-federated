@@ -254,7 +254,96 @@ def test_upgrade_refused_and_dead_backend_is_502(stack, monkeypatch):
         proxy.stop(dead)
 
 
-from roger.federated import transport
+# ---------------------------------------------------------------------------
+# Federation notice: what the runtime serves vs. what the federation accepts
+# ---------------------------------------------------------------------------
+
+from roger.federated import CLIENT_VERSION, transport
+from roger.runtime import notice
+
+
+def test_resolve_matches_runtime_names_to_accepted_ids():
+    accepted = ["google/gemma-4-12B-it", "google/gemma-4-12B-it-assistant", "google/gemma-4-E2B-it"]
+    # A gguf path with a quantization suffix, an exact HF id, and an alias all name the same base.
+    assert notice.resolve(["/models/gemma-4-12B-it-Q4_K_M.gguf"], accepted) == "google/gemma-4-12B-it"
+    assert notice.resolve(["google/gemma-4-12B-it"], accepted) == "google/gemma-4-12B-it"
+    assert notice.resolve(["Gemma_4_12b_IT"], accepted) == "google/gemma-4-12B-it"
+    # Longest name wins: the drafter must not resolve to the base it extends.
+    assert notice.resolve(["gemma-4-12B-it-assistant.gguf"], accepted) == "google/gemma-4-12B-it-assistant"
+    assert notice.resolve(["gemma-4-E2B-it-Q8_0.gguf"], accepted) == "google/gemma-4-E2B-it"
+    assert notice.resolve(["meta-llama/Llama-3.1-8B-Instruct"], accepted) is None
+    assert notice.resolve([], accepted) is None and notice.resolve(["x"], []) is None
+
+
+class _Runtime(BaseHTTPRequestHandler):
+    """What a runtime answers on /v1/models once its model is loaded."""
+    def log_message(self, *_): pass
+
+    def do_GET(self):
+        data = json.dumps({"object": "list", "data": [{"id": "models/gemma-4-12B-it-Q4_K_M.gguf", "object": "model"}]}).encode()
+        self.send_response(200 if self.path == "/v1/models" else 404)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+
+def test_served_models_waits_for_the_runtime(monkeypatch):
+    monkeypatch.setattr(notice, "_POLL", 0.01)
+    up = ThreadingHTTPServer(("127.0.0.1", 0), _Runtime)
+    port = up.server_address[1]
+    # Nothing listening yet: keeps polling (connection refused = still loading) until the server binds.
+    threading.Timer(0.1, lambda: threading.Thread(target=up.serve_forever, daemon=True).start()).start()
+    assert notice.served_models(f"http://127.0.0.1:{port}", lambda: True) == ["models/gemma-4-12B-it-Q4_K_M.gguf"]
+    up.shutdown(); up.server_close()
+    # Runtime gone before it ever answered: give up empty instead of polling forever.
+    left = [3]
+    def alive():
+        left[0] -= 1
+        return left[0] > 0
+    assert notice.served_models(f"http://127.0.0.1:{proxy.free_port()}", alive) == []
+
+
+def test_served_models_stops_on_missing_route(monkeypatch):
+    monkeypatch.setattr(notice, "_POLL", 0.01)
+    monkeypatch.setattr(notice.httpx, "get", lambda url, timeout: httpx.Response(404))
+    calls = []
+    assert notice.served_models("http://127.0.0.1:1", lambda: calls.append(1) or len(calls) < 50) == []
+    assert len(calls) == 1                        # 404 = no such route, not "loading": one attempt
+
+
+def _announce(served, statuses, cfg=None, monkeypatch=None):
+    import io
+    monkeypatch.setattr(transport, "federation_status", lambda url, mid: statuses[url])
+    out = io.StringIO()
+    notice.announce(served, {"federations": list(statuses), **(cfg or {})}, out=out)
+    return out.getvalue()
+
+
+def test_announce_verdicts(monkeypatch):
+    accepted = ["google/gemma-4-12B-it", "google/gemma-4-E2B-it"]
+    gguf = ["m/gemma-4-12B-it-Q4_K_M.gguf"]
+    # Supported: resolved to the accepted id, encouraging.
+    s = _announce(gguf, {"https://f": {"mode": "unsupported", "models": accepted}}, monkeypatch=monkeypatch)
+    assert "✓ https://f trains google/gemma-4-12B-it" in s and "gemma-4-12B-it-Q4_K_M.gguf" in s
+    # Unsupported: says so, lists what IS accepted so the user can switch.
+    s = _announce(["llama-3.1-8b.gguf"], {"https://f": {"mode": "unsupported", "models": accepted}}, monkeypatch=monkeypatch)
+    assert "⚠ https://f doesn't accept llama-3.1-8b.gguf" in s and "google/gemma-4-12B-it, google/gemma-4-E2B-it" in s
+    # No allowlist (or a server predating `models`): the server's own verdict on the raw id decides.
+    assert "✓ https://f accepts llama-3.1-8b.gguf" in _announce(["llama-3.1-8b.gguf"], {"https://f": {"mode": "bootstrap"}}, monkeypatch=monkeypatch)
+    assert "⚠ https://f doesn't accept x" in _announce(["x"], {"https://f": {"mode": "unsupported"}}, monkeypatch=monkeypatch)
+    # Runtime without /v1/models: still worth telling the user what the federation trains.
+    s = _announce([], {"https://f": {"mode": "unsupported", "models": accepted}}, monkeypatch=monkeypatch)
+    assert "https://f trains google/gemma-4-12B-it, google/gemma-4-E2B-it" in s and "⚠" not in s
+    # Unreachable federation (fail-soft {}): silence, never a false warning.
+    assert _announce(gguf, {"https://f": {}}, monkeypatch=monkeypatch) == ""
+    # Client-version policy and leech mode ride along, like the legacy startup did.
+    s = _announce(gguf, {"https://f": {"mode": "bootstrap", "models": accepted, "min_client": CLIENT_VERSION + 1}},
+                  cfg={"contribute": False}, monkeypatch=monkeypatch)
+    assert "out of date" in s and '"contribute" is off' in s
+    s = _announce(gguf, {"https://f": {"mode": "bootstrap", "models": accepted, "latest_client": CLIENT_VERSION + 1}}, monkeypatch=monkeypatch)
+    assert "newer roger client is available" in s and "out of date" not in s
+    assert _announce(gguf, {}, monkeypatch=monkeypatch) == ""   # no federations configured: nothing to say
 
 
 def test_transport_defaults_bare_host_to_https(monkeypatch):
