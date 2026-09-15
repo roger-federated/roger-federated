@@ -11,7 +11,7 @@ Usage:
 """
 import os, shutil, subprocess, sys, threading
 
-from roger.runtime import capture, notice, proxy
+from roger.runtime import capture, dialect, notice, proxy
 
 _USAGE = """usage: roger <runtime-command> [args…]     (e.g. roger llama-server -m x.gguf --port 8080)
        roger train [--batch N] [--epochs N] [--lr F]
@@ -65,7 +65,7 @@ def run(argv: list[str]) -> int:
     if binary is None:
         print(f"roger: {argv[0]!r} not found on PATH", file=sys.stderr)
         return 127
-    p = proxy.plan(argv)
+    p = dialect.plan(argv)
     if p is None:
         # Not a server we can sit in front of: be loud that this session contributes nothing, and say
         # what would — the alternative is a user chatting all session with nothing saved.

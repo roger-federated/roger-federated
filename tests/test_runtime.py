@@ -6,33 +6,33 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import httpx
 import pytest
 
-from roger.runtime import capture, proxy
+from roger.runtime import capture, dialect, proxy
 
 # ---------------------------------------------------------------------------
 # plan(): argv rewriting
 # ---------------------------------------------------------------------------
 
 def test_plan_rewrites_port_and_keeps_public_side():
-    p = proxy.plan(["llama-server", "-m", "x.gguf", "--port", "8080"], backend_port=45000)
+    p = dialect.plan(["llama-server", "-m", "x.gguf", "--port", "8080"], backend_port=45000)
     assert p.public_host == "127.0.0.1" and p.public_port == 8080 and p.backend_port == 45000
     assert p.child_argv == ["llama-server", "-m", "x.gguf", "--port", "45000"]
 
 
 def test_plan_handles_equals_form_and_host():
-    p = proxy.plan(["vllm", "serve", "m", "--host=0.0.0.0", "--port=8000"], backend_port=45000)
+    p = dialect.plan(["vllm", "serve", "m", "--host=0.0.0.0", "--port=8000"], backend_port=45000)
     assert p.public_host == "0.0.0.0" and p.public_port == 8000
     # The raw runtime is pinned to loopback even when the public side is LAN-exposed.
     assert p.child_argv == ["vllm", "serve", "m", "--host=127.0.0.1", "--port=45000"]
 
 
 def test_plan_none_without_port():
-    assert proxy.plan(["ollama", "serve"]) is None          # env-configured port: not supported
-    assert proxy.plan(["llama-server", "--port", "abc"]) is None
-    assert proxy.plan(["ollama", "pull", "llama3"]) is None
+    assert dialect.plan(["ollama", "serve"]) is None          # env-configured port: not supported
+    assert dialect.plan(["llama-server", "--port", "abc"]) is None
+    assert dialect.plan(["ollama", "pull", "llama3"]) is None
 
 
 def test_plan_picks_a_free_backend_port():
-    p = proxy.plan(["llama-server", "--port", "8080"])
+    p = dialect.plan(["llama-server", "--port", "8080"])
     assert p.backend_port != 8080 and 1024 < p.backend_port < 65536
 
 
@@ -168,7 +168,7 @@ def stack(tmp_path, monkeypatch):
     _Upstream.gate.clear()
     up = ThreadingHTTPServer(("127.0.0.1", 0), _Upstream)
     threading.Thread(target=up.serve_forever, daemon=True).start()
-    pub = proxy.free_port()
+    pub = dialect.free_port()
     srv = proxy.start("127.0.0.1", pub, f"http://127.0.0.1:{up.server_address[1]}", capture.make_sink("fake"))
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     yield f"http://127.0.0.1:{pub}", up.server_address[1], tmp_path / "messages" / "fake"
@@ -245,7 +245,7 @@ def test_upgrade_refused_and_dead_backend_is_502(stack, monkeypatch):
     assert r.status_code == 501
     monkeypatch.setattr(proxy, "_CONNECT_RETRIES", 2)
     monkeypatch.setattr(proxy, "_CONNECT_BACKOFF", 0.01)
-    dead = proxy.start("127.0.0.1", proxy.free_port(), f"http://127.0.0.1:{proxy.free_port()}", None)
+    dead = proxy.start("127.0.0.1", dialect.free_port(), f"http://127.0.0.1:{dialect.free_port()}", None)
     threading.Thread(target=dead.serve_forever, daemon=True).start()
     try:
         r = httpx.get(f"http://127.0.0.1:{dead.server_address[1]}/v1/models")
@@ -301,7 +301,7 @@ def test_served_models_waits_for_the_runtime(monkeypatch):
     def alive():
         left[0] -= 1
         return left[0] > 0
-    assert notice.served_models(f"http://127.0.0.1:{proxy.free_port()}", alive) == []
+    assert notice.served_models(f"http://127.0.0.1:{dialect.free_port()}", alive) == []
 
 
 def test_served_models_stops_on_missing_route(monkeypatch):
