@@ -23,8 +23,9 @@ Endpoints (all under a federation's base URL, served over HTTPS):
                               into this cohort)
   POST {url}/contribute       octet-stream = the masked, packed contribution -> 200
   POST {url}/contribute_dp    octet-stream = a single DP-noised, UNMASKED dense ΔW (bootstrap mode) -> 200
-  GET  {url}/global?since=&model_id=  -> 200 octet-stream (re-factored global adapter) + X-Cursor
-                              header, or 204 when nothing new since `since`.
+  GET  {url}/global?since=&model_id=  -> 200 octet-stream (the cumulative global; see delta.py for the
+                              blob contract — the runtime wrapper expects it in LoRA-factor form) +
+                              X-Cursor header, or 204 when nothing new since `since`.
 """
 import hashlib, json, os
 
@@ -41,39 +42,46 @@ def _base(url: str) -> str:
     return (url if "://" in url else "https://" + url).rstrip("/")
 
 
-def _fed_path(url: str, ext: str) -> str:
+def _fed_path(url: str, ext: str, model_id: str = "") -> str:
+    """Sync state + global blob live per federation; the wrapper additionally keys them per model
+    (`model_id`), since it serves whatever model the runtime's command line names — two models on one
+    day must not share a sync stamp or overwrite each other's global. The legacy CLI (one configured
+    model) passes nothing and keeps its old file names."""
     d = os.path.join(state_dir(), "federated")
     os.makedirs(d, exist_ok=True)
-    return os.path.join(d, hashlib.sha1(url.encode()).hexdigest() + ext)
+    tag = hashlib.sha1(url.encode()).hexdigest()
+    if model_id:
+        tag += "-" + hashlib.sha1(model_id.encode()).hexdigest()[:12]
+    return os.path.join(d, tag + ext)
 
 
-def _state_path(url: str) -> str:
-    return _fed_path(url, ".json")
+def _state_path(url: str, model_id: str = "") -> str:
+    return _fed_path(url, ".json", model_id)
 
 
-def load_state(url: str) -> dict:
+def load_state(url: str, model_id: str = "") -> dict:
     try:
-        with open(_state_path(url)) as f:
+        with open(_state_path(url, model_id)) as f:
             return json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         return {}
 
 
-def save_state(url: str, state: dict) -> None:
-    with open(_state_path(url), "w") as f:
+def save_state(url: str, state: dict, model_id: str = "") -> None:
+    with open(_state_path(url, model_id), "w") as f:
         json.dump(state, f, indent=2)
 
 
-def save_global(url: str, blob: bytes) -> None:
-    """Persist the federation's current cumulative global ΔW so it can be re-folded at every load
+def save_global(url: str, blob: bytes, model_id: str = "") -> None:
+    """Persist the federation's current cumulative global so it can be re-applied at every launch
     without re-downloading; refreshed only when a new day's pull returns fresh bytes."""
-    with open(_fed_path(url, ".global"), "wb") as f:
+    with open(_fed_path(url, ".global", model_id), "wb") as f:
         f.write(blob)
 
 
-def load_global(url: str) -> bytes | None:
+def load_global(url: str, model_id: str = "") -> bytes | None:
     try:
-        with open(_fed_path(url, ".global"), "rb") as f:
+        with open(_fed_path(url, ".global", model_id), "rb") as f:
             return f.read()
     except FileNotFoundError:
         return None

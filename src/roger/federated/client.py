@@ -168,7 +168,9 @@ def pending_globals(cfg: dict) -> dict | None:
         blob = transport.load_global(url)
         if blob is None:
             continue
-        tensors, _meta = delta_mod.from_bytes(blob)
+        tensors, meta = delta_mod.from_bytes(blob)
+        if any(k.endswith(".lora_A.weight") for k in tensors):     # factor-form broadcast (see delta.py)
+            tensors = delta_mod.densify({"weights": tensors, "scaling": meta.get("scaling", 1.0)})
         for k, v in tensors.items():
             summed[k] = v if k not in summed else summed[k] + v
     return summed or None

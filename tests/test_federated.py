@@ -238,7 +238,7 @@ def test_outdated_client_skipped_and_reported(monkeypatch):
 
 
 def test_maybe_daily_pull_persists_blob(tmp_path, monkeypatch):
-    monkeypatch.setattr(transport, "_state_path", lambda url: str(tmp_path / "fed.json"))
+    monkeypatch.setattr(transport, "_state_path", lambda url, model_id="": str(tmp_path / "fed.json"))
     saved = []
     monkeypatch.setattr(transport, "pull", lambda url, cur, mid: (b"blob", "c1"))
     monkeypatch.setattr(transport, "save_global", lambda url, blob: saved.append(blob))

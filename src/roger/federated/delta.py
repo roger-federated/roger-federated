@@ -6,10 +6,16 @@ secure-aggregation masking, see secure_agg.py). Sharing dense ΔW — rather tha
 keeps cross-client aggregation sound regardless of each user's r/targets (B@A is well-defined;
 summing independent factors is not), at the cost of a larger upload.
 
-The server sums the masked ΔW across the federation and broadcasts the full cumulative *dense*
-global (ΔW₁+ΔW₂+…). The client folds it into the base weights at load time (`fold_into`, before bnb
-quantization) — never storing a model and never altering the HF cache. Compatibility between members
-is just "same base model" = identical per-module (out, in) weight shapes, captured by `compat_hash`.
+The server sums the masked ΔW across the federation into a cumulative global (ΔW₁+ΔW₂+…) and
+broadcasts it. Broadcast contract (`GET /global`): the global arrives in **LoRA-factor form** — the
+PEFT state-dict layout `base_model.model.<hf path>.lora_A.weight` [r, in] / `.lora_B.weight` [out, r]
+(F32, one r for the whole adapter), with `scaling` in the safetensors metadata (str float; the update is
+scaling·B@A, default 1) next to `model_id`/`compat`; `compat_hash` hashes factors and dense ΔW identically.
+The runtime wrapper turns that into a LoRA adapter on the runtime's own flag (runtime/adapter.py) — it
+can't fold in RAM since the runtime loads the model — so the server re-factors before broadcasting. The
+legacy in-process CLI still folds either form into the base weights at load time (`fold_into`, before
+bnb quantization) — never storing a model and never altering the HF cache. Compatibility between
+members is just "same base model" = identical per-module (out, in) weight shapes, captured by `compat_hash`.
 """
 import hashlib, json, struct
 
