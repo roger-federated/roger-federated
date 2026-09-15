@@ -64,6 +64,8 @@ Any OpenAI-compatible server that takes a `--port` flag works; runtimes with the
 
 Once the runtime is up, roger asks it which model it serves (`GET /v1/models`) and tells you whether your federations train that model — and if not, which models they do accept, so you can switch. The default federation currently only accepts Gemma-4 bases (any quantization of `google/gemma-4-12B-it` or `google/gemma-4-E2B-it`); chats through an unsupported model are still saved, they just won't feed the federation.
 
+On the first launch of each day, roger pulls your federations' latest model update for the model named on the command line (`-m` for llama-server, the served model for vllm) and keeps it under `~/.roger/federated/`. Every launch then attaches it as a LoRA adapter through the runtime's own flag (`--lora` for llama-server, `--enable-lora --lora-modules` for vllm, with chat requests routed to the adapter automatically), so your model file is never modified and no model copy is stored. llama-server needs `-m` to point at a local gguf for this.
+
 <details>
 <summary>Legacy in-process agent (being phased out)</summary>
 
@@ -300,6 +302,7 @@ The ecosystem is still in development. Below is a non-exhaustive list of to-do i
 - [x] <ins>Huzzah, the beta version can now be shipped.</ins>
 - [x] Automatic subagent spawning (`spawn_subagent`) with concurrent tool dispatch.
 - [x] Native agent loops: `/perpetual` standing tasks with graceful Ctrl-C stop.
+- [x] Wrapper: daily pull of the federation update, attached to llama-server / vllm as a LoRA adapter (server still has to broadcast LoRA factors).
 
 Deferred:
 - [ ] Zero-knowledge integrity proof to verify scale, mod, keys, clip, model fork.

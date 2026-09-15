@@ -12,7 +12,7 @@
 ## Current state (read before assuming)
 - **Paradigm change (2026-09): roger is a wrapper around local runtime providers**, not its own
   harness/runtime. `roger <runtime-command> …` (e.g. `roger llama-server -m x.gguf --port 8080`,
-  `roger vllm serve … --port 8000`) runs the command untouched; `runtime/proxy.py` moves the server to
+  `roger vllm serve … --port 8000`) runs the command untouched; `runtime/dialect.py` + `runtime/proxy.py` move the server to
   an ephemeral loopback port (rewrites `--port`) and listens on the user's port as a transparent
   reverse proxy, and `runtime/capture.py` saves every 2xx `/v1/chat/completions` | `/v1/completions` |
   `/v1/responses` exchange as one JSON file under `~/.roger/messages/<runtime>/` (streamed SSE replies
@@ -29,8 +29,16 @@
   legacy startup verdicts (outdated client / update available / leech). `transport._base` defaults a
   scheme-less federation URL (the shipped default is a bare host) to https. Console script = `runtime/wrapper.py:main`; **bare `roger` prints
   usage**, `roger train` delegates to the legacy `apps/cli.py` (which is otherwise obsolete and slated
-  for removal, as is the rest of the in-process harness below). Deferred: auto gradient pull, local
-  optimisation over `messages/`, deleting obsolete (prefix-superseded) exchange files.
+  for removal, as is the rest of the in-process harness below). **Daily pull + adapter**
+  (`runtime/adapter.py`, before the child spawns): the model named on argv (`dialect.RUNTIMES` table:
+  llama-server `-m`, vllm `serve <id>`/`--model`) is resolved against `/status` `models`, the global is
+  pulled on the first launch of the UTC day (state + blob keyed per federation *and* served model), and
+  every launch rebuilds a LoRA adapter from disk — GGUF (`--lora`, alpha=0 ⇒ scale 1, arch/shapes from the
+  base gguf header, llama q-row permute) or PEFT dir (vllm `--enable-lora --lora-modules roger=… --max-lora-rank`,
+  proxy rewrites chat requests' `model` to `roger`). Torch-free. It expects the broadcast in **LoRA-factor
+  form** (contract in `federated/delta.py` docstring); the server still broadcasts dense ΔW, which is
+  reported and not attached until `roger-server` re-factors. Deferred: local optimisation over
+  `messages/`, deleting obsolete (prefix-superseded) exchange files.
 - Working semi-basic agent: rollout loop, tool use, reasoning, MCP connections, standard
   tools, deferred tool loading, auto-triggered RAG, skills + instruction files, `@path`
   references, persistent memory, web search/fetch, sub-agent spawning, and a CLI app (`roger`).
@@ -107,10 +115,13 @@
                 (`rollout_utils`, `retrieval`, `skill_utils`, `path_utils`), sub-agent
                 spawning (`subagents`)
 - `runtime/`  — the provider wrapper (current entry point): `wrapper` (console script `main`, process
-                lifecycle, Ctrl-C), `proxy` (`plan` = `--port` argv rewrite + stdlib `ThreadingHTTPServer`
+                lifecycle, Ctrl-C), `dialect` (**all runtime/framework-specific code lives here and only
+                here**: `plan` = `--port` argv rewrite, `RUNTIMES` table of model flags + adapter args,
+                GGUF/PEFT adapter writers), `proxy` (runtime-agnostic stdlib `ThreadingHTTPServer`
                 reverse proxy over a shared `httpx.Client`, streaming relay), `capture` (chat-path
                 filter, SSE→non-stream reassembly, atomic JSON writes to `messages/`),
-                `notice` (runtime `/v1/models` → federation `/status` supported-model verdicts on stderr)
+                `notice` (runtime `/v1/models` → federation `/status` supported-model verdicts on stderr),
+                `adapter` (daily global pull → LoRA adapter written + attached via `dialect.RUNTIMES`)
 - `apps/`     — legacy CLI (`cli`, reached only via `roger train`), config, Rich/prompt_toolkit UI
 - `loading/`  — model loading + VRAM-aware quantization tier selection (`model_setup`),
                 rollback sliding-window KV cache (`rollback_cache`)
