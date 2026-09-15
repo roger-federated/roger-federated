@@ -252,3 +252,17 @@ def test_upgrade_refused_and_dead_backend_is_502(stack, monkeypatch):
         assert r.status_code == 502 and b"not accepting connections" in r.content
     finally:
         proxy.stop(dead)
+
+
+from roger.federated import transport
+
+
+def test_transport_defaults_bare_host_to_https(monkeypatch):
+    # The shipped default federation is a bare host; httpx refuses a scheme-less URL, which would have
+    # made every probe fail-soft into silence.
+    seen = []
+    monkeypatch.setattr(transport.httpx, "get", lambda url, **kw: seen.append(url) or
+                        httpx.Response(200, json={"mode": "busy"}, request=httpx.Request("GET", url)))
+    assert transport.federation_status("server.rogerfederated.com", "m") == {"mode": "busy"}
+    assert transport.federation_status("http://localhost:8000/", "m") == {"mode": "busy"}
+    assert seen == ["https://server.rogerfederated.com/status", "http://localhost:8000/status"]

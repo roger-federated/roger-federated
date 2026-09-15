@@ -33,6 +33,12 @@ from roger.agency.path_utils import state_dir
 _TIMEOUT = 30.0
 
 
+def _base(url: str) -> str:
+    """A federation may be configured as a bare host (the shipped default is `server.rogerfederated.com`);
+    httpx refuses a URL without a scheme, so default to HTTPS rather than fail-soft into silence."""
+    return (url if "://" in url else "https://" + url).rstrip("/")
+
+
 def _fed_path(url: str, ext: str) -> str:
     d = os.path.join(state_dir(), "federated")
     os.makedirs(d, exist_ok=True)
@@ -76,7 +82,7 @@ def federation_status(url: str, model_id: str) -> dict:
     Fail-soft to {} so an unreachable server, or an older one that predates a field, yields the safe
     defaults its callers apply (mode "busy", no version opinion) instead of raising."""
     try:
-        r = httpx.get(f"{url.rstrip('/')}/status", timeout=_TIMEOUT, params={"model_id": model_id})
+        r = httpx.get(f"{_base(url)}/status", timeout=_TIMEOUT, params={"model_id": model_id})
         r.raise_for_status()
         return r.json()
     except Exception:
@@ -96,7 +102,7 @@ def contribute_dp(url: str, blob: bytes) -> str:
     cold-start path that needs no peer set and no arrival coincidence. Same fail-soft string contract
     as `contribute`."""
     try:
-        r = httpx.post(f"{url.rstrip('/')}/contribute_dp", content=blob, timeout=_TIMEOUT,
+        r = httpx.post(f"{_base(url)}/contribute_dp", content=blob, timeout=_TIMEOUT,
                        headers={"Content-Type": "application/octet-stream"})
         r.raise_for_status()
         return "ok"
@@ -112,7 +118,7 @@ def register_and_peers(url: str, my_pub: bytes, model_id: str) -> tuple[str, str
     party that registered (not just anyone sharing our IP). None on any failure (so the caller skips
     this federation rather than uploading an unmaskable contribution)."""
     try:
-        r = httpx.post(f"{url.rstrip('/')}/round/register", timeout=_TIMEOUT,
+        r = httpx.post(f"{_base(url)}/round/register", timeout=_TIMEOUT,
                        json={"model_id": model_id, "pubkey": my_pub.hex()})
         r.raise_for_status()
         data = r.json()
@@ -124,7 +130,7 @@ def register_and_peers(url: str, my_pub: bytes, model_id: str) -> tuple[str, str
 
 def contribute(url: str, blob: bytes) -> str:
     try:
-        r = httpx.post(f"{url.rstrip('/')}/contribute", content=blob, timeout=_TIMEOUT,
+        r = httpx.post(f"{_base(url)}/contribute", content=blob, timeout=_TIMEOUT,
                        headers={"Content-Type": "application/octet-stream"})
         r.raise_for_status()
         return "ok"
@@ -136,7 +142,7 @@ def pull(url: str, cursor: str | None, model_id: str) -> tuple[bytes, str] | Non
     """Fetch the aggregated global since `cursor`. Returns (bytes, new_cursor) or None (nothing new /
     unreachable)."""
     try:
-        r = httpx.get(f"{url.rstrip('/')}/global", timeout=_TIMEOUT,
+        r = httpx.get(f"{_base(url)}/global", timeout=_TIMEOUT,
                       params={"since": cursor or "", "model_id": model_id})
         if r.status_code == 204:
             return None
