@@ -67,8 +67,14 @@ def run(argv: list[str]) -> int:
         return 127
     p = proxy.plan(argv)
     if p is None:
-        print(f"roger: no --port on the command line, so there is no port to relay; "
-              f"running {argv[0]} as-is without capture", file=sys.stderr)
+        # Not a server we can sit in front of: be loud that this session contributes nothing, and say
+        # what would — the alternative is a user chatting all session with nothing saved.
+        print(f"roger: INACTIVE — {argv[0]} has no --port on its command line, so there is nothing to "
+              "relay and no chats will be saved. Running it as-is.\n"
+              "roger: to contribute, run an OpenAI-compatible server with an explicit --port, e.g.\n"
+              "roger:   roger llama-server -m model.gguf --port 8080\n"
+              "roger:   roger vllm serve <hf-model> --port 8000\n"
+              "roger: (ollama and LM Studio are not supported.)", file=sys.stderr)
         return _passthrough([binary, *argv[1:]])
 
     provider = os.path.basename(binary).removesuffix(".exe")
