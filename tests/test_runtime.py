@@ -1,6 +1,6 @@
 """Runtime wrapper: `--port` plan rewriting, the reverse proxy relaying byte-for-byte + streaming
 live, and chat exchanges landing as reassembled JSON under messages/. Loopback only, no model."""
-import json, os, threading, time
+import json, os, pathlib, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import httpx
@@ -140,12 +140,16 @@ class _Upstream(BaseHTTPRequestHandler):
             self._json(200, {"body": body.decode(), "enc": self.headers.get("Accept-Encoding"),
                              "host": self.headers.get("Host")})
             return
-        req = json.loads(body)
+        try:
+            req = json.loads(body)
+        except ValueError:
+            self._json(400, {"body": body.decode()})
+            return
         if req.get("model") == "bad":
             self._json(500, {"error": "boom"})
             return
         if not req.get("stream"):
-            self._json(200, {"object": "chat.completion", "model": "m",
+            self._json(200, {"object": "chat.completion", "model": req.get("model", "m"),
                              "choices": [{"index": 0, "message": {"role": "assistant", "content": "Hello"}}]})
             return
         self.send_response(200)
@@ -162,19 +166,29 @@ class _Upstream(BaseHTTPRequestHandler):
         self.wfile.write(b"0\r\n\r\n")
 
 
-@pytest.fixture
-def stack(tmp_path, monkeypatch):
+def _stack(tmp_path, monkeypatch, request_model=None):
     monkeypatch.setattr(capture, "state_dir", lambda: str(tmp_path))
     _Upstream.gate.clear()
     up = ThreadingHTTPServer(("127.0.0.1", 0), _Upstream)
     threading.Thread(target=up.serve_forever, daemon=True).start()
     pub = dialect.free_port()
-    srv = proxy.start("127.0.0.1", pub, f"http://127.0.0.1:{up.server_address[1]}", capture.make_sink("fake"))
+    srv = proxy.start("127.0.0.1", pub, f"http://127.0.0.1:{up.server_address[1]}", capture.make_sink("fake"),
+                      request_model)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     yield f"http://127.0.0.1:{pub}", up.server_address[1], tmp_path / "messages" / "fake"
     _Upstream.gate.set()
     proxy.stop(srv)
     up.shutdown(); up.server_close()
+
+
+@pytest.fixture
+def stack(tmp_path, monkeypatch):
+    yield from _stack(tmp_path, monkeypatch)
+
+
+@pytest.fixture
+def retargeting_stack(tmp_path, monkeypatch):
+    yield from _stack(tmp_path, monkeypatch, request_model=dialect.LORA_NAME)
 
 
 def _files(d):
@@ -355,3 +369,214 @@ def test_transport_defaults_bare_host_to_https(monkeypatch):
     assert transport.federation_status("server.rogerfederated.com", "m") == {"mode": "busy"}
     assert transport.federation_status("http://localhost:8000/", "m") == {"mode": "busy"}
     assert seen == ["https://server.rogerfederated.com/status", "http://localhost:8000/status"]
+
+
+def test_retarget_rewrites_chat_model_but_captures_the_original(retargeting_stack):
+    base, _, msgs = retargeting_stack
+    # vllm serves the federation adapter under its own name: chat requests are pointed at it on the
+    # wire (the upstream echoes the model it was asked for), while the saved exchange keeps what the
+    # client actually sent. Non-chat paths and non-JSON bodies pass untouched.
+    r = httpx.post(base + "/v1/chat/completions", json={"model": "google/gemma-4-12B-it", "messages": []})
+    assert r.status_code == 200 and r.json()["model"] == dialect.LORA_NAME
+    time.sleep(0.2)
+    (path,) = _files(msgs)
+    rec = json.loads(path.read_text())
+    assert rec["request"]["model"] == "google/gemma-4-12B-it"
+    r = httpx.post(base + "/echo", content=b'{"model": "x"}', headers={"Content-Type": "application/json"})
+    assert r.json()["body"] == '{"model": "x"}'
+    r = httpx.post(base + "/v1/chat/completions", content=b"not json", headers={"Content-Type": "text/plain"})
+    assert r.status_code == 400 and r.json()["body"] == "not json"   # forwarded as-is for the runtime to reject
+
+
+# ---------------------------------------------------------------------------
+# Federation update as a runtime adapter (runtime/dialect.py writers, runtime/adapter.py orchestration)
+# ---------------------------------------------------------------------------
+
+import numpy as np
+from safetensors.numpy import save as st_save_np
+
+from roger.runtime import adapter
+
+
+def test_served_model_and_attach_adapter():
+    assert dialect.served_model(["llama-server", "-m", "x.gguf", "--port", "1"]) == "x.gguf"
+    assert dialect.served_model(["/opt/bin/llama-server.exe", "--model", "y.gguf"]) == "y.gguf"
+    assert dialect.served_model(["vllm", "serve", "org/name", "--port", "1"]) == "org/name"
+    assert dialect.served_model(["vllm", "serve", "--model", "org/name"]) == "org/name"
+    assert dialect.served_model(["vllm", "serve", "--port", "1"]) is None       # config-file / no model
+    assert dialect.served_model(["llama-server", "-hf", "org/name", "--port", "1"]) is None
+    assert dialect.served_model(["someserver", "--model", "z"]) is None          # unknown runtime
+    p = dialect.plan(["llama-server", "-m", "x.gguf", "--port", "8080"], backend_port=9)
+    q = dialect.attach_adapter(p, "llama-server", "/a/b.gguf", 16)
+    assert q.child_argv == p.child_argv + ["--lora", "/a/b.gguf"] and q.request_model is None
+    p = dialect.plan(["vllm", "serve", "org/name", "--port", "8000"], backend_port=9)
+    q = dialect.attach_adapter(p, "/usr/bin/vllm", "/a/dir", 20)
+    assert q.child_argv[-5:] == ["--enable-lora", "--lora-modules", f"{dialect.LORA_NAME}=/a/dir",
+                                 "--max-lora-rank", "32"]                   # vllm only takes its own rank steps
+    assert q.request_model == dialect.LORA_NAME
+    assert dialect.attach_adapter(p, "someserver", "/a", 8) == p                 # unknown runtime: untouched
+    assert dialect._vllm_rank(8) == 8 and dialect._vllm_rank(600) == 512
+
+
+# Module paths as the trainer records them: PEFT prefix + a multimodal checkpoint's nested decoder.
+_MODS = ["base_model.model.model.language_model.layers.0.self_attn.q_proj",
+         "base_model.model.model.language_model.layers.0.self_attn.v_proj",
+         "base_model.model.model.language_model.layers.1.self_attn.q_proj"]
+
+
+def _factor_blob(mods=_MODS, r=2, out=8, in_=6, scaling="2.0", seed=0):
+    rng = np.random.default_rng(seed)
+    t = {}
+    for m in mods:
+        t[m + ".lora_A.weight"] = rng.standard_normal((r, in_)).astype(np.float32)
+        t[m + ".lora_B.weight"] = rng.standard_normal((out, r)).astype(np.float32)
+    return st_save_np(t, metadata={"model_id": "google/gemma-4-12B-it", "compat": "x", "scaling": scaling}), t
+
+
+def _base_gguf(path, arch="gemma4", out=8, in_=6, heads=2):
+    import gguf
+    w = gguf.GGUFWriter(str(path), arch)
+    w.add_block_count(2)
+    w.add_head_count(heads)
+    for name in ("blk.0.attn_q.weight", "blk.0.attn_v.weight", "blk.1.attn_q.weight", "blk.1.attn_v.weight"):
+        w.add_tensor(name, np.zeros((out, in_), dtype=np.float32))
+    w.add_tensor("blk.0.ffn_up.weight", np.zeros((3, in_), dtype=np.float32))
+    w.write_header_to_file(); w.write_kv_data_to_file(); w.write_tensors_to_file(); w.close()
+    return str(path)
+
+
+def test_load_factors_folds_scaling_and_joins_federations(tmp_path, monkeypatch):
+    monkeypatch.setattr(transport, "state_dir", lambda: str(tmp_path))
+    b1, t1 = _factor_blob(seed=1, scaling="2.0")
+    b2, t2 = _factor_blob(seed=2, scaling="0.5", mods=_MODS[:1])
+    transport.save_global("http://a", b1, "m.gguf")
+    transport.save_global("http://b", b2, "m.gguf")
+    f = adapter.load_factors(["http://a", "http://b"], "m.gguf")
+    assert set(f) == set(_MODS)
+    A, B = f[_MODS[0]]
+    assert A.shape == (4, 6) and B.shape == (8, 4)                          # ranks concatenated
+    want = 2.0 * t1[_MODS[0] + ".lora_B.weight"] @ t1[_MODS[0] + ".lora_A.weight"] \
+         + 0.5 * t2[_MODS[0] + ".lora_B.weight"] @ t2[_MODS[0] + ".lora_A.weight"]
+    assert np.allclose(B @ A, want, atol=1e-5)
+    A, B = f[_MODS[1]]
+    assert np.allclose(B @ A, 2.0 * t1[_MODS[1] + ".lora_B.weight"] @ t1[_MODS[1] + ".lora_A.weight"], atol=1e-5)
+    # A dense (pre-factor) global has no factor keys → nothing.
+    transport.save_global("http://a", st_save_np({"m": np.zeros((2, 2), np.float32)}), "d.gguf")
+    assert adapter.load_factors(["http://a"], "d.gguf") == {}
+
+
+def test_build_gguf_adapter_matches_base_and_skips_mismatch(tmp_path, monkeypatch):
+    import gguf
+    base = _base_gguf(tmp_path / "base.gguf")
+    _, t = _factor_blob()
+    factors = {m: (t[m + ".lora_A.weight"], t[m + ".lora_B.weight"]) for m in _MODS}
+    factors["base_model.model.model.language_model.layers.1.self_attn.v_proj"] = (np.zeros((2, 5), np.float32),
+                                                                                    np.zeros((8, 2), np.float32))
+    factors["base_model.model.model.language_model.layers.0.mlp.gate_proj"] = (np.zeros((2, 6), np.float32),
+                                                                                 np.zeros((3, 2), np.float32))
+    import io
+    err = io.StringIO()
+    path, rank = dialect.build_gguf(factors, base, str(tmp_path / "out"), out=err)
+    assert rank == 2 and "v_proj" in err.getvalue() and "gate_proj" in err.getvalue()   # in≠6 / not in the base
+    r = gguf.GGUFReader(path)
+    assert r.fields["general.architecture"].contents() == "gemma4"
+    assert r.fields["general.type"].contents() == "adapter"
+    assert r.fields["adapter.type"].contents() == "lora"
+    assert float(r.fields["adapter.lora.alpha"].contents()) == 0.0
+    names = {x.name: tuple(int(d) for d in reversed(list(x.shape))) for x in r.tensors}
+    assert names == {"blk.0.attn_q.weight.lora_a": (2, 6), "blk.0.attn_q.weight.lora_b": (8, 2),
+                     "blk.0.attn_v.weight.lora_a": (2, 6), "blk.0.attn_v.weight.lora_b": (8, 2),
+                     "blk.1.attn_q.weight.lora_a": (2, 6), "blk.1.attn_q.weight.lora_b": (8, 2)}
+    b = next(x for x in r.tensors if x.name == "blk.0.attn_q.weight.lora_b")
+    assert np.allclose(np.array(b.data, dtype=np.float32).reshape(8, 2), t[_MODS[0] + ".lora_B.weight"], atol=1e-2)
+    assert dialect.build_gguf({"nope.q_proj": factors[_MODS[0]]}, base, str(tmp_path / "out"), out=err) is None
+    assert dialect.build_gguf(factors, str(tmp_path / "missing.gguf"), str(tmp_path / "out"), out=err) is None
+    assert "isn't a local file" in err.getvalue()
+
+
+def test_build_gguf_permutes_q_rows_for_llama(tmp_path, monkeypatch):
+    import gguf
+    base = _base_gguf(tmp_path / "l.gguf", arch="llama", heads=2)
+    A = np.ones((1, 6), np.float32)
+    B = np.arange(8, dtype=np.float32).reshape(8, 1)
+    mods = {"base_model.model.model.layers.0.self_attn.q_proj": (A, B),
+            "base_model.model.model.layers.0.self_attn.v_proj": (A, B)}
+    path, _ = dialect.build_gguf(mods, base, str(tmp_path / "out"))
+    r = gguf.GGUFReader(path)
+    rows = lambda n: np.array(next(x for x in r.tensors if x.name == n).data, dtype=np.float32).reshape(8)
+    # convert_hf_to_gguf's llama permute on 8 rows / 2 heads: [0,2,1,3, 4,6,5,7]; v is left alone.
+    assert rows("blk.0.attn_q.weight.lora_b").tolist() == [0, 2, 1, 3, 4, 6, 5, 7]
+    assert rows("blk.0.attn_v.weight.lora_b").tolist() == list(range(8))
+
+
+def test_build_peft_dir(tmp_path):
+    _, t = _factor_blob()
+    factors = {m: (t[m + ".lora_A.weight"], t[m + ".lora_B.weight"]) for m in _MODS}
+    d, rank = dialect.build_peft(factors, "org/name", str(tmp_path / "out"), "org/name")
+    cfg = json.loads((pathlib.Path(d) / "adapter_config.json").read_text())
+    assert rank == 2 and cfg["r"] == cfg["lora_alpha"] == 2 and cfg["target_modules"] == ["q_proj", "v_proj"]
+    assert cfg["base_model_name_or_path"] == "org/name"
+    from safetensors.numpy import load_file
+    saved = load_file(str(pathlib.Path(d) / "adapter_model.safetensors"))
+    assert set(saved) == {m + s for m in _MODS for s in (".lora_A.weight", ".lora_B.weight")}
+
+
+def _fed_env(tmp_path, monkeypatch, status, blob):
+    monkeypatch.setattr(transport, "state_dir", lambda: str(tmp_path))
+    monkeypatch.setattr(adapter, "state_dir", lambda: str(tmp_path))
+    monkeypatch.setattr("roger.apps.config.load", lambda: {"federations": ["http://f"]})
+    pulls, statuses = [], []
+    monkeypatch.setattr(transport, "federation_status", lambda url, mid: statuses.append(mid) or status)
+    monkeypatch.setattr(transport, "pull", lambda url, cur, mid: pulls.append((cur, mid)) or (blob, "v7"))
+    return pulls, statuses
+
+
+def test_prepare_pulls_once_a_day_and_attaches(tmp_path, monkeypatch):
+    import io
+    base = _base_gguf(tmp_path / "gemma-4-12B-it-Q4_K_M.gguf")
+    blob, _ = _factor_blob()
+    pulls, statuses = _fed_env(tmp_path, monkeypatch,
+                               {"mode": "bootstrap", "models": ["google/gemma-4-12B-it", "google/gemma-4-E2B-it"]}, blob)
+    argv = ["llama-server", "-m", base, "--port", "8080"]
+    err = io.StringIO()
+    path, rank = adapter.prepare(argv, out=err)
+    assert path.endswith(".gguf") and os.path.isfile(path) and rank == 2
+    assert pulls == [(None, "google/gemma-4-12B-it")]               # resolved from the gguf path via the allowlist
+    assert statuses == [base]                                      # /status is probed with what we know
+    st = transport.load_state("http://f", base)
+    assert st["cursor"] == "v7" and st["model_id"] == "google/gemma-4-12B-it" and st["last_sync"]
+    assert "attaching" in err.getvalue()
+    # Same day: no second pull, but the adapter is rebuilt from the persisted global all the same.
+    os.remove(path)
+    assert adapter.prepare(argv, out=err)[0] == path and os.path.isfile(path) and len(pulls) == 1
+    # A federation that doesn't accept the model is never pulled from, and there's nothing to attach.
+    pulls2, _ = _fed_env(tmp_path / "other", monkeypatch, {"mode": "unsupported", "models": ["x/y"]}, blob)
+    assert adapter.prepare(argv, out=err) is None and pulls2 == []
+    # No allowlist advertised (older server): pulled under the raw command-line name.
+    pulls3, _ = _fed_env(tmp_path / "old", monkeypatch, {"mode": "busy"}, blob)
+    adapter.prepare(argv, out=err)
+    assert pulls3 == [(None, base)]
+    # An unreachable federation: nothing pulled, day stamped, no adapter, runtime unaffected.
+    pulls4, _ = _fed_env(tmp_path / "down", monkeypatch, {}, blob)
+    assert adapter.prepare(argv, out=err) is None and pulls4 == []
+    assert transport.load_state("http://f", base)["last_sync"]
+
+
+def test_prepare_reports_dense_global_and_builds_peft_for_vllm(tmp_path, monkeypatch):
+    import io
+    dense = st_save_np({"base_model.model.model.layers.0.self_attn.q_proj": np.zeros((8, 6), np.float32)},
+                       metadata={"model_id": "google/gemma-4-12B-it", "compat": "x"})
+    _fed_env(tmp_path, monkeypatch, {"mode": "busy", "models": None}, dense)
+    err = io.StringIO()
+    assert adapter.prepare(["vllm", "serve", "google/gemma-4-12B-it", "--port", "8000"], out=err) is None
+    assert "adapter (LoRA-factor) form" in err.getvalue()
+    blob, _ = _factor_blob()
+    _fed_env(tmp_path / "v", monkeypatch, {"mode": "busy", "models": ["google/gemma-4-12B-it"]}, blob)
+    d, rank = adapter.prepare(["vllm", "serve", "google/gemma-4-12B-it", "--port", "8000"], out=err)
+    assert os.path.isfile(os.path.join(d, "adapter_config.json")) and rank == 2
+    assert json.loads(open(os.path.join(d, "adapter_config.json")).read())["base_model_name_or_path"] == "google/gemma-4-12B-it"
+    # Unknown runtime / no model on the command line / no federations: nothing happens at all.
+    assert adapter.prepare(["someserver", "--model", "x", "--port", "1"], out=err) is None
+    assert adapter.prepare(["vllm", "serve", "--port", "8000"], out=err) is None
+    monkeypatch.setattr("roger.apps.config.load", lambda: {"federations": []})
+    assert adapter.prepare(["vllm", "serve", "google/gemma-4-12B-it", "--port", "8000"], out=err) is None

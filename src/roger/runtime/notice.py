@@ -16,6 +16,7 @@ import re, sys, time
 import httpx
 
 from roger.federated import CLIENT_VERSION, UPDATE_CMD, transport
+from roger.runtime import dialect
 
 _POLL = 2.0        # seconds between /v1/models attempts while the runtime loads
 
@@ -30,7 +31,8 @@ def served_models(backend_url: str, alive) -> list[str]:
             r = httpx.get(url, timeout=5.0)
             if r.status_code == 200:
                 ids = [m.get("id") for m in (r.json().get("data") or []) if isinstance(m, dict)]
-                return [i for i in ids if isinstance(i, str) and i]
+                # vllm lists the attached federation adapter as a model of its own; it isn't one.
+                return [i for i in ids if isinstance(i, str) and i and i != dialect.LORA_NAME]
             if r.status_code in (404, 405):
                 return []
         except (httpx.HTTPError, ValueError):

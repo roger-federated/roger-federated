@@ -1,0 +1,124 @@
+"""adapter.py — bring the federation's global update to the model the runtime serves.
+
+Under the wrapper the model is loaded by llama-server / vllm, not by roger, so the legacy in-RAM fold
+(federated/delta.fold_into) has nowhere to run. Instead, at launch and before the runtime is spawned:
+once per UTC day each federation's cumulative global is pulled for the model the command line names and
+persisted (federated/transport), and at *every* launch the persisted global is materialised as a LoRA
+adapter in the runtime's own format — a GGUF adapter for llama-server, a PEFT directory for vllm —
+which runtime/dialect.py writes and attaches with the runtime's flag. The model file / HF cache is never
+touched and no model copy is ever stored: the adapter *is* the update, and the runtime applies it at load.
+
+The global is expected in LoRA-factor form (the contract in federated/delta.py: `<module>.lora_A.weight`
+[r, in], `<module>.lora_B.weight` [out, r], metadata `scaling`) — the server re-factors it before
+broadcasting. A dense global (the earlier contract) can't be attached as an adapter and is reported,
+not applied.
+
+Torch-free on purpose: the wrapper must start in well under a second (numpy + safetensors + gguf only).
+Everything fails soft to "no adapter this launch" with one stderr line — a federation hiccup must never
+keep the user's runtime from starting.
+"""
+import hashlib, json, os, struct, sys
+from datetime import datetime, timezone
+
+import numpy as np
+from safetensors.numpy import load as st_load
+
+from roger.agency.path_utils import state_dir
+from roger.federated import transport
+from roger.runtime import dialect, notice
+
+
+def _today() -> str:
+    return datetime.now(timezone.utc).date().isoformat()
+
+
+def pull_today(feds: list[str], hint: str, out=sys.stderr) -> bool:
+    """First launch of the UTC day, per federation: resolve `hint` (what the command line calls the model)
+    to the id the federation trains it as, fetch the global if it moved, persist blob + cursor. Returns
+    whether anything new arrived. The day is stamped even when nothing came back (unreachable,
+    unsupported) so later launches don't re-poll all day — the legacy CLI's policy; a transient outage
+    costs one day, not 30s of connect timeout on every launch while offline."""
+    today, fetched = _today(), False
+    for url in feds:
+        st = transport.load_state(url, hint)
+        if st.get("last_sync") == today:
+            continue
+        status = transport.federation_status(url, hint)
+        accepted = status.get("models")           # None: no allowlist (or a server predating the field)
+        model_id = notice.resolve([hint], accepted) if accepted is not None else hint
+        if status and model_id is not None and status.get("mode", "busy") != "unsupported":
+            print(f"roger: pulling today's federation update for {model_id} from {url}…", file=out)
+            res = transport.pull(url, st.get("cursor"), model_id)
+            if res is not None:
+                blob, cursor = res
+                transport.save_global(url, blob, hint)
+                st["cursor"], fetched = cursor, True
+            st["model_id"] = model_id               # the id the adapter is built for (PEFT config)
+        st["last_sync"] = today
+        transport.save_state(url, st, hint)
+    return fetched
+
+
+def _metadata(buf: bytes) -> dict:
+    # safetensors: u64 LE header length, then the JSON header whose "__metadata__" holds our str→str
+    # fields. Mirrors federated/delta._read_metadata, which sits behind a torch import.
+    n = struct.unpack("<Q", buf[:8])[0]
+    return json.loads(buf[8 : 8 + n]).get("__metadata__", {})
+
+
+def load_factors(feds: list[str], hint: str) -> dict[str, tuple[np.ndarray, np.ndarray]]:
+    """{module: (A [r, in], B [out, r])} with the update = B@A, from every federation's persisted global
+    for `hint`. Each federation's `scaling` is folded into its B and federations are joined along the rank
+    axis (B@A of the concatenation = the sum of the parts), so one adapter carries them all at scale 1.
+    A dense (pre-factor) global has no factor keys and contributes nothing."""
+    out: dict = {}
+    for url in feds:
+        blob = transport.load_global(url, hint)
+        if blob is None:
+            continue
+        tensors = st_load(blob)
+        scaling = float(_metadata(blob).get("scaling", 1.0))
+        for key, A in tensors.items():
+            if not key.endswith(".lora_A.weight"):
+                continue
+            mod = key[: -len(".lora_A.weight")]
+            B = tensors.get(mod + ".lora_B.weight")
+            if B is None:
+                continue
+            A, B = A.astype(np.float32), B.astype(np.float32) * scaling
+            if mod in out:
+                A, B = np.concatenate([out[mod][0], A]), np.concatenate([out[mod][1], B], axis=1)
+            out[mod] = (A, B)
+    return out
+
+
+def _adapter_stem(hint: str) -> str:
+    d = os.path.join(state_dir(), "federated", "adapters")
+    os.makedirs(d, exist_ok=True)
+    # Keyed by the served model: two runtimes on different models never clobber each other's adapter.
+    return os.path.join(d, hashlib.sha1(hint.encode()).hexdigest()[:16])
+
+
+def prepare(argv: list[str], out=sys.stderr) -> tuple[str, int] | None:
+    """The wrapper's one call before spawning the runtime: today's pull (first launch of the day) and the
+    adapter to attach for this command line — (path, rank), or None when there's nothing to attach."""
+    from roger.apps import config              # first run writes the default config = default federation
+    cfg = config.load()
+    feds = cfg.get("federations") or []
+    hint = dialect.served_model(argv)
+    spec = dialect.RUNTIMES.get(dialect.runtime_name(argv[0]))
+    if not feds or hint is None or spec is None:
+        return None
+    pull_today(feds, hint, out)
+    factors = load_factors(feds, hint)
+    if not factors:
+        if any(transport.load_global(url, hint) is not None for url in feds):
+            print("roger: the federation's global isn't in adapter (LoRA-factor) form yet, so it can't "
+                  "be attached to the runtime; chats are still saved.", file=out)
+        return None
+    model_id = next((m for url in feds if (m := transport.load_state(url, hint).get("model_id"))), hint)
+    built = spec["build"](factors, hint, _adapter_stem(hint), model_id, out)
+    if built is not None:
+        print(f"roger: attaching the federation's update ({len(factors)} modules, rank {built[1]}) "
+              f"to {os.path.basename(hint)} via adapter {built[0]}", file=out)
+    return built

@@ -20,6 +20,8 @@ dependencies = [
     "mcp",
     "ddgs",          # keyless DuckDuckGo search + page fetch backing the web_search/web_fetch tools
     "httpx",         # federated gradient-sharing transport (federated/transport.py); also an mcp dep
+    "safetensors",   # the federated ΔW wire format; the wrapper reads it without torch (runtime/adapter.py)
+    "gguf",          # writes llama.cpp LoRA adapters for the federation update (runtime/adapter.py)
     "cryptography",  # X25519 EC-DH pairwise secrets for secure aggregation (federated/secure_agg.py)
     "rich",
     "prompt_toolkit",

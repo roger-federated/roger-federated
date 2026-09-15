@@ -4,9 +4,10 @@ Runtimes never log message bodies, so the only provider-agnostic way to see the 
 them is to sit on the wire: dialect.plan() moves the real server to an ephemeral loopback port, and
 `start()` listens on the port the user asked for, relaying every request byte-for-byte. Clients keep
 talking to the usual address and never notice. Nothing here knows which runtime is behind it (that is
-all in dialect.py).
+all in dialect.py); the one edit it can make — pointing chat requests at another model name — is
+switched on by the caller.
 """
-import sys, time
+import json, sys, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Callable, Iterable
 
@@ -40,18 +41,35 @@ class _Server(ThreadingHTTPServer):
     # silently leave an already-running runtime answering clients instead of us. Fail loudly there.
     allow_reuse_address = sys.platform != "win32"
 
-    def __init__(self, addr: tuple[str, int], backend: str, on_exchange: Sink | None):
+    def __init__(self, addr: tuple[str, int], backend: str, on_exchange: Sink | None,
+                 request_model: str | None = None):
         super().__init__(addr, _Handler)
         self.backend = backend.rstrip("/")
         self.on_exchange = on_exchange
+        self.request_model = request_model
         # One pooled client for every connection thread. No read/write timeout: a completion can
         # legitimately take minutes to produce its first byte on a small GPU.
         self.client = httpx.Client(timeout=httpx.Timeout(connect=5.0, read=None, write=None, pool=None))
 
 
-def start(host: str, port: int, backend_url: str, on_exchange: Sink | None) -> ThreadingHTTPServer:
-    """Bind (raises OSError when the port is taken) but don't serve yet — run `serve_forever` in a thread."""
-    return _Server((host, port), backend_url, on_exchange)
+def start(host: str, port: int, backend_url: str, on_exchange: Sink | None,
+          request_model: str | None = None) -> ThreadingHTTPServer:
+    """Bind (raises OSError when the port is taken) but don't serve yet — run `serve_forever` in a thread.
+    `request_model`: rewrite the `model` of every chat request to it (see Plan.request_model)."""
+    return _Server((host, port), backend_url, on_exchange, request_model)
+
+
+def _retarget(body: bytes, model: str) -> bytes:
+    """A chat request body asking for `model` instead of whatever the client named; unchanged when it
+    isn't a JSON object (the runtime will reject it anyway)."""
+    try:
+        obj = json.loads(body)
+    except ValueError:
+        return body
+    if not isinstance(obj, dict):
+        return body
+    obj["model"] = model
+    return json.dumps(obj).encode()
 
 
 def stop(server: ThreadingHTTPServer) -> None:
@@ -112,13 +130,22 @@ class _Handler(BaseHTTPRequestHandler):
             body = None
         want = srv.on_exchange is not None and capture.wants(self.command, self.path)
         req_buf = bytearray()
-        if want and body is not None:
+        retarget = srv.request_model is not None and capture.wants(self.command, self.path)
+        if body is not None and retarget:
+            # The whole body is needed to edit it; the capture still records what the client sent.
+            req_buf += b"".join(body)
+            body = _retarget(bytes(req_buf), srv.request_model)
+        elif want and body is not None:
             body = _tee(body, req_buf)   # chat bodies are small; we need the JSON anyway
 
         # Drop Host so httpx sets the loopback one the runtime expects; keep an explicit
         # Content-Length (httpx then sends the iterator body as-is instead of re-chunking it).
+        # A retargeted body has a new length, so its framing is rebuilt.
         headers = [(k, v) for k, v in self.headers.items()
-                   if k.lower() not in _HOP_BY_HOP and k.lower() not in ("host", "accept-encoding")]
+                   if k.lower() not in _HOP_BY_HOP and k.lower() not in ("host", "accept-encoding")
+                   and not (retarget and k.lower() == "content-length")]
+        if retarget and isinstance(body, bytes):
+            headers.append(("Content-Length", str(len(body))))
         # Capture needs plain text, and on loopback compression buys nothing — but never impose
         # an encoding the client didn't ask for on paths we don't read.
         headers.append(("Accept-Encoding", "identity" if want else self.headers.get("Accept-Encoding", "identity")))

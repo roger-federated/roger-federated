@@ -1,22 +1,25 @@
 """wrapper.py — `roger <runtime> [args…]`: the console-script entry point.
 
 Runs a local OpenAI-compatible runtime server exactly as the user typed it, with roger's reverse
-proxy (runtime/proxy.py) in front so every chat that flows through it is saved (runtime/capture.py).
-`roger train` still reaches the legacy apps/cli.py; nothing else does.
+proxy (runtime/proxy.py) in front so every chat that flows through it is saved (runtime/capture.py),
+and the federation's daily global update attached as a LoRA adapter on the runtime's own flag
+(runtime/adapter.py). `roger train` still reaches the legacy apps/cli.py; nothing else does.
 
 Usage:
   roger llama-server -m model.gguf --port 8080
   roger vllm serve meta-llama/Llama-3-8B --port 8000
   roger train …                               # legacy LoRA update over ~/.roger/runs
 """
-import os, shutil, subprocess, sys, threading
+import shutil, subprocess, sys, threading
 
-from roger.runtime import capture, dialect, notice, proxy
+from roger.runtime import adapter, capture, dialect, notice, proxy
 
 _USAGE = """usage: roger <runtime-command> [args…]     (e.g. roger llama-server -m x.gguf --port 8080)
        roger train [--batch N] [--epochs N] [--lr F]
 
 Runs the runtime as-is and relays its port; chats are saved under ~/.roger/messages/<runtime>/.
+On the first launch of each day the federation's model update is pulled, and every launch attaches it to
+the runtime as a LoRA adapter (llama-server --lora / vllm --lora-modules); the model file is never touched.
 Once the runtime is up, tells you whether your federations train the model it serves (and which ones they do)."""
 
 
@@ -77,11 +80,21 @@ def run(argv: list[str]) -> int:
               "roger: (ollama and LM Studio are not supported.)", file=sys.stderr)
         return _passthrough([binary, *argv[1:]])
 
-    provider = os.path.basename(binary).removesuffix(".exe")
+    provider = dialect.runtime_name(binary)
+    # The federation's update rides along as a LoRA adapter on the runtime's own flag: pulled once a
+    # day, rebuilt from disk every launch, the model file untouched. Fail-soft — the runtime starts
+    # either way, at worst without today's update.
+    try:
+        built = adapter.prepare([binary, *argv[1:]])
+    except Exception as e:
+        built = None
+        print(f"roger: federation update not attached ({e.__class__.__name__}: {e})", file=sys.stderr)
+    if built is not None:
+        p = dialect.attach_adapter(p, binary, *built)
     # Bind before spawning the child so a taken port never leaves an orphaned runtime behind.
     try:
         srv = proxy.start(p.public_host, p.public_port, f"http://127.0.0.1:{p.backend_port}",
-                          capture.make_sink(provider))
+                          capture.make_sink(provider), p.request_model)
     except OSError as e:
         print(f"roger: cannot listen on {p.public_host}:{p.public_port} ({e.strerror or e}) — is "
               f"{argv[0]} already running there? Stop it or pass a different --port.", file=sys.stderr)
