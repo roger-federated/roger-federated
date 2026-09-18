@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from typing import Callable
 
 from roger.agency.path_utils import state_dir
+from roger.runtime import signals
 
 # Suffix match, not exact: llama-server also serves `/chat/completions` without the `/v1`, and some
 # proxies mount the API under a prefix. `/completions` covers the legacy text endpoint too.
@@ -186,6 +187,9 @@ def make_sink(provider: str, on_record: Callable[[str, dict], None] | None = Non
             "stream": streamed,
             "request": req,
             "response": resp,
+            # Verifiable per-step rewards from the tool results in the history (exit codes, errors).
+            # Every request carries the full history, so the newest file of a conversation has them all.
+            "tool_signals": signals.step_rewards(req.get("messages") or req.get("input")),
         }
         if resp is None:                                         # never lose data to a parser gap
             record["raw_response"] = response.decode("utf-8", "replace")

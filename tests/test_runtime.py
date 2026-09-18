@@ -6,7 +6,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import httpx
 import pytest
 
-from roger.runtime import capture, dialect, grader, proxy
+from roger.runtime import capture, dialect, grader, proxy, signals
 
 # ---------------------------------------------------------------------------
 # plan(): argv rewriting
@@ -257,6 +257,50 @@ def test_non_stream_captured_verbatim_and_errors_skipped(stack):
     assert r.status_code == 500 and r.json() == {"error": "boom"}
     time.sleep(0.2)
     assert len(_files(msgs)) == 1
+
+
+# ---------------------------------------------------------------------------
+# signals: exit-code / error rewards from the tool results in the history
+# ---------------------------------------------------------------------------
+
+def test_signal_score_reads_legacy_and_third_party_formats():
+    assert signals.score("exit 0\nok") == 0.0 and signals.score("Exit code: 0\nall good") == 0.0
+    assert signals.score("Wrote 42 bytes to foo.txt") == 0.0
+    for failing in ("exit 1\nfailed", "Exit code: 2", "exit status 127", "Process exited with code 1",
+                    "[Command finished with exit code 3]"):
+        assert signals.score(failing) == pytest.approx(-signals.W_EXIT), failing
+    assert signals.score("Error: file not found") < 0
+    assert signals.score("Command rejected by user: rm -rf /") <= -signals.W_CMD_REJ
+    assert signals.score("Command rejected by user: exit 1\nError: x not found") >= -1.0
+
+
+def test_step_rewards_credit_results_to_the_turn_that_called_them():
+    call = {"role": "assistant", "content": None, "tool_calls": [{"id": "a"}, {"id": "b"}]}
+    msgs = [{"role": "system", "content": "s"}, {"role": "user", "content": "go"},
+            call, {"role": "tool", "tool_call_id": "a", "content": "exit 1\nboom"},
+            {"role": "tool", "tool_call_id": "b", "content": [{"type": "text", "text": "Error: nope"}]},
+            {"role": "assistant", "content": None, "tool_calls": [{"id": "c"}]},
+            {"role": "tool", "tool_call_id": "c", "content": "exit 0\nfine"},
+            {"role": "assistant", "content": "done"}]
+    assert signals.step_rewards(msgs) == {"2": pytest.approx(-signals.W_EXIT - signals.W_ERROR)}
+    # responses API: a run of function_call items is one step, anchored at its first item
+    items = [{"type": "message", "role": "user", "content": "go"},
+             {"type": "function_call", "call_id": "a"}, {"type": "function_call", "call_id": "b"},
+             {"type": "function_call_output", "call_id": "a", "output": "Exit code: 1"},
+             {"type": "function_call_output", "call_id": "b", "output": "Permission denied"}]
+    assert signals.step_rewards(items) == {"1": pytest.approx(-signals.W_EXIT - signals.W_ERROR)}
+    assert signals.step_rewards("plain prompt") == {} and signals.step_rewards(None) == {}
+
+
+def test_capture_records_tool_signals(stack):
+    base, _, msgs = stack
+    history = [{"role": "user", "content": "run it"},
+               {"role": "assistant", "content": None, "tool_calls": [{"id": "a"}]},
+               {"role": "tool", "tool_call_id": "a", "content": "exit 2\nsegfault"}]
+    httpx.post(base + "/v1/chat/completions", json={"model": "m", "messages": history})
+    time.sleep(0.2)
+    (path,) = _files(msgs)
+    assert json.loads(path.read_text())["tool_signals"] == {"1": pytest.approx(-signals.W_EXIT)}
 
 
 def test_head_then_get_on_one_keepalive_connection(stack):
