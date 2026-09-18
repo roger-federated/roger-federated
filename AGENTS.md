@@ -44,7 +44,8 @@
   exchanges into conversations by message-prefix (in-memory registry, `grader.track`; every request
   carries the full history, so the previous exchange's transcript is a prefix of the next). Once a
   conversation is idle `IDLE_S` (5 min) — or at Ctrl-C, before the runtime is stopped — one eval call
-  goes to the **backend port directly** (never relayed, never captured): the transcript + a final
+  goes to the **backend port directly** (never relayed, never captured; under the relay's
+  `request_model` when set, so a vllm adapter grades its own work): the transcript + a final
   assistant message holding the seed (prefill), `response_format` json_schema with properties ordered
   `reasoning` then `scores` (= reason-then-force over the API), no `tools`. Per-metric scores
   (`METRICS`: efficiency/accuracy/completeness, each clamped to [-1,1]) are persisted as `self_eval`

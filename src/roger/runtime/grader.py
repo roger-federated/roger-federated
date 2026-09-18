@@ -108,8 +108,11 @@ def _eval_messages(rec: dict, appended: bool) -> list[dict]:
     return msgs + [last, {"role": "assistant", "content": SEED}]
 
 
-def grade(client: httpx.Client, backend: str, entry: dict) -> dict:
+def grade(client: httpx.Client, backend: str, entry: dict, model: str | None = None) -> dict:
     """Ask the runtime to grade one conversation and persist the verdict on its newest file.
+    `model`: the name the relay retargets chat requests to (Plan.request_model, the vllm adapter). The
+    capture keeps what the client sent, so without it this direct call would be graded by the bare base
+    rather than the policy that actually produced the conversation.
     Never raises: a failure is recorded as `{"error": …}` so the conversation isn't retried forever."""
     ts = datetime.now(timezone.utc).isoformat()
     result: dict = {"ts": ts}
@@ -119,7 +122,7 @@ def grade(client: httpx.Client, backend: str, entry: dict) -> dict:
         resp = None
         for appended in (False, True):
             msgs = _eval_messages(rec, appended)
-            body = {"model": rec.get("model"), "messages": msgs, "stream": False, "max_tokens": MAX_TOKENS,
+            body = {"model": model or rec.get("model"), "messages": msgs, "stream": False, "max_tokens": MAX_TOKENS,
                     "response_format": {"type": "json_schema",
                                         "json_schema": {"name": "self_evaluation", "schema": SCHEMA}}}
             resp = client.post(backend.rstrip("/") + entry["endpoint"], json=body)
@@ -146,7 +149,7 @@ def _client() -> httpx.Client:
     return httpx.Client(timeout=httpx.Timeout(connect=5.0, read=None, write=None, pool=None))
 
 
-def run(registry: list, backend: str, stop: threading.Event) -> None:
+def run(registry: list, backend: str, stop: threading.Event, model: str | None = None) -> None:
     """Thread target: grade idle conversations until `stop` is set."""
     with _client() as client:
         while not stop.wait(TICK_S):
@@ -154,12 +157,12 @@ def run(registry: list, backend: str, stop: threading.Event) -> None:
                 if stop.is_set():
                     return
                 try:
-                    grade(client, backend, e)
+                    grade(client, backend, e, model)
                 except Exception as e2:               # belt and braces: grading never kills the relay
                     print(f"roger: self-grading failed: {e2!r}", file=sys.stderr)
 
 
-def grade_pending(registry: list, backend: str) -> int:
+def grade_pending(registry: list, backend: str, model: str | None = None) -> int:
     """Shutdown path: grade everything still ungraded while the runtime is up. A KeyboardInterrupt
     propagates to the caller, which treats it as "skip the rest"."""
     with _LOCK:
@@ -170,5 +173,5 @@ def grade_pending(registry: list, backend: str) -> int:
           file=sys.stderr)
     with _client() as client:
         for e in pending:
-            grade(client, backend, e)
+            grade(client, backend, e, model)
     return len(pending)

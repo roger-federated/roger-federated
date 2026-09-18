@@ -664,6 +664,17 @@ def test_grade_prefills_seed_forces_schema_and_persists_scores(stack):
     assert len(_files(msgs)) == 1                       # the eval itself was never captured
 
 
+def test_grade_asks_the_adapter_the_relay_retargets_to(stack):
+    # vllm + federation adapter: the capture holds the client's model name, but the relay served the
+    # chat from the `roger` adapter — the grade must come from that same policy, not the bare base.
+    base, backend_port, msgs = stack
+    path, entry = _captured_entry(stack, msgs)
+    with httpx.Client() as c:
+        grader.grade(c, f"http://127.0.0.1:{backend_port}", entry, model=dialect.LORA_NAME)
+    (sent,) = _Upstream.evals
+    assert sent["model"] == dialect.LORA_NAME
+
+
 def test_grade_falls_back_to_appended_seed_for_strict_templates(stack):
     base, backend_port, msgs = stack
     _Upstream.eval_mode = "strict"

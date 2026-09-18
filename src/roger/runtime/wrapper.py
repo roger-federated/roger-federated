@@ -106,7 +106,7 @@ def run(argv: list[str]) -> int:
         return 1
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     stop = threading.Event()
-    threading.Thread(target=grader.run, args=(registry, backend, stop), daemon=True).start()
+    threading.Thread(target=grader.run, args=(registry, backend, stop, p.request_model), daemon=True).start()
     print(f"roger: relaying {p.public_host}:{p.public_port} → 127.0.0.1:{p.backend_port}; "
           f"saving chats to {capture.messages_dir(provider)}; self-grading chats idle for "
           f"{grader.IDLE_S // 60} min", file=sys.stderr)
@@ -125,7 +125,7 @@ def run(argv: list[str]) -> int:
     except KeyboardInterrupt:
         stop.set()
         try:
-            grader.grade_pending(registry, backend)
+            grader.grade_pending(registry, backend, p.request_model)
         except KeyboardInterrupt:                      # second Ctrl-C: skip the remaining grades
             print("roger: skipping remaining self-grades", file=sys.stderr)
         rc = _stop(child)
