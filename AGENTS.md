@@ -54,6 +54,11 @@
   seed appended to the last reply. Failures land as `self_eval.error`, never retried. Because of the
   Ctrl-C ordering the runtime child runs in its **own process group** (`start_new_session` /
   `CREATE_NEW_PROCESS_GROUP`) and gets the interrupt from roger after grading; a second Ctrl-C skips.
+- **Tool-result signals over the wire (`runtime/signals.py`).** The legacy `auto_signal` step reward,
+  ported: the client harness runs the tools, so `capture` scores the `role: "tool"` / `function_call_output`
+  items in each request's history (nonzero exit code in any common phrasing, error strings, "Command
+  rejected by user"; legacy weights) and stores `tool_signals` = {assistant-turn index: clamped sum}, nonzero
+  steps only, on every file — the conversation's newest file therefore holds them all, next to `self_eval`.
 - Working semi-basic agent: rollout loop, tool use, reasoning, MCP connections, standard
   tools, deferred tool loading, auto-triggered RAG, skills + instruction files, `@path`
   references, persistent memory, web search/fetch, sub-agent spawning, and a CLI app (`roger`).
@@ -137,7 +142,8 @@
                 filter, SSE→non-stream reassembly, atomic JSON writes + `update_record` to `messages/`),
                 `notice` (runtime `/v1/models` → federation `/status` supported-model verdicts on stderr),
                 `adapter` (daily global pull → LoRA adapter written + attached via `dialect.RUNTIMES`),
-                `grader` (prefix-chain conversation registry, idle/shutdown self-eval call, `self_eval`)
+                `grader` (prefix-chain conversation registry, idle/shutdown self-eval call, `self_eval`),
+                `signals` (exit-code/error step rewards from tool results → `tool_signals`)
 - `apps/`     — legacy CLI (`cli`, reached only via `roger train`), config, Rich/prompt_toolkit UI
 - `loading/`  — model loading + VRAM-aware quantization tier selection (`model_setup`),
                 rollback sliding-window KV cache (`rollback_cache`)
