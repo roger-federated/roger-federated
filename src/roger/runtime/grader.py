@@ -7,6 +7,15 @@ to continue an assistant message that starts with a self-grading seed. A JSON sc
 are ordered `reasoning` then `scores` is the wire form of "reason-then-force": the model reasons in
 free text, then the grammar forces one number per metric. Only the per-metric scores are stored;
 averaging them into a reward is the optimiser's job.
+
+The same call also reads the user's reactions — the wire's stand-in for the legacy `/grade` override,
+since roger can't prompt the user inside a third-party client. Every assistant reply the user answered
+gets one number, judged from the user's own words (a correction, a repeated request, a thank-you), not
+from the model's opinion of its reply — so it stays a human signal. Each answered reply is named in the
+seed with a snippet of the user's answer and forced as its own schema property, so the grammar can't
+skip or misalign one; they're stored as `reactions` keyed by the reply's message index (the same keys
+as `tool_signals`). The newest reply has no answer yet: it gets one if the chat continues and is graded
+again at its new end.
 """
 import json, sys, threading, time
 from datetime import datetime, timezone
@@ -22,6 +31,11 @@ METRICS = {"efficiency": "how directly I reached the goal, with very few wasted,
 SEED = ("Let me honestly grade how well I completed the task in this conversation, one score per "
         "criterion — " + "; ".join(f"{m}: {d}" for m, d in METRICS.items()) + ". For each: 1 for a "
         "clean, fully-correct solve, around 0 for partial or clumsy, negative if I largely failed.")
+REACTION_SEED = ("Separately, and judging only from the user's own words rather than from how good I think "
+                 "my reply was, how did the user react to each reply of mine they answered: -1 if they said "
+                 "it was wrong or didn't work, or had to repeat or rephrase their request; 1 if they confirmed "
+                 "it worked or thanked me; 0 if neutral or they simply moved on. The replies they answered: ")
+SNIPPET = 160       # chars of each user answer quoted in the seed, enough to tell the replies apart
 IDLE_S = 300        # a conversation nobody has extended for this long is over
 TICK_S = 15
 MAX_TOKENS = 512
@@ -95,7 +109,33 @@ def _clamp(x) -> float:
     return max(-1.0, min(1.0, float(x)))
 
 
-def _eval_messages(rec: dict, appended: bool) -> list[dict]:
+def _answered(msgs: list) -> list[tuple[int, str]]:
+    """[(index of an assistant message, the user message that directly answered it)]. In an agentic run
+    the user speaks after the run's last assistant message (tool results sit in between the others), so
+    that message is the one the reaction is credited to."""
+    return [(i - 1, _text(msgs[i].get("content"))) for i in range(1, len(msgs))
+            if msgs[i].get("role") == "user" and msgs[i - 1].get("role") == "assistant"]
+
+
+def _prompt(rec: dict) -> tuple[str, dict, list[int]]:
+    """(seed, schema, answered-reply indices) for one conversation. Without answered replies it is
+    exactly SEED + SCHEMA; otherwise the reaction request is appended to the seed and a `reactions`
+    object with one forced `reply_N` property per answered reply is added after `scores`."""
+    answered = _answered(rec["request"].get("messages") or [])
+    if not answered:
+        return SEED, SCHEMA, []
+    quotes = "; ".join(f'reply_{n}: the user answered "{" ".join(text.split())[:SNIPPET]}"'
+                       for n, (_, text) in enumerate(answered, 1))
+    names = [f"reply_{n}" for n in range(1, len(answered) + 1)]
+    schema = json.loads(json.dumps(SCHEMA))
+    schema["properties"]["reactions"] = {"type": "object",
+                                         "properties": {k: {"type": "number"} for k in names},
+                                         "required": names, "additionalProperties": False}
+    schema["required"].append("reactions")
+    return SEED + " " + REACTION_SEED + quotes + ".", schema, [i for i, _ in answered]
+
+
+def _eval_messages(rec: dict, appended: bool, seed: str = SEED) -> list[dict]:
     reply = _reply(rec)
     last = {k: reply[k] for k in ("role", "content", "tool_calls") if reply.get(k) is not None}
     last.setdefault("role", "assistant")
@@ -103,9 +143,9 @@ def _eval_messages(rec: dict, appended: bool) -> list[dict]:
     if appended:
         # Alternation-strict chat templates (gemma family) refuse two assistant messages in a row, so
         # the seed rides at the end of the reply instead of opening its own message.
-        last["content"] = (_text(last.get("content")) + "\n\n" + SEED).strip()
+        last["content"] = (_text(last.get("content")) + "\n\n" + seed).strip()
         return msgs + [last]
-    return msgs + [last, {"role": "assistant", "content": SEED}]
+    return msgs + [last, {"role": "assistant", "content": seed}]
 
 
 def grade(client: httpx.Client, backend: str, entry: dict, model: str | None = None) -> dict:
@@ -120,11 +160,14 @@ def grade(client: httpx.Client, backend: str, entry: dict, model: str | None = N
         with open(entry["path"], encoding="utf-8") as f:
             rec = json.load(f)
         resp = None
+        seed, schema, answered = _prompt(rec)
         for appended in (False, True):
-            msgs = _eval_messages(rec, appended)
-            body = {"model": model or rec.get("model"), "messages": msgs, "stream": False, "max_tokens": MAX_TOKENS,
+            msgs = _eval_messages(rec, appended, seed)
+            body = {"model": model or rec.get("model"), "messages": msgs, "stream": False,
+                    # room for the reactions after the free-text reasoning: ~16 tokens per forced property
+                    "max_tokens": MAX_TOKENS + 16 * len(answered),
                     "response_format": {"type": "json_schema",
-                                        "json_schema": {"name": "self_evaluation", "schema": SCHEMA}}}
+                                        "json_schema": {"name": "self_evaluation", "schema": schema}}}
             resp = client.post(backend.rstrip("/") + entry["endpoint"], json=body)
             if 200 <= resp.status_code < 300 or resp.status_code >= 500:
                 break                                     # 4xx → try the merged-seed placement once
@@ -136,6 +179,9 @@ def grade(client: httpx.Client, backend: str, entry: dict, model: str | None = N
                           reasoning=obj.get("reasoning", ""),
                           seed_placement="appended" if appended else "message",
                           graded_messages=len(msgs) - 1)
+            if answered:
+                result["reactions"] = {str(i): _clamp(obj["reactions"][f"reply_{n}"])
+                                       for n, i in enumerate(answered, 1)}
     except Exception as e:                                # httpx errors, bad JSON, missing metric, …
         result["error"] = f"{e.__class__.__name__}: {str(e)[:200]}"
     capture.update_record(entry["path"], {"self_eval": result})

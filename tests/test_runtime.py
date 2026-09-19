@@ -153,8 +153,12 @@ class _Upstream(BaseHTTPRequestHandler):
             if self.eval_mode == "strict" and len(msgs) > 1 and msgs[-2]["role"] == "assistant":
                 self._json(400, {"error": "roles must alternate"})
                 return
-            content = ("not json" if self.eval_mode == "garbage" else json.dumps(
-                {"reasoning": "ok", "scores": {"efficiency": 0.7, "accuracy": 3, "completeness": -0.5}}))
+            verdict = {"reasoning": "ok", "scores": {"efficiency": 0.7, "accuracy": 3, "completeness": -0.5}}
+            asked = req["response_format"]["json_schema"]["schema"]["properties"].get("reactions")
+            if asked:                                    # one per forced reply_N, alternating -2 / 0.5
+                verdict["reactions"] = {k: (-2 if n % 2 == 0 else 0.5)
+                                        for n, k in enumerate(asked["properties"])}
+            content = "not json" if self.eval_mode == "garbage" else json.dumps(verdict)
             self._json(200, {"object": "chat.completion", "model": "m",
                              "choices": [{"index": 0, "message": {"role": "assistant", "content": content}}]})
             return
@@ -706,6 +710,37 @@ def test_grade_prefills_seed_forces_schema_and_persists_scores(stack):
     assert res["reasoning"] == "ok" and res["seed_placement"] == "message" and "score" not in res
     assert res["graded_messages"] == 2
     assert len(_files(msgs)) == 1                       # the eval itself was never captured
+
+
+def test_grade_reads_the_users_reactions_per_answered_reply(stack, tmp_path):
+    base, backend_port, msgs = stack
+    history = [{"role": "system", "content": "s"},
+               {"role": "user", "content": "fix the bug"},
+               {"role": "assistant", "content": "done", "tool_calls": [{"id": "1", "type": "function",
+                                                                         "function": {"name": "sh", "arguments": "{}"}}]},
+               {"role": "tool", "content": "ok"},
+               {"role": "assistant", "content": "fixed it"},
+               {"role": "user", "content": "no,\n  it still   crashes"},
+               {"role": "assistant", "content": "try this"},
+               {"role": "user", "content": "works, thanks!"}]
+    path = tmp_path / "conv.json"
+    path.write_text(json.dumps(_rec(history, "glad to help")))
+    entry = {"path": str(path), "endpoint": "/v1/chat/completions"}
+    with httpx.Client() as c:
+        res = grader.grade(c, f"http://127.0.0.1:{backend_port}", entry)
+    (sent,) = _Upstream.evals
+    schema = sent["response_format"]["json_schema"]["schema"]
+    assert list(schema["properties"]) == ["reasoning", "scores", "reactions"]
+    assert schema["properties"]["reactions"]["required"] == ["reply_1", "reply_2"]
+    seed = sent["messages"][-1]["content"]
+    assert seed.startswith(grader.SEED) and grader.REACTION_SEED in seed
+    assert 'reply_1: the user answered "no, it still crashes"' in seed           # whitespace collapsed
+    assert 'reply_2: the user answered "works, thanks!"' in seed
+    assert sent["max_tokens"] == grader.MAX_TOKENS + 32
+    # credited to the assistant message the user answered (the run's last one, not the tool-calling one),
+    # keyed by message index like tool_signals, clamped
+    assert res["reactions"] == {"4": -1.0, "6": 0.5}
+    assert json.loads(path.read_text())["self_eval"]["reactions"] == res["reactions"]
 
 
 def test_grade_asks_the_adapter_the_relay_retargets_to(stack):
