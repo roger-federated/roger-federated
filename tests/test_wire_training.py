@@ -243,7 +243,8 @@ def test_train_starts_from_the_global_and_trains_A_in_an_A_epoch(tiny_model, mon
     def spy(model, eps, adv, opt, trainable, **kw):
         # at the start of the round the adapter IS the global
         lora = model.get_submodule("base_model.model.model.layers.0.self_attn.q_proj")
-        seen["A"] = lora.lora_A["default"].weight.detach().float().cpu()
+        # clone: detach() aliases the live weight, which `real` below then steps (phase A is trainable)
+        seen["A"] = lora.lora_A["default"].weight.detach().clone()
         seen["B_grad"] = lora.lora_B["default"].weight.requires_grad
         return real(model, eps, adv, opt, trainable, **kw)
     monkeypatch.setattr(wire_trainer.trainer, "reinforce", spy)
