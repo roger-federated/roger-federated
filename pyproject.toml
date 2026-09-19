@@ -10,7 +10,8 @@ requires-python = ">=3.10"
 dependencies = [
     "torch",
     "torchvision",   # Gemma4 image processor imports torchvision.transforms.v2
-    "transformers",
+    "transformers",  # also dequantizes llama-server's GGUF for the wrapper's training round (gguf_file=);
+                     # gemma-4 GGUFs need the gemma4 tensor processor, on main but not yet in 5.17.0
     "accelerate",
     "peft",          # LoRA adapters for the local REINFORCE++ trainer (training/lora_utils.py)
     "bitsandbytes; sys_platform != 'darwin' and (platform_machine == 'x86_64' or platform_machine == 'AMD64')",

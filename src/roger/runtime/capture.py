@@ -168,9 +168,11 @@ def update_record(path: str, patch: dict) -> None:
 
 
 def make_sink(provider: str, on_record: Callable[[str, dict], None] | None = None,
-              ) -> Callable[[str, bytes, str, int, bytes], None]:
+              served: str | None = None) -> Callable[[str, bytes, str, int, bytes], None]:
     """proxy.Sink that records one file per chat exchange under messages/<provider>/, then hands
-    (path, record) to `on_record` — the grader's conversation tracking."""
+    (path, record) to `on_record` — the grader's conversation tracking. `served`: the model as the
+    runtime's command line names it (dialect.served_model), recorded so the trainer knows which base
+    produced a chat — the request's own `model` is whatever alias the client chose."""
     def sink(path: str, request: bytes, content_type: str, status: int, response: bytes) -> None:
         try:
             req = json.loads(request)
@@ -184,6 +186,7 @@ def make_sink(provider: str, on_record: Callable[[str, dict], None] | None = Non
             "provider": provider,
             "endpoint": path.split("?", 1)[0],
             "model": req.get("model") or (resp or {}).get("model"),
+            "served_model": served,
             "stream": streamed,
             "request": req,
             "response": resp,

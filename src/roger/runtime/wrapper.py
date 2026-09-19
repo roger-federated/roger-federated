@@ -2,8 +2,9 @@
 
 Runs a local OpenAI-compatible runtime server exactly as the user typed it, with roger's reverse
 proxy (runtime/proxy.py) in front so every chat that flows through it is saved (runtime/capture.py),
-and the federation's daily global update attached as a LoRA adapter on the runtime's own flag
-(runtime/adapter.py). `roger train` still reaches the legacy apps/cli.py; nothing else does.
+the federation's daily global update attached as a LoRA adapter on the runtime's own flag
+(runtime/adapter.py), and, after the runtime exits, a training round over the saved chats
+(runtime/train.py). `roger train` still reaches the legacy apps/cli.py; nothing else does.
 
 Usage:
   roger llama-server -m model.gguf --port 8080
@@ -12,7 +13,7 @@ Usage:
 """
 import shutil, signal, subprocess, sys, threading
 
-from roger.runtime import adapter, capture, dialect, grader, notice, proxy
+from roger.runtime import adapter, capture, dialect, grader, notice, proxy, train
 
 _USAGE = """usage: roger <runtime-command> [args…]     (e.g. roger llama-server -m x.gguf --port 8080)
        roger train [--batch N] [--epochs N] [--lr F]
@@ -20,7 +21,9 @@ _USAGE = """usage: roger <runtime-command> [args…]     (e.g. roger llama-serve
 Runs the runtime as-is and relays its port; chats are saved under ~/.roger/messages/<runtime>/.
 On the first launch of each day the federation's model update is pulled, and every launch attaches it to
 the runtime as a LoRA adapter (llama-server --lora / vllm --lora-modules); the model file is never touched.
-Once the runtime is up, tells you whether your federations train the model it serves (and which ones they do)."""
+Once the runtime is up, tells you whether your federations train the model it serves (and which ones they do).
+After the runtime exits, once enough graded chats have piled up ("train_every"), trains that adapter on
+them locally and contributes the update (Ctrl-C skips); contributed chats are then deleted."""
 
 
 def _passthrough(argv: list[str]) -> int:
@@ -83,6 +86,7 @@ def run(argv: list[str]) -> int:
         return _passthrough([binary, *argv[1:]])
 
     provider = dialect.runtime_name(binary)
+    served = dialect.served_model([binary, *argv[1:]])
     # The federation's update rides along as a LoRA adapter on the runtime's own flag: pulled once a
     # day, rebuilt from disk every launch, the model file untouched. Fail-soft — the runtime starts
     # either way, at worst without today's update.
@@ -98,7 +102,8 @@ def run(argv: list[str]) -> int:
     # Bind before spawning the child so a taken port never leaves an orphaned runtime behind.
     try:
         srv = proxy.start(p.public_host, p.public_port, backend,
-                          capture.make_sink(provider, lambda path, rec: grader.track(registry, path, rec)),
+                          capture.make_sink(provider, lambda path, rec: grader.track(registry, path, rec),
+                                            served),
                           p.request_model)
     except OSError as e:
         print(f"roger: cannot listen on {p.public_host}:{p.public_port} ({e.strerror or e}) — is "
@@ -131,6 +136,13 @@ def run(argv: list[str]) -> int:
         rc = _stop(child)
     finally:
         proxy.stop(srv)
+    # The runtime is gone and its VRAM free: train on what has piled up, if enough has. Never changes
+    # the exit status — that stays the runtime's.
+    try:
+        from roger.apps import config
+        train.maybe_train(provider, served, config.load())
+    except KeyboardInterrupt:
+        print("roger: training skipped; the conversations are kept for next time.", file=sys.stderr)
     return rc
 
 
