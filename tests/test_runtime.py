@@ -508,7 +508,7 @@ def _base_gguf(path, arch="gemma4", out=8, in_=6, heads=2):
     return str(path)
 
 
-def test_load_factors_folds_scaling_and_joins_federations(tmp_path, monkeypatch):
+def test_load_factors_folds_scaling_and_merges_federations_at_1_over_n(tmp_path, monkeypatch):
     monkeypatch.setattr(transport, "state_dir", lambda: str(tmp_path))
     b1, t1 = _factor_blob(seed=1, scaling="2.0")
     b2, t2 = _factor_blob(seed=2, scaling="0.5", mods=_MODS[:1])
@@ -518,10 +518,15 @@ def test_load_factors_folds_scaling_and_joins_federations(tmp_path, monkeypatch)
     assert set(f) == set(_MODS)
     A, B = f[_MODS[0]]
     assert A.shape == (4, 6) and B.shape == (8, 4)                          # ranks concatenated
-    want = 2.0 * t1[_MODS[0] + ".lora_B.weight"] @ t1[_MODS[0] + ".lora_A.weight"] \
-         + 0.5 * t2[_MODS[0] + ".lora_B.weight"] @ t2[_MODS[0] + ".lora_A.weight"]
+    # two federations with a global → each merged at 1/2 on top of its own scaling
+    want = 0.5 * (2.0 * t1[_MODS[0] + ".lora_B.weight"] @ t1[_MODS[0] + ".lora_A.weight"]
+                  + 0.5 * t2[_MODS[0] + ".lora_B.weight"] @ t2[_MODS[0] + ".lora_A.weight"])
     assert np.allclose(B @ A, want, atol=1e-5)
     A, B = f[_MODS[1]]
+    assert np.allclose(B @ A, 0.5 * 2.0 * t1[_MODS[1] + ".lora_B.weight"] @ t1[_MODS[1] + ".lora_A.weight"],
+                       atol=1e-5)
+    # a configured federation with no global yet doesn't dilute the one that has it: N counts globals
+    A, B = adapter.load_factors(["http://a", "http://none"], "m.gguf")[_MODS[1]]
     assert np.allclose(B @ A, 2.0 * t1[_MODS[1] + ".lora_B.weight"] @ t1[_MODS[1] + ".lora_A.weight"], atol=1e-5)
     # A dense (pre-factor) global has no factor keys → nothing.
     transport.save_global("http://a", st_save_np({"m": np.zeros((2, 2), np.float32)}), "d.gguf")

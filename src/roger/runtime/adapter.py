@@ -68,16 +68,24 @@ def _metadata(buf: bytes) -> dict:
 
 def load_factors(feds: list[str], hint: str) -> dict[str, tuple[np.ndarray, np.ndarray]]:
     """{module: (A [r, in], B [out, r])} with the update = B@A, from every federation's persisted global
-    for `hint`. Each federation's `scaling` is folded into its B and federations are joined along the rank
-    axis (B@A of the concatenation = the sum of the parts), so one adapter carries them all at scale 1.
-    A dense (pre-factor) global has no factor keys and contributes nothing."""
-    out: dict = {}
+    for `hint`. Federations are joined along the rank axis (B@A of the concatenation = the sum of the
+    parts), so one adapter carries them all at scale 1, with each federation's `scaling` and a 1/N merge
+    coefficient folded into its B. The 1/N: the globals are cumulated independently and overlap in what
+    they learned, so summing N of them at full scale would overshoot; N counts only the federations that
+    actually have a factor-form global here, so one with nothing yet doesn't dilute the rest. (Training
+    never uses this merge: it attaches only the one federation it contributes to, at scale 1 — see
+    runtime/train.py.) A dense (pre-factor) global has no factor keys and contributes nothing."""
+    globals_ = []
     for url in feds:
         blob = transport.load_global(url, hint)
         if blob is None:
             continue
         tensors = st_load(blob)
-        scaling = float(_metadata(blob).get("scaling", 1.0))
+        if any(k.endswith(".lora_A.weight") for k in tensors):
+            globals_.append((tensors, float(_metadata(blob).get("scaling", 1.0))))
+    out: dict = {}
+    for tensors, scaling in globals_:
+        coef = scaling / len(globals_)
         for key, A in tensors.items():
             if not key.endswith(".lora_A.weight"):
                 continue
@@ -85,7 +93,7 @@ def load_factors(feds: list[str], hint: str) -> dict[str, tuple[np.ndarray, np.n
             B = tensors.get(mod + ".lora_B.weight")
             if B is None:
                 continue
-            A, B = A.astype(np.float32), B.astype(np.float32) * scaling
+            A, B = A.astype(np.float32), B.astype(np.float32) * coef
             if mod in out:
                 A, B = np.concatenate([out[mod][0], A]), np.concatenate([out[mod][1], B], axis=1)
             out[mod] = (A, B)
