@@ -1,9 +1,8 @@
 """transport.py — per-federation HTTP I/O + on-disk sync state.
 
-Defines the client side of the wire protocol (the aggregation server is future work; see
-federated_server_requirements). Everything fails soft: a federation that is unreachable or
-misbehaving returns None / a status string rather than raising, so a sharing hiccup never takes
-down the agent (same convention as the web_search/web_fetch tools).
+Defines the client side of the wire protocol the roger-server repo implements. Everything fails
+soft: a federation that is unreachable or misbehaving returns None / a status string rather than
+raising, so a sharing hiccup never keeps the user's runtime from starting or running.
 
 Endpoints (all under a federation's base URL, served over HTTPS):
   GET  {url}/status?model_id= -> {mode: "bootstrap"|"busy"|"unsupported", models, min_client, latest_client,
@@ -11,10 +10,9 @@ Endpoints (all under a federation's base URL, served over HTTPS):
                               (which aggregation regime this federation wants for the model — async DP
                               while sparse, secure-agg cohorts once busy, or "unsupported" when the
                               federation's allowlist excludes the model; probed before contributing so a
-                              cold-start client skips the cohort barrier instead of 503-ing on it, and so
-                              the CLI can warn on an unsupported model before wasting a session's gradient.
-                              `models` is the allowlist itself (null = any model), so the runtime
-                              wrapper can tell the user which models to run — see runtime/notice.py.
+                              cold-start client skips the cohort barrier instead of 503-ing on it.
+                              `models` is the allowlist itself (null = any model), so the wrapper can
+                              tell the user which models to run — see runtime/notice.py.
                               min_client/latest_client advertise the protocol version this federation
                               requires/prefers, so an out-of-date client self-skips + nudges an update.
                               rank/epoch/phase: the LoRA-factor state to train against right now — see
@@ -34,7 +32,7 @@ import hashlib, json, os
 
 import httpx
 
-from roger.agency.path_utils import state_dir
+from roger.paths import state_dir
 
 _TIMEOUT = 30.0
 
@@ -45,24 +43,21 @@ def _base(url: str) -> str:
     return (url if "://" in url else "https://" + url).rstrip("/")
 
 
-def _fed_path(url: str, ext: str, model_id: str = "") -> str:
-    """Sync state + global blob live per federation; the wrapper additionally keys them per model
-    (`model_id`), since it serves whatever model the runtime's command line names — two models on one
-    day must not share a sync stamp or overwrite each other's global. The legacy CLI (one configured
-    model) passes nothing and keeps its old file names."""
+def _fed_path(url: str, ext: str, model_id: str) -> str:
+    """Sync state + global blob are keyed per federation AND per model: the wrapper serves whatever
+    model the runtime's command line names, and two models used on one day must not share a sync stamp
+    or overwrite each other's global."""
     d = os.path.join(state_dir(), "federated")
     os.makedirs(d, exist_ok=True)
-    tag = hashlib.sha1(url.encode()).hexdigest()
-    if model_id:
-        tag += "-" + hashlib.sha1(model_id.encode()).hexdigest()[:12]
+    tag = hashlib.sha1(url.encode()).hexdigest() + "-" + hashlib.sha1(model_id.encode()).hexdigest()[:12]
     return os.path.join(d, tag + ext)
 
 
-def _state_path(url: str, model_id: str = "") -> str:
+def _state_path(url: str, model_id: str) -> str:
     return _fed_path(url, ".json", model_id)
 
 
-def load_state(url: str, model_id: str = "") -> dict:
+def load_state(url: str, model_id: str) -> dict:
     try:
         with open(_state_path(url, model_id)) as f:
             return json.load(f)
@@ -70,19 +65,19 @@ def load_state(url: str, model_id: str = "") -> dict:
         return {}
 
 
-def save_state(url: str, state: dict, model_id: str = "") -> None:
+def save_state(url: str, state: dict, model_id: str) -> None:
     with open(_state_path(url, model_id), "w") as f:
         json.dump(state, f, indent=2)
 
 
-def save_global(url: str, blob: bytes, model_id: str = "") -> None:
+def save_global(url: str, blob: bytes, model_id: str) -> None:
     """Persist the federation's current cumulative global so it can be re-applied at every launch
     without re-downloading; refreshed only when a new day's pull returns fresh bytes."""
     with open(_fed_path(url, ".global", model_id), "wb") as f:
         f.write(blob)
 
 
-def load_global(url: str, model_id: str = "") -> bytes | None:
+def load_global(url: str, model_id: str) -> bytes | None:
     try:
         with open(_fed_path(url, ".global", model_id), "rb") as f:
             return f.read()
@@ -100,14 +95,6 @@ def federation_status(url: str, model_id: str) -> dict:
         return r.json()
     except Exception:
         return {}
-
-
-def federation_mode(url: str, model_id: str) -> str:
-    """Which regime this federation wants for `model_id`: async DP-bootstrap uploads ("bootstrap"),
-    secure-agg cohorts ("busy"), or "unsupported" when its allowlist excludes the model. Fail-soft to
-    "busy" so an unreachable / pre-/status server keeps the existing secure-aggregation behaviour (and
-    is never mistaken for an unsupported model)."""
-    return federation_status(url, model_id).get("mode", "busy")
 
 
 def contribute_dp(url: str, blob: bytes) -> str:

@@ -1,17 +1,22 @@
-"""Tests for federated gradient sharing (delta densify, secure-aggregation masking, transport).
+"""Tests for the federated wire contract: the factor layout + serialization (delta.py) and the
+secure-aggregation crypto (secure_agg.py), plus the shared LoRA basis.
 Run with:  PYTHONPATH=src python -m pytest tests/test_federated.py
 
-All CPU-only and download-free: a tiny Llama from config exercises the adapter / fold paths, and
-transport is monkeypatched so no network is touched.
+All CPU-only and download-free. Both modules are mirrored BY HAND in the roger-server repo, so the
+assertions here duplicate the ones in its tests/test_server.py on purpose: a hand-edit to the rank
+rule, `init_A`, the flatten layout or the quantization must break a test on both sides.
+The upload itself (client.contribute_factor) is covered by tests/test_wire_training.py.
 """
+import json
+
 import torch
 from transformers import LlamaConfig, LlamaForCausalLM
 
-from roger.federated import delta as delta_mod, secure_agg, client as fed_client, transport
+from roger.federated import delta as delta_mod, secure_agg
 
 
 def _dequantize(flat, spec):
-    """Local mirror of the inverse of secure_agg.quantize. The client package no longer ships
+    """Local mirror of the inverse of secure_agg.quantize. The client package doesn't ship
     `dequantize` (it is server-only, in the roger-server repo), but the round-trip and mask-cancellation
     tests below still need it to check the quantize/mask math. Residues ≥ R/2 represent negatives."""
     R, SCALE = secure_agg.R, secure_agg.SCALE
@@ -27,53 +32,69 @@ def _dequantize(flat, spec):
     return out
 
 
-# --- ΔW densification + compatibility --------------------------------------------------------
+# --- the factor contract ---------------------------------------------------------------------
 
-def _fake_delta(out=6, in_=4, r=2, scaling=2.0, seed=0):
+_MOD = "base_model.model.model.layers.0.self_attn.q_proj"
+
+
+def _factors(out=6, in_=4, r=2, seed=0):
     torch.manual_seed(seed)
-    A = torch.randn(r, in_); B = torch.randn(out, r)   # B≠0 here (post-step); fresh init would be 0
-    return {"weights": {"m.lora_A.weight": A, "m.lora_B.weight": B},
-            "scaling": scaling, "model_id": "tiny"}
+    return {_MOD + delta_mod.LORA_A: torch.randn(r, in_),
+            _MOD + delta_mod.LORA_B: torch.randn(out, r)}
 
 
-def test_densify_matches_factors():
-    d = _fake_delta()
-    A, B, s = d["weights"]["m.lora_A.weight"], d["weights"]["m.lora_B.weight"], d["scaling"]
-    dense = delta_mod.densify(d)
-    assert torch.allclose(dense["m"], s * (B @ A), atol=1e-5)
-    print("PASS test_densify_matches_factors")
+def test_phase_alternates_and_epoch_zero_trains_b():
+    # LoRA starts at B=0, so A's gradient would be zero in epoch 0: B must go first.
+    assert delta_mod.phase_of(0) == "B" and delta_mod.phase_of(1) == "A"
+    assert delta_mod.phase_of(4) == "B" and delta_mod.phase_of(7) == "A"
+    assert delta_mod.SUFFIX["B"] == delta_mod.LORA_B and delta_mod.SUFFIX["A"] == delta_mod.LORA_A
+    assert delta_mod.module_of(_MOD + delta_mod.LORA_B) == _MOD
+    assert delta_mod.module_of(_MOD + ".weight") is None
+    print("PASS test_phase_alternates_and_epoch_zero_trains_b")
 
 
-def test_densify_factor_noise():
-    # noise_z>0 (DP bootstrap) perturbs the dense ΔW but keeps shape/finiteness; default off is
-    # bit-identical to the noiseless path.
-    d = _fake_delta(out=6, in_=4)
-    clean = delta_mod.densify(d)
-    assert torch.equal(delta_mod.densify(d)["m"], clean["m"])       # default off ⇒ unchanged
-    g = torch.Generator().manual_seed(7)
-    noisy = delta_mod.densify(d, noise_z=0.5, generator=g)
-    assert noisy["m"].shape == clean["m"].shape
-    assert torch.isfinite(noisy["m"]).all()
-    assert not torch.allclose(noisy["m"], clean["m"])               # actually perturbed
-    print("PASS test_densify_factor_noise")
+def test_rank_rule_matches_the_server():
+    # Same assertions as roger-server's tests/test_server.py: the map is a pure function of the base
+    # shapes, so every member derives it identically before anyone trains.
+    assert delta_mod.rank_for(4096, 4096, 16) == 16 and delta_mod.rank_for(1024, 4096, 16) == 8
+    assert delta_mod.rank_for(4096, 4096, 64) == 32                    # cap not binding
+    assert delta_mod.rank_for(2, 2, 16) == 2                           # never exceed the matrix itself
+    assert delta_mod.rank_map({"q": (4096, 4096), "v": (1024, 4096)}, 16) == {"q": 16, "v": 8}
+    print("PASS test_rank_rule_matches_the_server")
 
 
-def test_compat_hash_factors_eq_dense_and_detects_shape():
-    d = _fake_delta(out=6, in_=4)
-    factors_hash = delta_mod.compat_hash(d["weights"])
-    dense_hash   = delta_mod.compat_hash(delta_mod.densify(d))
-    assert factors_hash == dense_hash                       # same base ⇒ same hash either form
-    assert delta_mod.compat_hash(_fake_delta(out=8, in_=4)["weights"]) != factors_hash
-    print("PASS test_compat_hash_factors_eq_dense_and_detects_shape")
+def test_init_a_is_derived_and_seed_dependent():
+    # The frozen A of a cold federation is never transmitted: client and server must derive the same
+    # matrix from (model_id, module, shape), and a different model must not reuse it.
+    a1 = delta_mod.init_A("m", _MOD, 4, 32)
+    assert tuple(a1.shape) == (4, 32) and a1.dtype is torch.float32
+    assert torch.equal(a1, delta_mod.init_A("m", _MOD, 4, 32))
+    assert not torch.equal(a1, delta_mod.init_A("other", _MOD, 4, 32))
+    assert float(a1.abs().max()) <= 1.0 / 32 ** 0.5                    # PEFT's kaiming-uniform bound
+    print("PASS test_init_a_is_derived_and_seed_dependent")
 
 
-def test_bytes_roundtrip():
-    dense = delta_mod.densify(_fake_delta())
-    buf = delta_mod.to_bytes(dense, "tiny")
+def test_compat_hash_reads_both_dims_off_the_factor_pair():
+    f = _factors(out=6, in_=4)
+    assert delta_mod.compat_hash(f) == delta_mod.compat_from_shapes({_MOD: (6, 4)})
+    assert delta_mod.compat_hash(_factors(out=8, in_=4)) != delta_mod.compat_hash(f)
+    print("PASS test_compat_hash_reads_both_dims_off_the_factor_pair")
+
+
+def test_bytes_roundtrip_and_base_stamped_digest():
+    f = _factors()
+    buf = delta_mod.to_bytes(f, "tiny")
     got, meta = delta_mod.from_bytes(buf)
-    assert torch.allclose(got["m"], dense["m"])
-    assert meta["model_id"] == "tiny" and meta["compat"] == delta_mod.compat_hash(dense)
-    print("PASS test_bytes_roundtrip")
+    assert torch.allclose(got[_MOD + delta_mod.LORA_A], f[_MOD + delta_mod.LORA_A])
+    assert meta["model_id"] == "tiny" and meta["compat"] == delta_mod.compat_hash(f)
+    # A one-factor upload pins only one dimension, so the digest must come from the `base` stamp.
+    base = {_MOD: (6, 4)}
+    one = {_MOD + delta_mod.LORA_B: f[_MOD + delta_mod.LORA_B]}
+    stamp = {"base": delta_mod.base_to_json(base), "epoch": "3"}
+    _, meta = delta_mod.from_bytes(delta_mod.to_bytes(one, "tiny", stamp))
+    assert meta["compat"] == delta_mod.compat_from_shapes(base) == delta_mod.compat_hash(f)
+    assert json.loads(meta["base"]) == [[_MOD, [6, 4]]] and meta["epoch"] == "3"
+    print("PASS test_bytes_roundtrip_and_base_stamped_digest")
 
 
 # --- secure aggregation ----------------------------------------------------------------------
@@ -120,198 +141,41 @@ def test_mask_noop_when_alone():
     print("PASS test_mask_noop_when_alone")
 
 
-# --- fold the dense global into the base weights ---------------------------------------------
-
-def test_fold_into_adds_and_skips_mismatch():
-    cfg = LlamaConfig(vocab_size=64, hidden_size=32, intermediate_size=64,
-                      num_hidden_layers=2, num_attention_heads=4, num_key_value_heads=4)
-    model = LlamaForCausalLM(cfg).to(torch.bfloat16)
-    tgt   = "model.layers.0.self_attn.q_proj"
-    other = "model.layers.1.mlp.gate_proj"
-    w0     = model.get_submodule(tgt).weight.detach().clone()
-    other0 = model.get_submodule(other).weight.detach().clone()
-    dW = torch.randn_like(w0)
-    deltas = {f"base_model.model.{tgt}": dW,                       # PEFT-prefixed key (tests _base_key)
-              "base_model.model.model.layers.0.self_attn.v_proj": torch.randn(5, 5)}  # wrong shape → skip
-    n = delta_mod.fold_into(model, deltas)
-    assert n == 1                                                  # only the valid one folded
-    assert torch.allclose(model.get_submodule(tgt).weight.float(), (w0 + dW).float(), atol=1e-2)
-    assert torch.equal(model.get_submodule(other).weight, other0)  # untouched
-    print("PASS test_fold_into_adds_and_skips_mismatch")
+def test_flatten_layout_is_sorted_by_key():
+    # The server locates each factor's slice by laying the keys out in sorted() order; a client that
+    # flattened in dict order would desync every offset in the cohort.
+    tensors = {"z": torch.zeros(2, 2), "a": torch.ones(3, 1)}
+    _, spec = secure_agg.quantize(tensors)
+    assert [k for k, _ in spec] == ["a", "z"]
+    print("PASS test_flatten_layout_is_sorted_by_key")
 
 
-# --- client gating + orchestration (transport monkeypatched) ---------------------------------
-
-def test_is_leeching_and_should_train():
-    assert fed_client.is_leeching({"federations": ["u"], "contribute": False})
-    assert not fed_client.is_leeching({"federations": [], "contribute": False})
-    assert fed_client.should_train({"federations": ["u"], "contribute": True})
-    assert not fed_client.should_train({"federations": ["u"], "contribute": False})
-    assert not fed_client.should_train({"federations": [], "contribute": True})
-    print("PASS test_is_leeching_and_should_train")
-
-
-def test_contribute_delta_uploads(monkeypatch):
-    sent = []
-    monkeypatch.setattr(transport, "federation_status", lambda url, mid: {"mode": "busy"})  # force secure-agg
-    monkeypatch.setattr(transport, "register_and_peers", lambda url, pub, mid: ("rid", "tok", [pub], None))
-    monkeypatch.setattr(transport, "contribute", lambda url, blob: sent.append((url, blob)) or "ok")
-    # An accepted upload reports True so the caller may consume the runs.
-    assert fed_client.contribute_delta(_fake_delta(), {"federations": ["http://x"], "contribute": True}) is True
-    assert len(sent) == 1 and sent[0][0] == "http://x"
-    # leech / no-federation are no-ops, and report False (nothing shared ⇒ keep the runs)
-    assert fed_client.contribute_delta(_fake_delta(), {"federations": ["http://x"], "contribute": False}) is False
-    assert fed_client.contribute_delta(_fake_delta(), {"federations": [], "contribute": True}) is False
-    assert len(sent) == 1
-    # A sub-quorum/unreachable cohort (register returns None) ⇒ no upload, False ⇒ runs preserved.
-    monkeypatch.setattr(transport, "register_and_peers", lambda url, pub, mid: None)
-    assert fed_client.contribute_delta(_fake_delta(), {"federations": ["http://x"], "contribute": True}) is False
-    assert len(sent) == 1
-    # Reachable cohort but the upload itself fails ⇒ False (not accepted).
-    monkeypatch.setattr(transport, "register_and_peers", lambda url, pub, mid: ("rid", "tok", [pub], None))
-    monkeypatch.setattr(transport, "contribute", lambda url, blob: "failed: boom")
-    assert fed_client.contribute_delta(_fake_delta(), {"federations": ["http://x"], "contribute": True}) is False
-    print("PASS test_contribute_delta_uploads")
-
-
-def test_contribute_delta_bootstrap(monkeypatch):
-    # In bootstrap mode the client skips registration entirely and uploads a single UNMASKED dense ΔW
-    # via contribute_dp — the cold-start path. The blob must decode to a finite dense ΔW.
-    dp_sent, registered = [], []
-    monkeypatch.setattr(transport, "federation_status", lambda url, mid: {"mode": "bootstrap"})
-    monkeypatch.setattr(transport, "register_and_peers", lambda url, pub, mid: registered.append(url))
-    monkeypatch.setattr(transport, "contribute_dp", lambda url, blob: dp_sent.append((url, blob)) or "ok")
-    assert fed_client.contribute_delta(_fake_delta(), {"federations": ["http://x"], "contribute": True}) is True
-    assert registered == []                                         # no cohort barrier touched
-    assert len(dp_sent) == 1 and dp_sent[0][0] == "http://x"
-    tensors, meta = delta_mod.from_bytes(dp_sent[0][1])
-    assert meta["model_id"] == "tiny" and torch.isfinite(tensors["m"]).all()
-    # A failed DP upload ⇒ False (runs preserved).
-    monkeypatch.setattr(transport, "contribute_dp", lambda url, blob: "failed: boom")
-    assert fed_client.contribute_delta(_fake_delta(), {"federations": ["http://x"], "contribute": True}) is False
-    print("PASS test_contribute_delta_bootstrap")
-
-
-def test_unsupported_model_skipped_and_reported(monkeypatch):
-    # A federation whose allowlist excludes the model reports "unsupported": contribute_delta must NOT
-    # upload (no register, no contribute_dp), and unsupported_urls must flag it so the CLI warns.
-    dp_sent, registered = [], []
-    cfg = {"federations": ["http://x", "http://y"], "contribute": True, "model_id": "tiny"}
-    statuses = {"http://x": {"mode": "unsupported"}, "http://y": {"mode": "bootstrap"}}
-    monkeypatch.setattr(transport, "federation_status", lambda url, mid: statuses[url])
-    monkeypatch.setattr(transport, "register_and_peers", lambda url, pub, mid: registered.append(url))
-    monkeypatch.setattr(transport, "contribute_dp", lambda url, blob: dp_sent.append(url) or "ok")
-    assert fed_client.contribute_delta(_fake_delta(), cfg) is True   # the supported fed still took it
-    assert registered == [] and dp_sent == ["http://y"]             # x skipped, no upload attempted
-    assert fed_client.unsupported_urls(fed_client.probe_federations(cfg)) == ["http://x"]
-    # All feds unsupported ⇒ nothing uploaded, every fed flagged (CLI skips training, keeps runs).
-    monkeypatch.setattr(transport, "federation_status", lambda url, mid: {"mode": "unsupported"})
-    assert fed_client.contribute_delta(_fake_delta(), cfg) is False
-    assert fed_client.unsupported_urls(fed_client.probe_federations(cfg)) == ["http://x", "http://y"]
-    print("PASS test_unsupported_model_skipped_and_reported")
-
-
-def test_outdated_client_skipped_and_reported(monkeypatch):
-    # A federation whose min_client exceeds this build must be skipped exactly like an unsupported model:
-    # contribute_delta uploads nothing there, outdated_urls flags it, and a merely-higher latest_client
-    # is advisory-only (surfaced by newest_client, never blocks). A future min_client is set relative to
-    # the live CLIENT_VERSION so the test tracks version bumps.
-    from roger.federated import CLIENT_VERSION
-    dp_sent, registered = [], []
-    cfg = {"federations": ["http://old", "http://ok"], "contribute": True, "model_id": "tiny"}
-    statuses = {"http://old": {"mode": "bootstrap", "min_client": CLIENT_VERSION + 1},
-                "http://ok":  {"mode": "bootstrap", "latest_client": CLIENT_VERSION + 1}}
-    monkeypatch.setattr(transport, "federation_status", lambda url, mid: statuses[url])
-    monkeypatch.setattr(transport, "register_and_peers", lambda url, pub, mid: registered.append(url))
-    monkeypatch.setattr(transport, "contribute_dp", lambda url, blob: dp_sent.append(url) or "ok")
-    assert fed_client.contribute_delta(_fake_delta(), cfg) is True   # the compatible fed still took it
-    assert registered == [] and dp_sent == ["http://ok"]           # the too-new fed is skipped
-    probed = fed_client.probe_federations(cfg)
-    assert fed_client.outdated_urls(probed) == ["http://old"]
-    assert fed_client.unsupported_urls(probed) == []               # min_client mismatch != unsupported
-    assert fed_client.newest_client(probed) == CLIENT_VERSION + 1  # advisory notice fires
-    # An unreachable / pre-version server ({}) is never mistaken for outdated (fail-soft, no false block).
-    monkeypatch.setattr(transport, "federation_status", lambda url, mid: {})
-    empty = fed_client.probe_federations(cfg)
-    assert fed_client.outdated_urls(empty) == [] and fed_client.newest_client(empty) == 0
-    print("PASS test_outdated_client_skipped_and_reported")
-
-
-def test_maybe_daily_pull_persists_blob(tmp_path, monkeypatch):
-    monkeypatch.setattr(transport, "_state_path", lambda url, model_id="": str(tmp_path / "fed.json"))
-    saved = []
-    monkeypatch.setattr(transport, "pull", lambda url, cur, mid: (b"blob", "c1"))
-    monkeypatch.setattr(transport, "save_global", lambda url, blob: saved.append(blob))
-    cfg = {"federations": ["http://x"], "model_id": "tiny"}
-    assert fed_client.maybe_daily_pull(cfg) is True       # fetched + persisted
-    assert saved == [b"blob"]
-    assert fed_client.maybe_daily_pull(cfg) is False       # same UTC day ⇒ no re-pull
-    assert saved == [b"blob"]
-    print("PASS test_maybe_daily_pull_persists_blob")
-
-
-def test_pending_globals_sums_federations(monkeypatch):
-    d1 = delta_mod.densify(_fake_delta(seed=1))
-    d2 = delta_mod.densify(_fake_delta(seed=2))
-    blobs = {"http://a": delta_mod.to_bytes(d1, "tiny"), "http://b": delta_mod.to_bytes(d2, "tiny")}
-    monkeypatch.setattr(transport, "load_global", lambda url: blobs.get(url))
-    out = fed_client.pending_globals({"federations": ["http://a", "http://b"]})
-    assert torch.allclose(out["m"], d1["m"] + d2["m"], atol=1e-5)
-    monkeypatch.setattr(transport, "load_global", lambda url: None)
-    assert fed_client.pending_globals({"federations": ["http://a"]}) is None   # none persisted
-    assert fed_client.pending_globals({"federations": []}) is None             # no federation
-    print("PASS test_pending_globals_sums_federations")
-
-
-# --- trainer adapter: single fresh adapter, ΔW extractable -----------------------------------
-
-def test_attach_single_adapter_and_extract():
-    """One fresh LoRA adapter (no global/inference adapter); B=0 ⇒ ΔW starts at 0; a step makes it
-    non-trivial. The folded global lives in the base weights, not in an adapter."""
-    from roger.training import lora_utils
-    cfg = LlamaConfig(vocab_size=64, hidden_size=32, intermediate_size=64,
-                      num_hidden_layers=2, num_attention_heads=4, num_key_value_heads=4)
-    model = lora_utils.attach_lora(LlamaForCausalLM(cfg), targets="all-linear")
-    assert len(model.peft_config) == 1                                  # exactly one adapter
-    trainable = [n for n, p in model.named_parameters() if p.requires_grad]
-    assert trainable and all("lora_" in n for n in trainable)           # only LoRA factors train
-
-    sd0 = lora_utils.local_state_dict(model)
-    d0 = delta_mod.densify({"weights": sd0, "scaling": 2.0, "model_id": "tiny"})
-    assert all(float(v.abs().sum()) == 0.0 for v in d0.values())        # B=0 ⇒ ΔW=0
-
-    model.train()
-    model(input_ids=torch.randint(0, 64, (1, 8)), labels=torch.randint(0, 64, (1, 8))).loss.backward()
-    for p in (p for p in model.parameters() if p.requires_grad):
-        if p.grad is not None:
-            p.data -= 0.1 * p.grad
-    d1 = delta_mod.densify({"weights": lora_utils.local_state_dict(model), "scaling": 2.0, "model_id": "tiny"})
-    assert any(float(v.abs().sum()) > 0.0 for v in d1.values())
-    print("PASS test_attach_single_adapter_and_extract")
-
+# --- the shared LoRA basis -------------------------------------------------------------------
 
 def test_federation_basis_is_q_v():
-    """The federation basis is fixed to q/v (the secure-agg dense basis every member must share). It is
-    NOT all-linear: the server stages+sums dense ΔW, so a broad target set blows up per-round I/O."""
+    """The federation basis is fixed to q/v (the secure-agg layout every member must share). It is NOT
+    all-linear: the server stages + sums each factor, so a broad target set blows up per-round I/O."""
     from roger.training import lora_utils
     assert lora_utils.FED_TARGETS == ["q_proj", "v_proj"]
     cfg = LlamaConfig(vocab_size=64, hidden_size=32, intermediate_size=64,
                       num_hidden_layers=2, num_attention_heads=4, num_key_value_heads=4)
     model = lora_utils.attach_lora(LlamaForCausalLM(cfg), targets=lora_utils.FED_TARGETS)
-    wrapped = {n.rsplit(".lora_", 1)[0].rsplit(".", 1)[-1]
-               for n, p in model.named_parameters() if p.requires_grad and ".lora_" in n}
+    assert len(model.peft_config) == 1                                  # exactly one adapter
+    trainable = [n for n, p in model.named_parameters() if p.requires_grad]
+    assert trainable and all("lora_" in n for n in trainable)           # only LoRA factors train
+    wrapped = {n.rsplit(".lora_", 1)[0].rsplit(".", 1)[-1] for n in trainable}
     assert wrapped == {"q_proj", "v_proj"}     # only q/v, never k/o/mlp/lm_head
     print("PASS test_federation_basis_is_q_v")
 
 
 if __name__ == "__main__":
-    test_densify_matches_factors()
-    test_densify_factor_noise()
-    test_compat_hash_factors_eq_dense_and_detects_shape()
-    test_bytes_roundtrip()
+    test_phase_alternates_and_epoch_zero_trains_b()
+    test_rank_rule_matches_the_server()
+    test_init_a_is_derived_and_seed_dependent()
+    test_compat_hash_reads_both_dims_off_the_factor_pair()
+    test_bytes_roundtrip_and_base_stamped_digest()
     test_quantize_dequantize_roundtrip()
     test_mask_cancellation()
     test_mask_noop_when_alone()
-    test_fold_into_adds_and_skips_mismatch()
-    test_is_leeching_and_should_train()
+    test_flatten_layout_is_sorted_by_key()
     test_federation_basis_is_q_v()
