@@ -36,9 +36,21 @@
   every launch rebuilds a LoRA adapter from disk — GGUF (`--lora`, alpha=0 ⇒ scale 1, arch/shapes from the
   base gguf header, llama q-row permute) or PEFT dir (vllm `--enable-lora --lora-modules roger=… --max-lora-rank`,
   proxy rewrites chat requests' `model` to `roger`). Torch-free. It expects the broadcast in **LoRA-factor
-  form** (contract in `federated/delta.py` docstring); the server still broadcasts dense ΔW, which is
-  reported and not attached until `roger-server` re-factors. Deferred: local optimisation over
-  `messages/`, deleting obsolete (prefix-superseded) exchange files.
+  form** (contract in `federated/delta.py` docstring), which `roger-server` now serves. **Automatic
+  training round** (`runtime/train.py` gate, `training/wire_trainer.py` torch half): after the runtime exits
+  (VRAM free), once ≥ `train_every` graded conversations for the served model exist (newest capture file of
+  each chat, deduped by prefix; captures carry `served_model`), it trains in the foreground (Ctrl-C skips) on
+  the model loaded *without download* — llama-server's GGUF via transformers `gguf_file=` (gemma-4 needs a
+  transformers with the gemma4 GGUF processor: on main, not in 5.17.0), vllm's HF cache `local_files_only` —
+  and uploads to exactly ONE federation (first in `federations` order that trains the model; only its global is
+  attached for training, at scale 1 — while inference attaches all globals concatenated, each at 1/N); accepted ⇒ the conversation files (+ superseded prefixes) are
+  deleted. **Factor contract (RoLoRA, mirrors roger-server):** each epoch trains one factor (`/status`
+  `phase`) against the other frozen; the trained adapter IS the global (or derived `init_A`, B=0 cold),
+  per-module rank `delta.rank_for`, canonical module keys `base_model.model.model.layers.N…` (text decoder
+  only), upload = the phase factor's Δ stamped `base`/`epoch` (`client.contribute_factor`: masked, or
+  DP-noised on the factor in bootstrap), `secure_agg.SCALE` = 2²². Episodes: chat template re-rendered, each
+  assistant turn located by a prefix probe; return = mean(self_eval scores) + mean(self_eval reactions) + Σ tool_signals; old log-probs
+  recomputed (no-grad) since the wire has none. The legacy dense `contribute_delta` no longer matches the server.
 - **Self-evaluation over the wire (`runtime/grader.py`).** The reward source is the model's own
   end-of-session grade, as in the legacy `_GRADE_SEED` → forced `_grade()`. The wrapper chains
   exchanges into conversations by message-prefix (in-memory registry, `grader.track`; every request
@@ -49,7 +61,12 @@
   assistant message holding the seed (prefill), `response_format` json_schema with properties ordered
   `reasoning` then `scores` (= reason-then-force over the API), no `tools`. Per-metric scores
   (`METRICS`: efficiency/accuracy/completeness, each clamped to [-1,1]) are persisted as `self_eval`
-  on the conversation's newest file; **no aggregate is stored** — the optimiser averages. One generic
+  on the conversation's newest file; **no aggregate is stored** — the optimiser averages. The same call
+  also classifies the **user's reactions** (the wire's stand-in for the legacy `/grade` 10% rule, since
+  roger can't prompt inside a third-party client): each assistant message the user directly answered is
+  quoted in the seed (`REACTION_SEED`, snippet of the answer) and forced as a `reactions.reply_N` property
+  after `scores`, judged from the user's words only; stored as `self_eval.reactions` {message index:
+  [-1,1]} (same keys as `tool_signals`). No answered replies ⇒ exactly the old SEED/SCHEMA. One generic
   fallback: a 4xx (alternation-strict templates reject two assistant messages) retries once with the
   seed appended to the last reply. Failures land as `self_eval.error`, never retried. Because of the
   Ctrl-C ordering the runtime child runs in its **own process group** (`start_new_session` /
@@ -143,7 +160,8 @@
                 `notice` (runtime `/v1/models` → federation `/status` supported-model verdicts on stderr),
                 `adapter` (daily global pull → LoRA adapter written + attached via `dialect.RUNTIMES`),
                 `grader` (prefix-chain conversation registry, idle/shutdown self-eval call, `self_eval`),
-                `signals` (exit-code/error step rewards from tool results → `tool_signals`)
+                `signals` (exit-code/error step rewards from tool results → `tool_signals`),
+                `train` (post-exit training gate: ready conversations, one federation, upload, delete)
 - `apps/`     — legacy CLI (`cli`, reached only via `roger train`), config, Rich/prompt_toolkit UI
 - `loading/`  — model loading + VRAM-aware quantization tier selection (`model_setup`),
                 rollback sliding-window KV cache (`rollback_cache`)
@@ -151,7 +169,8 @@
                 (`std_tools`, `shell_tools`, `mcp_utils`, `command_policy.txt`)
 - `training/` — RL machinery: reward shaping, trajectory recording, LoRA adapter + REINFORCE++
                 trainer, train-time PII anonymizer
-                (`reward_utils`, `recording`, `lora_utils`, `trainer`, `privacy_filter`)
+                (`reward_utils`, `recording`, `lora_utils`, `trainer`, `privacy_filter`; `wire_trainer` =
+                the wrapper's round over captured chats)
 - `skills/`   — bundled default skills shipped as package-data (`ipynb`, `skill-creator`,
                 `git-workflow`, `code`, `lean`); read in place as the lowest-priority `discover_skills` base
 - `federated/`— gradient-sharing client: `delta` (densify ΔW [+ optional factor-space DP noise] +
@@ -165,7 +184,7 @@
                 `secure_agg` additionally carries the server-only `dequantize` half).
 - `envs/`     — not created yet (concrete shell/browser/code environments are future work)
 - `tests/`    — `test_rewards.py`, `test_trainer.py`, `test_grade.py`, `test_privacy_filter.py`,
-                `test_mcp.py`, `test_multimodal.py`, `test_federated.py`, `test_runtime.py`
+                `test_mcp.py`, `test_multimodal.py`, `test_federated.py`, `test_runtime.py`, `test_wire_training.py`
 
 Runtime artifacts all live under the global `~/.roger/` (never in the project): `config.json`,
 global `memory/memory.md` + per-project `memory/<dashed-abspath>.md`, `messages/<runtime>/` (wrapper
