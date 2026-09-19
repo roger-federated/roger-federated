@@ -31,7 +31,7 @@ When a user calls `/contribute` to upload a gradient update, the following proto
 - Client protocol version (an integer)
 - `model_id`: identifier of the base model the update applies to
 - Round identifier
-- Masked ΔW share: a cryptographic secret-share of the user's local gradient update, produced via secure multi-party computation (Bonawitz-style X25519 key exchange and SHAKE-based pairwise masking)
+- Masked gradient share: a cryptographic secret-share of the user's local gradient update (one LoRA factor of it), produced via secure multi-party computation (Bonawitz-style X25519 key exchange and SHAKE-based pairwise masking)
 
 ### What Is Explicitly Not Collected (best effort)
 - Raw conversation or session content from the user's machine
@@ -71,7 +71,7 @@ The default federation server is hosted in Scaleway's Amsterdam data center (nl-
 
 The following technical safeguards protect the data processed by the federation server:
 
-- **Secure aggregation:** Individual masked ΔW contributions are cryptographically secret-shared via Bonawitz-style secure aggregation (X25519 key exchange + SHAKE-based pairwise masking). The server cannot decrypt an individual contribution; only the cryptographically combined aggregate of contributions from a cohort is decrypted and processed.
+- **Secure aggregation:** Individual masked contributions are cryptographically secret-shared via Bonawitz-style secure aggregation (X25519 key exchange + SHAKE-based pairwise masking). The server cannot decrypt an individual contribution; only the cryptographically combined aggregate of contributions from a cohort is decrypted and processed.
 - **Cohort minimums:** A round is aggregated only if at least k_min contributors (typically 3 or higher) have participated. No round is aggregated from a single contributor or a sub-threshold cohort, preventing trivial attribution of updates to individuals.
 - **Client-side privacy filter:** Before any local gradient is computed, a client-side privacy filter anonymizes personally identifiable information in the user's session data by swapping it for consistent surrogate values at the token level. This runs entirely on the user's machine, before any network call, reducing the amount of PII that reaches the training process.
 - **Cold-start differential privacy:** During the bootstrap phase before sufficient contributors are online for full secure aggregation, updates are processed through a differential-privacy-style noised mechanism rather than unprotected secure aggregation.

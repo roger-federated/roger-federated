@@ -55,7 +55,8 @@ def ready(convs: list[dict]) -> list[dict]:
 
 
 def discard(convs: list[dict]) -> None:
-    """Delete trained conversations, earlier prefix files included (consume-once, like the legacy runs)."""
+    """Delete trained conversations, earlier prefix files included: the round is on-policy, so data is
+    consumed once and never trained on again."""
     for c in convs:
         for p in [c["path"], *c["superseded"]]:
             try:

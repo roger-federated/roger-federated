@@ -1,15 +1,14 @@
 """grader.py — the model's own end-of-session self-evaluation, injected over the wire.
 
-The later optimisation step needs a reward per conversation. Roger gets it the way the legacy harness
-did (rollout_utils._GRADE_SEED → forced `_grade(score)`): once a conversation has gone idle, the
-runtime is asked — through its own chat API, never via the relay, so nothing is recorded as a chat —
+The later optimisation step needs a reward per conversation, and the only judge available is the model
+itself: once a conversation has gone idle, the runtime is asked — through its own chat API, never via the relay, so nothing is recorded as a chat —
 to continue an assistant message that starts with a self-grading seed. A JSON schema whose properties
 are ordered `reasoning` then `scores` is the wire form of "reason-then-force": the model reasons in
 free text, then the grammar forces one number per metric. Only the per-metric scores are stored;
 averaging them into a reward is the optimiser's job.
 
-The same call also reads the user's reactions — the wire's stand-in for the legacy `/grade` override,
-since roger can't prompt the user inside a third-party client. Every assistant reply the user answered
+The same call also reads the user's reactions — the only human signal available, since roger can't
+prompt the user inside a third-party client. Every assistant reply the user answered
 gets one number, judged from the user's own words (a correction, a repeated request, a thank-you), not
 from the model's opinion of its reply — so it stays a human signal. Each answered reply is named in the
 seed with a snippet of the user's answer and forced as its own schema property, so the grammar can't
@@ -27,7 +26,6 @@ from roger.runtime import capture
 METRICS = {"efficiency": "how directly I reached the goal, with very few wasted, wrong or redundant steps",
            "accuracy": "how correct the result is",
            "completeness": "how fully the result covers what was asked"}
-# Adapted from the legacy rollout_utils._GRADE_SEED; not imported because that module pulls in torch.
 SEED = ("Let me honestly grade how well I completed the task in this conversation, one score per "
         "criterion — " + "; ".join(f"{m}: {d}" for m, d in METRICS.items()) + ". For each: 1 for a "
         "clean, fully-correct solve, around 0 for partial or clumsy, negative if I largely failed.")
@@ -82,7 +80,7 @@ def track(registry: list, path: str, record: dict) -> None:
     reply) is a prefix of the next request in the same chat."""
     reply = _reply(record)
     if not str(record.get("endpoint", "")).endswith("/chat/completions") or reply is None:
-        return                                            # legacy completions / responses: no message list to prefill
+        return                                            # /completions or responses: no message list to prefill
     req_key = _key(record["request"].get("messages") or [])
     transcript = req_key + [("assistant", _text(reply.get("content")))]
     with _LOCK:

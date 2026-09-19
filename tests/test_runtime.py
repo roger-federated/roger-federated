@@ -267,7 +267,7 @@ def test_non_stream_captured_verbatim_and_errors_skipped(stack):
 # signals: exit-code / error rewards from the tool results in the history
 # ---------------------------------------------------------------------------
 
-def test_signal_score_reads_legacy_and_third_party_formats():
+def test_signal_score_reads_the_common_exit_code_formats():
     assert signals.score("exit 0\nok") == 0.0 and signals.score("Exit code: 0\nall good") == 0.0
     assert signals.score("Wrote 42 bytes to foo.txt") == 0.0
     for failing in ("exit 1\nfailed", "Exit code: 2", "exit status 127", "Process exited with code 1",

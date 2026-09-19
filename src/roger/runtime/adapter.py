@@ -1,7 +1,7 @@
 """adapter.py — bring the federation's global update to the model the runtime serves.
 
-Under the wrapper the model is loaded by llama-server / vllm, not by roger, so the legacy in-RAM fold
-(federated/delta.fold_into) has nowhere to run. Instead, at launch and before the runtime is spawned:
+The model is loaded by llama-server / vllm, not by roger, so the update can only reach it as an
+*adapter* — roger never touches weights. At launch, before the runtime is spawned:
 once per UTC day each federation's cumulative global is pulled for the model the command line names and
 persisted (federated/transport), and at *every* launch the persisted global is materialised as a LoRA
 adapter in the runtime's own format — a GGUF adapter for llama-server, a PEFT directory for vllm —
@@ -9,9 +9,9 @@ which runtime/dialect.py writes and attaches with the runtime's flag. The model 
 touched and no model copy is ever stored: the adapter *is* the update, and the runtime applies it at load.
 
 The global is expected in LoRA-factor form (the contract in federated/delta.py: `<module>.lora_A.weight`
-[r, in], `<module>.lora_B.weight` [out, r], metadata `scaling`) — the server re-factors it before
-broadcasting. A dense global (the earlier contract) can't be attached as an adapter and is reported,
-not applied.
+[r, in], `<module>.lora_B.weight` [out, r], metadata `scaling`). A blob without factor keys — a global
+persisted by an older client, from before the server switched — can't be attached as an adapter, so it
+is reported rather than applied.
 
 Torch-free on purpose: the wrapper must start in well under a second (numpy + safetensors + gguf only).
 Everything fails soft to "no adapter this launch" with one stderr line — a federation hiccup must never

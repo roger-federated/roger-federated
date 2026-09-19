@@ -26,10 +26,12 @@
   it trains that model, and if not which it accepts (server advertises its allowlist as `models`, null =
   any); runtime ids (gguf paths, aliases) are matched to accepted `org/name` ids by normalised [a-z0-9]
   containment of `name`, longest wins. Fail-soft silent when a federation is unreachable; also carries the
-  legacy startup verdicts (outdated client / update available / leech). `transport._base` defaults a
-  scheme-less federation URL (the shipped default is a bare host) to https. Console script = `runtime/wrapper.py:main`; **bare `roger` prints
-  usage**, `roger train` delegates to the legacy `apps/cli.py` (which is otherwise obsolete and slated
-  for removal, as is the rest of the in-process harness below). **Daily pull + adapter**
+  version verdicts (outdated client / update available) and the "contribute is off" nudge. `notice.privacy_notice`
+  is the one-time transparency notice (sentinel `~/.roger/privacy_ack`, printed from `adapter.prepare`
+  right before the day's pull = this client's first federation contact; the obligation `CLIENT_VERSION`
+  2 was bumped to force-adopt). `transport._base` defaults a scheme-less federation URL (the shipped
+  default is a bare host) to https. Console script = `runtime/wrapper.py:main`; **bare `roger` prints
+  usage** and that is the only non-runtime invocation. **Daily pull + adapter**
   (`runtime/adapter.py`, before the child spawns): the model named on argv (`dialect.RUNTIMES` table:
   llama-server `-m`, vllm `serve <id>`/`--model`) is resolved against `/status` `models`, the global is
   pulled on the first launch of the UTC day (state + blob keyed per federation *and* served model), and
@@ -50,62 +52,61 @@
   only), upload = the phase factor's Δ stamped `base`/`epoch` (`client.contribute_factor`: masked, or
   DP-noised on the factor in bootstrap), `secure_agg.SCALE` = 2²². Episodes: chat template re-rendered, each
   assistant turn located by a prefix probe; return = mean(self_eval scores) + mean(self_eval reactions) + Σ tool_signals; old log-probs
-  recomputed (no-grad) since the wire has none. The legacy dense `contribute_delta` no longer matches the server.
+  recomputed (no-grad) since the wire has none.
 - **Self-evaluation over the wire (`runtime/grader.py`).** The reward source is the model's own
-  end-of-session grade, as in the legacy `_GRADE_SEED` → forced `_grade()`. The wrapper chains
+  end-of-session grade (a reason-then-force prefill: let it reason, then force the schema). The wrapper chains
   exchanges into conversations by message-prefix (in-memory registry, `grader.track`; every request
   carries the full history, so the previous exchange's transcript is a prefix of the next). Once a
   conversation is idle `IDLE_S` (5 min) — or at Ctrl-C, before the runtime is stopped — one eval call
   goes to the **backend port directly** (never relayed, never captured; under the relay's
   `request_model` when set, so a vllm adapter grades its own work): the transcript + a final
   assistant message holding the seed (prefill), `response_format` json_schema with properties ordered
-  `reasoning` then `scores` (= reason-then-force over the API), no `tools`. Per-metric scores
+  `reasoning` then `scores` (reason-then-force, over the API this time), no `tools`. Per-metric scores
   (`METRICS`: efficiency/accuracy/completeness, each clamped to [-1,1]) are persisted as `self_eval`
   on the conversation's newest file; **no aggregate is stored** — the optimiser averages. The same call
-  also classifies the **user's reactions** (the wire's stand-in for the legacy `/grade` 10% rule, since
-  roger can't prompt inside a third-party client): each assistant message the user directly answered is
+  also classifies the **user's reactions** — the wire's only human signal, since roger can't prompt
+  inside a third-party client: each assistant message the user directly answered is
   quoted in the seed (`REACTION_SEED`, snippet of the answer) and forced as a `reactions.reply_N` property
   after `scores`, judged from the user's words only; stored as `self_eval.reactions` {message index:
-  [-1,1]} (same keys as `tool_signals`). No answered replies ⇒ exactly the old SEED/SCHEMA. One generic
+  [-1,1]} (same keys as `tool_signals`). No answered replies ⇒ the bare SEED/SCHEMA. One generic
   fallback: a 4xx (alternation-strict templates reject two assistant messages) retries once with the
   seed appended to the last reply. Failures land as `self_eval.error`, never retried. Because of the
   Ctrl-C ordering the runtime child runs in its **own process group** (`start_new_session` /
   `CREATE_NEW_PROCESS_GROUP`) and gets the interrupt from roger after grading; a second Ctrl-C skips.
-- **Tool-result signals over the wire (`runtime/signals.py`).** The legacy `auto_signal` step reward,
-  ported: the client harness runs the tools, so `capture` scores the `role: "tool"` / `function_call_output`
+- **Tool-result signals over the wire (`runtime/signals.py`).** The verifiable per-step reward: the
+  client runs the tools, so `capture` scores the `role: "tool"` / `function_call_output`
   items in each request's history (nonzero exit code in any common phrasing, error strings, "Command
-  rejected by user"; legacy weights) and stores `tool_signals` = {assistant-turn index: clamped sum}, nonzero
+  rejected by user") and stores `tool_signals` = {assistant-turn index: clamped sum}, nonzero
   steps only, on every file — the conversation's newest file therefore holds them all, next to `self_eval`.
-- Working semi-basic agent: rollout loop, tool use, reasoning, MCP connections, standard
-  tools, deferred tool loading, auto-triggered RAG, skills + instruction files, `@path`
-  references, persistent memory, web search/fetch, sub-agent spawning, and a CLI app (`roger`).
-- Perpetual standing tasks (`/perpetual <task>`): at the done-boundary the rollout re-seeds a varied
-  (randomly-rotated, comprehensive) think-channel continuation nudge instead of yielding to the user,
-  grading+checkpointing each iteration into the one session trajectory; `prompt_user` is grammar-
-  suppressed and the max-steps check-in bypassed so the agent can't yield. A graceful **Ctrl-C**
-  (SIGINT → stop flag → `StoppingCriteria`) is the only stop and works for every rollout (wraps up at
-  the next boundary, back to the prompt). Seeds share a "reason-then-force" helper (open think, let
-  the model close its own thought, then force the mandatory call) also used by the grade/memory nudges.
-- LoRA REINFORCE++ trainer is built and wired (`training/trainer.py`, `lora_utils.py`); train-time
-  PII anonymisation via `privacy_filter.py`. Gated Ctrl-D auto-train + `roger train` subcommand.
-  `/grade` user override of `finish()` self-eval score + 10%-user-graded training gate.
-- Federated gradient-sharing **client** is built (`federated/`): a training round trains a single
-  fresh LoRA adapter on the **fixed federation basis q_proj/v_proj** (`lora_utils.FED_TARGETS`, NOT
-  all-linear — it is the shared secure-agg dense basis, so it bounds the server's per-round work),
-  exports its weight-space ΔW (=scaling·B@A) — never applied/saved locally —
-  densifies + masks it with Bonawitz secure aggregation (X25519 EC-DH), and uploads per federation.
-  The server broadcasts the **full cumulative dense global** ΔW; the client pulls it daily, persists
-  the blob under `~/.roger/federated/`, and **folds it into the base in bf16 at load, then bnb-quantizes
-  to GPU** (`delta.fold_into` + `model_setup.fetch_model(weight_deltas=…)`) — the HF cache is untouched
-  and no model is ever stored. Config: `contribute`/`federations` (the ΔW L2 clip is a fixed
-  best-effort client constant, not user config — authoritative norm-bounding is server-side). Leech
-  mode (config'd-in but not contributing) is nudged, not blocked.
+- **The in-process harness is gone (2026-09).** `agency/` (rollout loop, tools, reasoning, MCP, RAG,
+  skills, `@path`, memory, subagents, `/perpetual`), `apps/` (the Rich/prompt_toolkit REPL CLI), `tools/`,
+  `loading/` (the VRAM-aware loader + rollback KV cache) and `skills/` were removed along with the
+  `roger train` subcommand that was their last entry point. Don't look for them, and don't reintroduce a
+  tool set or an agent loop: the user's client owns both, and everything roger needs arrives on the wire.
+  What survived the move out of those packages: `paths.state_dir` (was `agency/path_utils`), `config`
+  (was `apps/config`), the REINFORCE++ core in `training/trainer.py` (the run-dir plumbing, the
+  10%-user-graded gate and `discard_runs` went with the runs they read), and the privacy notice (was
+  `cli._ensure_privacy_notice`, now `notice.privacy_notice`). Git history has the rest if it is ever needed.
+- LoRA REINFORCE++ is `training/trainer.py` (advantages, PII anonymisation, the teacher-forced log-prob
+  pass, the clipped step) driven by `training/wire_trainer.py` (the round over captured chats); train-time
+  PII anonymisation via `privacy_filter.py`, which now loads its detector straight from transformers.
+- Federated gradient-sharing **client** (`federated/`): a round trains the federation's own global
+  adapter on the **fixed basis q_proj/v_proj** (`lora_utils.FED_TARGETS`, NOT all-linear — it is the
+  shared secure-agg layout, so it bounds the server's per-round work) and uploads ONE factor's Δ,
+  masked with Bonawitz secure aggregation (X25519 EC-DH), to ONE federation (`client.contribute_factor`;
+  it is the only entry point left). The server broadcasts the cumulative global in **LoRA-factor form**;
+  the client pulls it daily and persists the blob under `~/.roger/federated/` (`transport`, keyed per
+  federation *and* served model), and `runtime/adapter.py` — torch-free — rebuilds it as the runtime's
+  own adapter. Nothing is ever folded into weights and no model copy is stored. Config: `contribute` /
+  `federations` / `train_every` (the L2 clip is a fixed best-effort client constant, not user config —
+  authoritative norm-bounding is server-side). Leech mode (config'd-in but not contributing) is nudged,
+  not blocked.
 - The federated aggregation **server now lives in a separate repo** (`roger-server`,
   github.com/roger-federated/roger-server; package `roger_server`, run `python -m roger_server`). It is
   wire-compatible with this client purely over HTTP: it seals secure-agg cohorts, streams + sums the
-  masked uploads one module at a time (masks cancel), folds η·mean(ΔW) into a per-model cumulative dense
-  global, and broadcasts it; default deploy is a scale-to-zero container with the global in S3. The
-  secure-aggregation + ΔW wire format is a **contract shared by hand across the two repos**:
+  masked uploads one factor at a time (masks cancel), folds η·mean(Δ) into a per-model cumulative global
+  LoRA adapter, and broadcasts it; default deploy is a scale-to-zero container with the global in S3. The
+  secure-aggregation + factor wire format is a **contract shared by hand across the two repos**:
   `federated/secure_agg.py` (SCALE/R/quantize/mask; `dequantize` is server-only and lives over there) and
   `federated/delta.py` here mirror `roger_server/secure_agg.py` + `roger_server/delta.py`. Any change to
   the quantization, the sorted-key flatten layout, the safetensors metadata keys, or an endpoint shape
@@ -113,20 +114,21 @@
 - **Cold-start fix — DP-noised async bootstrap.** A sparse federation can't seal cohorts (needs k_min
   registrants in one ~20s window), so per model the server advertises a mode at `GET /status`: while
   sparse it serves `bootstrap` and clients skip the cohort entirely, uploading ONE **faux-DP-noised,
-  unmasked** dense ΔW to `POST /contribute_dp` that the server folds (k=1, `dp_fold`, same per-module stream).
-  Noise is injected in **LoRA-factor space before densifying** (`delta._dp_noise`, per-factor
-  σ=z·rms; client `DP_Z`) — the rank-r signal subspace, far less SNR loss than noising the dense matrix.
-  It's *faux*-DP: fixed σ, no accountant, and B@A is bilinear so not a formal Gaussian mechanism —
+  unmasked** factor Δ to `POST /contribute_dp` that the server folds (k=1, `dp_fold`, same per-factor stream).
+  Noise goes straight on the trained factor (σ=z·rms(Δ); client `DP_Z` in `client.contribute_factor`) —
+  under the factor contract the frozen factor is public and Δ ↦ Δ·A is linear, so the weight-space noise
+  is exactly Gaussian, unlike the old dense scheme. It's still *faux*-DP: fixed σ, no accountant —
   obfuscation against an honest-but-curious server, sound only because it's temporary. Once
   `busy_threshold` distinct contributors appear within `busy_window`, the model flips to **busy** mode
-  (secure-agg only, no DP); quorum raised to **k_min=3 / k_target=5**. Client picks the path per
-  federation in `contribute_delta`; no new client config. (Mode is "bootstrap"/"busy" — "busy" rather
+  (secure-agg only, no DP); quorum raised to **k_min=3 / k_target=5**. `contribute_factor` takes the mode
+  its caller read off `/status`; no client config. (Mode is "bootstrap"/"busy" — "busy" rather
   than "dense" to avoid clashing with the dense-matrix sense of ΔW.) `GET /status` also returns a third
   mode, **"unsupported"**, when the server's allowlist (`ROGER_AGG_MODELS`) excludes the model (plus
   `models` = the allowlist itself, null when any model is accepted — part of the shared wire contract): the
-  client then skips that federation and the CLI warns the user (at startup before a session's gradient is
-  wasted, and again at quit, where it skips training but KEEPS the recorded runs). `federation_mode`
-  fail-soft-defaults to "busy", so an unreachable server is never mistaken for an unsupported model.
+  client skips that federation, `notice.announce` says so once the runtime is up (before a session's chats
+  are wasted) and `train._federation` passes it over at training time, naming it with its reason and
+  keeping its conversations. Every `mode` read fail-soft-defaults to "busy", so an unreachable server is
+  never mistaken for an unsupported model.
 - NOT yet built (see `readme.md` TODO + the federated-server-roadmap memory): the **server-side**
   roadmap — Shamir/double-mask dropout recovery (needs a client protocol change too; multi-round is
   intrinsic), central ground-truth-gradient anti-poison gate — now lives in the `roger-server` repo.
@@ -137,77 +139,70 @@
 - RL algorithm = **REINFORCE++**, not GRPO. Flat episode return broadcast over all generated
   tokens; batch-mean baseline; no KL term (LoRA already bounds drift); no env reset / no
   grouping of comparable rollouts (deliberately avoided — infeasible across federated users).
-- **No state-embedding injection.** Observations / `get_state` are plain *text* tool results.
-  Injected `state_embeds` have no token IDs, so their log-probs can't be recomputed during
-  the policy-gradient update — text is the model's native, RL-safe interface.
-- Rewards = implicit user signals + verifiable signals via `auto_signal` (nonzero exit codes,
-  error strings, rejections), plus the model's own `finish(score=...)` self-evaluation in [-1,1]
-  as each task's terminal reward (broadcast over that task's steps). No external LLM-as-judge.
-- Constrained decoding via lm-format-enforcer with a name-enum schema (prevents misspelled
-  tool names). Raw *pre-constraint* logits plus per-token allowed-set masks are recorded so
-  the trainer can recompute constrained log-probs.
+- **Text only, never embeddings.** Everything the policy is trained on must have token IDs, or its
+  log-probs can't be recomputed during the policy-gradient update. That ruled out injected state
+  embeddings in the harness and it rules out anything but the rendered transcript now.
+- Rewards = the model's own self-evaluation in [-1,1] per metric (the terminal reward, broadcast over the
+  conversation's steps) + the user's reactions to the replies they answered + verifiable per-step signals
+  read off the tool results (nonzero exit codes, error strings, rejections). No external LLM-as-judge.
+- **Nothing is reconstructed that the wire can carry.** The behaviour log-probs are recomputed in one
+  no-grad pass at the round's starting weights rather than guessed at, and each assistant turn's token
+  span is found by a prefix probe against the model's own chat template rather than by hardcoded tags.
 
 ## Package layout (src-layout; package = `roger`, console script = `roger`)
-- `agency/`   — rollout loop, tool/skill loaders, RAG retrieval, `@path` expansion
-                (`rollout_utils`, `retrieval`, `skill_utils`, `path_utils`), sub-agent
-                spawning (`subagents`)
-- `runtime/`  — the provider wrapper (current entry point): `wrapper` (console script `main`, process
+- `paths.py`  — `state_dir()`: the one global `~/.roger` location everything writes under
+- `config.py` — `~/.roger/config.json` (+ the shipped `config.json` defaults as package data)
+- `runtime/`  — the provider wrapper (the entry point): `wrapper` (console script `main`, process
                 lifecycle, Ctrl-C), `dialect` (**all runtime/framework-specific code lives here and only
                 here**: `plan` = `--port` argv rewrite, `RUNTIMES` table of model flags + adapter args,
                 GGUF/PEFT adapter writers), `proxy` (runtime-agnostic stdlib `ThreadingHTTPServer`
                 reverse proxy over a shared `httpx.Client`, streaming relay), `capture` (chat-path
                 filter, SSE→non-stream reassembly, atomic JSON writes + `update_record` to `messages/`),
-                `notice` (runtime `/v1/models` → federation `/status` supported-model verdicts on stderr),
+                `notice` (runtime `/v1/models` → federation `/status` supported-model verdicts on stderr,
+                plus the one-time `privacy_notice`),
                 `adapter` (daily global pull → LoRA adapter written + attached via `dialect.RUNTIMES`),
                 `grader` (prefix-chain conversation registry, idle/shutdown self-eval call, `self_eval`),
                 `signals` (exit-code/error step rewards from tool results → `tool_signals`),
                 `train` (post-exit training gate: ready conversations, one federation, upload, delete)
-- `apps/`     — legacy CLI (`cli`, reached only via `roger train`), config, Rich/prompt_toolkit UI
-- `loading/`  — model loading + VRAM-aware quantization tier selection (`model_setup`),
-                rollback sliding-window KV cache (`rollback_cache`)
-- `tools/`    — standard tools, shell execution + policy guardrails, MCP bridge
-                (`std_tools`, `shell_tools`, `mcp_utils`, `command_policy.txt`)
-- `training/` — RL machinery: reward shaping, trajectory recording, LoRA adapter + REINFORCE++
-                trainer, train-time PII anonymizer
-                (`reward_utils`, `recording`, `lora_utils`, `trainer`, `privacy_filter`; `wire_trainer` =
-                the wrapper's round over captured chats)
-- `skills/`   — bundled default skills shipped as package-data (`ipynb`, `skill-creator`,
-                `git-workflow`, `code`, `lean`); read in place as the lowest-priority `discover_skills` base
-- `federated/`— gradient-sharing client: `delta` (densify ΔW [+ optional factor-space DP noise] +
-                (de)serialize + `fold_into` the base weights in bf16), `secure_agg` (X25519/EC-DH +
-                SHAKE pairwise masks, quantize mod R), `transport` (httpx per-federation, fail-soft,
-                `federation_mode`/`contribute_dp` + sync state + persisted global blob), `client`
-                (mode-branched contribute / daily-pull / `pending_globals` / leech gating). The
-                bf16-fold-then-bnb-quantize loading lives in `loading/model_setup.fetch_model(weight_deltas=…)`.
+- `training/` — the torch half, imported only once a round is actually due: `trainer` (the REINFORCE++
+                algorithm: advantages, `anonymize`, the teacher-forced log-prob pass, the clipped step),
+                `wire_trainer` (the round itself: load the served model, rebuild episodes from captured
+                chats, attach the global, return the factor Δ), `lora_utils` (`attach_lora` + the fixed
+                federation basis `FED_TARGETS`), `privacy_filter` (train-time PII → surrogates)
+- `federated/`— gradient-sharing client: `delta` (the factor/rank/`init_A` contract + safetensors
+                (de)serialization), `secure_agg` (X25519/EC-DH + SHAKE pairwise masks, quantize mod R),
+                `transport` (httpx per-federation, fail-soft; `/status`, `/round/register`,
+                `/contribute`, `/contribute_dp`, `/global` + sync state and the persisted global blob),
+                `client` (`contribute_factor`: the masked or DP-noised upload to ONE federation). The
+                pull half is torch-free and lives in `runtime/adapter.py`.
                 The aggregation **server is a separate repo** (`roger-server`); this package is client-only.
                 `secure_agg` + `delta` here mirror the server's copies of the wire contract (the server's
-                `secure_agg` additionally carries the server-only `dequantize` half).
-- `envs/`     — not created yet (concrete shell/browser/code environments are future work)
-- `tests/`    — `test_rewards.py`, `test_trainer.py`, `test_grade.py`, `test_privacy_filter.py`,
-                `test_mcp.py`, `test_multimodal.py`, `test_federated.py`, `test_runtime.py`, `test_wire_training.py`
+                `secure_agg` additionally carries the server-only `dequantize` half, and its `delta` a
+                `base_from_json` the client never needs).
+- `tests/`    — `test_runtime.py` (plan/proxy/capture/notice/adapter/grader), `test_wire_training.py`
+                (contribute_factor, the conversation gate, the round), `test_federated.py` (the mirrored
+                wire contract + secure-agg crypto), `test_trainer.py`, `test_privacy_filter.py`
 
 Runtime artifacts all live under the global `~/.roger/` (never in the project): `config.json`,
-global `memory/memory.md` + per-project `memory/<dashed-abspath>.md`, `messages/<runtime>/` (wrapper
-captures, text), `runs/` (legacy token-level episodes), `backups/`,
-`scratch/`, `history`, and user `skills/`. Project-level skill dirs (`.agents/`, `.claude/`)
-and instruction files (`AGENTS.md`/`CLAUDE.md`) are still read from the project. `build/` and
-`*.egg-info/` are build output — ignore them; edit only under `src/`.
+`messages/<runtime>/` (the captured chats, text), `federated/` (per-federation-and-model sync state +
+global blob + the built `adapters/`), and the `privacy_ack` sentinel. Nothing is written into the
+project any more, and no model is ever stored. `build/` and `*.egg-info/` are build output — ignore
+them; edit only under `src/`.
 
 ## Dev environment
 - Python: use the conda env **`roger`** (Python 3.13, CUDA torch 2.12.0+cu130) —
-  `conda run -n roger python ...`. It has the project installed editable (`pip install -e ".[audio]"`)
-  plus pytest, so it covers syntax/import/test checks *and* real CUDA model loads. Bare
-  `python`/`python3` hit the Windows Store stub (exit 49).
-- No manual env patching needed: lm-format-enforcer 0.11.3 imports `PreTrainedTokenizerBase` from
-  `transformers.tokenization_utils`, which transformers>=5.11 removed — a compat shim in
-  `agency/rollout_utils.py` re-exposes it before the integration import, so any install just works.
-- Shipped default model is `google/gemma-4-12B-it` with `google/gemma-4-12B-it-assistant`
-  (1B despite the name) as the default speculative-decoding drafter. The default federation only
-  accepts gemma-4 bases. The small `google/gemma-4-E2B-it` (**5.12B** params, not 2B) is the
-  low-VRAM experimentation fallback; dev box GPU = RTX 1000 Ada, 6.44 GB VRAM (bf16 supported), so
-  the 12B default won't fit there — test against E2B locally.
-- Install/run for end users: `uv tool install . --torch-backend auto` then `roger`; or
-  `uvx --from . --torch-backend auto roger`. Tests: `conda run -n roger python -m pytest tests/`.
+  `conda run -n roger python ...`. It has the project installed editable (`pip install -e .`) plus
+  pytest, so it covers syntax/import/test checks *and* real CUDA model loads. Bare `python`/`python3`
+  hit the Windows Store stub (exit 49).
+- Roger no longer has a model of its own: the model is whatever the user's runtime command names, and
+  the training round reads it from that file or cache without downloading. The config has no `model_id`.
+- The default federation only accepts gemma-4 bases (any quantization of `google/gemma-4-12B-it` or
+  `google/gemma-4-E2B-it`). Dev box GPU = RTX 1000 Ada, 6.44 GB VRAM (bf16 supported), so the 12B
+  won't fit there — test a round against E2B locally. A gemma-4 GGUF needs a transformers with the
+  gemma4 GGUF processor (on main, not in 5.17.0).
+- Install/run for end users: `uv tool install . --torch-backend auto`, then prefix their runtime
+  command with `roger`; or `uvx --from . --torch-backend auto roger <runtime-command>`.
+  Tests: `conda run -n roger python -m pytest tests/` (CPU-only, download-free).
 
 ## Conventions
 - Functional-first Python. Use a class only when isolated mutable state genuinely requires it

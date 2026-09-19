@@ -1,9 +1,9 @@
 """wire_trainer.py — the REINFORCE++ round over the chats the runtime wrapper captured.
 
-The legacy trainer (trainer.py) consumed token-level episodes the in-process harness recorded; behind the
-wrapper roger only has the OpenAI-wire JSON under ~/.roger/messages/ (runtime/capture.py), each graded by
-the model itself (`self_eval`, runtime/grader.py) and scored from its tool results (`tool_signals`,
-runtime/signals.py). So an episode is rebuilt here: the conversation is re-rendered with the model's own
+trainer.py holds the REINFORCE++ step itself and wants token-level episodes; all roger has is the
+OpenAI-wire JSON under ~/.roger/messages/ (runtime/capture.py), each graded by the model itself
+(`self_eval`, runtime/grader.py) and scored from its tool results (`tool_signals`, runtime/signals.py).
+So an episode is rebuilt here: the conversation is re-rendered with the model's own
 chat template, and each assistant turn's generated span is found by a prefix probe — template(turns before
 it, generation prompt) vs template(through it) — with no template tags hardcoded. The behaviour log-probs
 aren't on the wire (the runtime sampled them), so they are recomputed in one no-grad pass over the same
@@ -42,7 +42,7 @@ def load(source: str):
     load_kw = {"dtype": torch.bfloat16 if cuda or torch.backends.mps.is_available() else torch.float32}
     if cuda:
         load_kw["device_map"] = "auto"            # offloads to CPU when the model outgrows the GPU
-        if "gguf_file" not in kw:                 # QLoRA on CUDA, as the legacy trainer; a GGUF stays bf16
+        if "gguf_file" not in kw:                 # QLoRA on CUDA; a dequantized GGUF stays bf16
             try:
                 import bitsandbytes  # noqa: F401
                 from transformers import BitsAndBytesConfig
@@ -117,8 +117,8 @@ def _ids(tok, msgs: list, tools, gen: bool) -> list[int]:
 
 
 def episode(tok, rec: dict) -> dict | None:
-    """{seq, traj: [{gen_start, masks}]} in the legacy trainer's shape (masks all None: the runtime decoded
-    unconstrained), one step per assistant turn whose span the prefix probe can locate. A turn is skipped
+    """{seq, traj: [{gen_start, masks}]} in the shape trainer._new_logps expects (masks all None: the
+    runtime decoded unconstrained), one step per assistant turn whose span the prefix probe can locate. A turn is skipped
     when rendering it isn't a strict extension of the history (templates that rewrite earlier turns, e.g.
     dropping old reasoning), since its tokens then aren't what the model saw when it generated them."""
     msgs = _messages(rec)

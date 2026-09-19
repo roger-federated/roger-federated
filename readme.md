@@ -8,14 +8,15 @@ You and the community can now contribute to the next generation of AI. Not just 
 ![](assets/divider.PNG)
 
 ## Features
-On top of the basic agentic capabilities listed further [below](#progress--contributing), Roger adds the following.
+Roger is a wrapper around the local runtime you already use: keep your own client, your own model and your own agent, and prefix the server command with `roger`.
 
-- **Federated learning using SMPC**: Based on secure multi-party computing, only encrypted weight updates are contributed to your chosen federations. No peer or server can decipher the update and no raw data is ever shared. The aggregated global update is folded back into your base model at load.
-- **Efficient local reinforcement learning**: Inference and finetuning run entirely on the user's own machine; raw data never leaves it. QLoRA REINFORCE++ makes on-device RL efficient on consumer GPUs.
+- **Nothing to switch to**: `roger llama-server …` / `roger vllm serve …` runs your runtime untouched and relays its port, so whatever client you chat with keeps working exactly as before.
+- **Federated learning using SMPC**: Based on secure multi-party computing, only encrypted weight updates are contributed to your chosen federations. No peer or server can decipher the update and no raw data is ever shared. The aggregated global update comes back as a LoRA adapter your runtime attaches at load; your model file is never modified.
+- **Efficient local reinforcement learning**: Inference and finetuning run entirely on the user's own machine; raw data never leaves it. QLoRA REINFORCE++ makes on-device RL efficient on consumer GPUs, and the round runs only once the runtime has exited and freed its VRAM.
 - **Privacy filter**: Before any gradient is computed, a train-time anonymiser swaps personally identifiable information for consistent surrogates, so personal data can neither be learned nor transmitted.
-- **Self-evaluation rewards**: Rollouts are scored from implicit user signals, verifiable signals, and the model's own self-evaluation.
+- **Self-evaluation rewards**: Each conversation is scored by the model's own end-of-session self-evaluation, by how you reacted to its replies, and by verifiable signals read off the tool results in the transcript.
 - **Scales to world models**: The same text-native, RL-safe interface extends from agency to world-models, which the federation can train collaboratively and deploy more cheaply than alternative centralized efforts.
-- **More than just software**: Federations, continuous model updating, and an exchange of community-trained adapters on top of basic MCP-driven agentic software make Roger a unique ecosystem that improves as more people contribute.
+- **More than just software**: Federations, continuous model updating, and an exchange of community-trained adapters make Roger a unique ecosystem that improves as more people contribute.
 
 ![](assets/divider.PNG)
 
@@ -30,8 +31,8 @@ cd roger-federated
 
 Note:
 
-- Compatible GPU strongly recommended for quantization and speed.
-- First run downloads the selected model (several GB) and writes settings under `~/.roger/config.json`. These can be changed at any time.
+- Compatible GPU strongly recommended for the training round's speed. Roger never downloads a model: it trains the very file or cache your runtime served.
+- First run writes settings under `~/.roger/config.json` (which federations to join, whether to contribute, how many graded chats a round needs). These can be changed at any time.
 
 **Recommended method:**
 
@@ -48,7 +49,7 @@ uvx --from . --torch-backend auto roger
 
 - `bitsandbytes` (4/8-bit quantization) is installed automatically only where PyPI ships a wheel: x86-64 Linux and Windows. On other CUDA platforms (e.g. aarch64 Jetson/GH200) install a custom wheel manually, e.g. `pip install --force-reinstall https://github.com/bitsandbytes-foundation/bitsandbytes/releases/download/continuous-release_main/bitsandbytes-1.33.7.preview-py3-none-manylinux_2_24_aarch64.whl`.
 
-- Apple Silicon: GPU (MPS/Metal) is not used yet — only the CUDA path is wired up, so macOS runs unquantized on CPU. PRs adding an MPS check alongside the CUDA check in `src/roger/loading/model_setup.py` are welcome.
+- Apple Silicon: the training round falls back to MPS where available and to unquantized CPU otherwise; only the CUDA path gets QLoRA and 8-bit Adam (see `src/roger/training/wire_trainer.py`).
 </details>
 
 **Run:**
@@ -66,15 +67,7 @@ Once the runtime is up, roger asks it which model it serves (`GET /v1/models`) a
 
 On the first launch of each day, roger pulls your federations' latest model update for the model named on the command line (`-m` for llama-server, the served model for vllm) and keeps it under `~/.roger/federated/`. Every launch then attaches it as a LoRA adapter through the runtime's own flag (`--lora` for llama-server, `--enable-lora --lora-modules` for vllm, with chat requests routed to the adapter automatically), so your model file is never modified and no model copy is stored. llama-server needs `-m` to point at a local gguf for this.
 
-<details>
-<summary>Legacy in-process agent (being phased out)</summary>
-
-The interactive in-process agent is no longer launched (bare `roger` prints usage); only `roger train` — a LoRA update over previously recorded runs — still works. Settings live in `~/.roger/config.json`. The notes below describe the old behaviour for reference.
-
-Any config key can be overridden for a single run with a flag, e.g. `roger --model <hf-id> --max-steps 20 --verbose`. To persist a setting, edit the config file. The default federation server currently only accepts Gemma-4 models, so to partake in gradient contribution you must stay on a Gemma-4 base. The smaller `E2B`/`E4B` variants perform significantly worse than the recommended default 12B model, so use them only for low-VRAM experimentation.
-
-For self-improvement purposes, it is of paramount importance that you end a session using Ctrl+D. This will nudge the model to write its memory, and to evaluate its performance.
-</details>
+Once the runtime exits, roger trains on what has piled up. A conversation counts once the model has graded it, which happens five minutes after you stop chatting or when you press Ctrl-C; once `train_every` graded conversations exist for that model (8 by default), the round runs in the foreground and uploads its update to one federation. Ctrl-C skips it and keeps the conversations for next time; they are deleted only once a federation has accepted the update.
 
 <details>
 <summary>Remote execution on a trusted machine over SSH</summary>
@@ -88,156 +81,14 @@ Roger installs and runs identically on any machine you can SSH into, so a rented
 
 </details>
 
-**MCP servers:**
+**Tools and MCP servers:**
 
-It is strongly recommended to introduce additional functionalities and tools to Roger by extending the list of MCP services in `~/.roger/mcp.json`. This file uses the standard `mcpServers`-format, and the exact schema can therefore be found at your MCP server's provider.
-
-<details>
-<summary>Popular servers to get started</summary>
-
-Drop any of the entries below or others into `~/.roger/mcp.json` and restart Roger. Replace any `<token>`/`<api-key>` placeholder with your own credential, attained from the respective MCP server. Make sure npx is installed for some of these. Additionally, some stdio servers need a one-off install first. Notice that the `_comment` field is ignored. P.S.: if on a remote machine OAuth is required, instead of adding a SSH port forward, it is easier to omit `mcp-remote` wrapper and (e.g., in the case of Canva) replace it with `"canva": { "url": "https://mcp.canva.com/mcp", "oauth": {} }`.
-
-```json
-{
-  "mcpServers": {
-    "github": {
-      "_comment": "Repos, issues, PRs, code search; create a fine-grained PAT for the token",
-      "type": "http",
-      "url": "https://api.githubcopilot.com/mcp/",
-      "headers": {"Authorization": "Bearer <token>"}
-    },
-    "context7": {
-      "_comment": "Up-to-date, version-correct docs and snippets for any library; free <api-key> at context7.com raises rate limits",
-      "type": "http",
-      "url": "https://mcp.context7.com/mcp",
-      "headers": {"CONTEXT7_API_KEY": "<api-key>"}
-    },
-    "gmail": {
-      "_comment": "Read and send Gmail; OAuth token obtained via Google Cloud Console",
-      "type": "http",
-      "url": "https://gmailmcp.googleapis.com/mcp/v1",
-      "headers": {"Authorization": "Bearer <oauth-token>"}
-    },
-    "markitdown": {
-      "_comment": "Convert PDFs, Office docs, images and URLs to markdown",
-      "command": "uvx",
-      "args": ["markitdown-mcp"]
-    },
-    "ms-word": {
-      "_comment": "Read/create/edit Word documents; M365 tenant account required",
-      "type": "http",
-      "url": "https://agent365.svc.cloud.microsoft/agents/tenants/<tenant-id>/servers/mcp_WordServer",
-      "headers": {"Authorization": "Bearer <entra-token>"}
-    },
-    "ms-teams": {
-      "_comment": "Teams chats, channels and messages; M365 tenant account required",
-      "type": "http",
-      "url": "https://agent365.svc.cloud.microsoft/agents/tenants/<tenant-id>/servers/mcp_TeamsServer",
-      "headers": {"Authorization": "Bearer <entra-token>"}
-    },
-    "notion": {
-      "_comment": "Search, read and edit your Notion pages and databases; <token> = an internal-integration secret",
-      "command": "npx",
-      "args": ["-y", "@notionhq/notion-mcp-server"],
-      "env": {"NOTION_TOKEN": "<token>"}
-    },
-    "linear": {
-      "_comment": "Create and manage Linear issues, projects and cycles; <token> = a Linear API key",
-      "type": "http",
-      "url": "https://mcp.linear.app/mcp",
-      "headers": {"Authorization": "Bearer <token>"}
-    },
-    "touchpoint": {
-      "_comment": "Interact with your desktop UI",
-      "command": "uvx",
-      "args": ["--from", "touchpoint-py", "touchpoint-mcp"]
-    },
-    "sentry": {
-      "_comment": "Inspect and triage your Sentry errors and issues",
-      "type": "http",
-      "url": "https://mcp.sentry.dev/mcp",
-      "headers": {"Authorization": "Bearer <token>"}
-    },
-    "aws": {
-      "_comment": "AWS services (EC2, S3, IAM, etc.); requires AWS CLI configured (`aws configure`)",
-      "command": "uvx",
-      "args": ["mcp-proxy-for-aws@latest", "https://aws-mcp.us-east-1.api.aws/mcp"]
-    },
-    "azure": {
-      "_comment": "Azure Resource Manager — manage and query Azure resources; get token via `az account get-access-token`",
-      "type": "http",
-      "url": "https://mcp.management.azure.com",
-      "headers": {"Authorization": "Bearer <azure-token>"}
-    },
-    "sql": {
-      "_comment": "Natural language SQL queries against any database; requires dotnet + dab CLI + dab-config.json (see aka.ms/sql/mcp)",
-      "command": "dab",
-      "args": ["start", "--mcp-stdio", "role:anonymous", "--config", "<path-to-dab-config.json>"]
-    },
-    "telegram": {
-      "_comment": "Full Telegram access (80+ tools); first clone https://github.com/chigwell/telegram-mcp and run uv sync",
-      "command": "uv",
-      "args": ["run", "--project", "<path/to/telegram-mcp>", "main.py"],
-      "env": {
-        "TELEGRAM_API_ID": "<api-id>",
-        "TELEGRAM_API_HASH": "<api-hash>",
-        "TELEGRAM_SESSION_STRING": "<session-string>"
-      }
-    },
-    "alpha-vantage": {
-      "_comment": "Stock prices, forex, crypto and economic indicators; free key at alphavantage.co",
-      "type": "http",
-      "url": "https://mcp.alphavantage.co/mcp?apikey=<api-key>"
-    },
-    "airbnb": {
-      "_comment": "Search Airbnb listings and property details; unofficial, no key needed",
-      "command": "npx",
-      "args": ["-y", "@openbnb/mcp-server-airbnb"]
-    },
-    "Canva": {
-      "_comment": "create simple designs for e.g. social media",
-      "type": "stdio",
-      "command": "npx",
-      "args": [
-        "-y",
-        "mcp-remote@latest",
-        "https://mcp.canva.com/mcp"
-      ]
-    },
-    "zerolib-email": {
-      "_comment": "send email. fill in credentials.",
-      "command": "uvx",
-      "args": ["mcp-email-server@latest", "stdio"],
-      "env": {
-        "MCP_EMAIL_SERVER_ACCOUNT_NAME": "default",
-        "MCP_EMAIL_SERVER_EMAIL_ADDRESS": "you@domain.com",
-        "MCP_EMAIL_SERVER_USER_NAME": "you@domain.com",
-        "MCP_EMAIL_SERVER_PASSWORD": "<password>",
-        "MCP_EMAIL_SERVER_IMAP_HOST": "<host>",
-        "MCP_EMAIL_SERVER_IMAP_PORT": "<port>",
-        "MCP_EMAIL_SERVER_SMTP_HOST": "<host>",
-        "MCP_EMAIL_SERVER_SMTP_PORT": "<port>",
-      }
-    },
-    "twitter-mcp": {
-      "command": "npx",
-      "args": ["-y", "@enescinar/twitter-mcp"],
-      "env": {
-        "API_KEY": "your_api_key_here",
-        "API_SECRET_KEY": "your_api_secret_key_here",
-        "ACCESS_TOKEN": "your_access_token_here",
-        "ACCESS_TOKEN_SECRET": "your_access_token_secret_here"
-      }
-    }
-  }
-}
-```
-</details>
+Roger no longer runs the agent loop, so it has no tool set and no MCP configuration of its own: the client you chat with owns both. Configure your tools and MCP servers there, as you already do. Roger reads the tool results out of the transcript your client sends and turns them into training signal (a non-zero exit code, an error string or a rejected command all count against the step that caused them), so a richer tool set makes for a better gradient without any setup on roger's side.
 
 ![](assets/divider.PNG)
 
 ## Use cases
-Roger has the potential to perform any digital task. In other words, there is no limit to what you can do with (or delegate to) Roger. Here is a severely non-exhaustive list of examples.
+There is no limit to what a local agent can be delegated, and every such session is training data. The recordings below were made with roger's own in-process agent, before the pivot to wrapping the runtime; they show the kind of work the federation learns from, which is now done in whichever client you point at your `roger`-wrapped server.
 
 <details>
 <summary>Set up a native agent loop for a 24/7 unsupervised e-marketeer</summary>
@@ -302,7 +153,9 @@ The ecosystem is still in development. Below is a non-exhaustive list of to-do i
 - [x] <ins>Huzzah, the beta version can now be shipped.</ins>
 - [x] Automatic subagent spawning (`spawn_subagent`) with concurrent tool dispatch.
 - [x] Native agent loops: `/perpetual` standing tasks with graceful Ctrl-C stop.
-- [x] Wrapper: daily pull of the federation update, attached to llama-server / vllm as a LoRA adapter (server still has to broadcast LoRA factors).
+- [x] Wrapper: daily pull of the federation update, attached to llama-server / vllm as a LoRA adapter.
+- [x] Wrapper: capture chats off the wire, self-grade them, and train + contribute once the runtime exits.
+- [x] <ins>Pivot complete: roger is a wrapper, not a harness.</ins> The in-process agent above (rollout loop, tools, MCP, RAG, skills, memory, subagents, `/perpetual`, the Rich CLI) has been removed - a third-party client does all of that better, and roger's job is the learning underneath it. The items above stay as a record of what was built and learned; they are not current features.
 
 Deferred:
 - [ ] Zero-knowledge integrity proof to verify scale, mod, keys, clip, model fork.
