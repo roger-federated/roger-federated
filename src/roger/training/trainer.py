@@ -97,6 +97,57 @@ def _new_logps(model, ep, device) -> tuple[torch.Tensor, torch.Tensor]:
     return torch.cat(new_parts), torch.cat(old_parts).detach()
 
 
+def advantages(returns: torch.Tensor) -> torch.Tensor | None:
+    """REINFORCE++ advantages: batch-mean baseline, z-normed; one scalar per episode. None when the
+    returns have zero variance (nothing to prefer, so nothing to learn)."""
+    centered = returns - returns.mean()
+    if float(centered.std()) == 0.0:
+        return None
+    return centered / centered.std().clamp_min(1e-6)
+
+
+def anonymize(eps: list, tokenizer) -> None:
+    """Rewrite PII to surrogates in each episode's `seq` before any gradient sees it, and set
+    `keep` (per generated token, in _new_logps order; 0 = a rewritten PII token). Frees the filter
+    afterwards so it doesn't hold VRAM. Detect/load failures propagate rather than train on raw PII."""
+    for ep in eps:
+        new_seq, pii_pos = privacy_filter.anonymize_sequence(ep["seq"], tokenizer)
+        ep["seq"] = new_seq
+        keep = [0.0 if (int(e["gen_start"]) + j) in pii_pos else 1.0
+                for e in ep["traj"] for j in range(len(e["masks"]))]
+        ep["keep"] = torch.tensor(keep)
+    privacy_filter.free_filter()
+
+
+def reinforce(model, eps: list, adv: torch.Tensor, opt, trainable: list, *, epochs: int = 1,
+              clip_eps: float = 0.2, max_grad_norm: float = 1.0) -> float:
+    """The flat REINFORCE++ update over `eps` (each with `keep` set by `anonymize`): PPO-clipped ratio
+    vs the stored behaviour log-probs, the episode's advantage broadcast over all its kept generated
+    tokens, no KL. Returns the summed loss."""
+    device = next(model.parameters()).device
+    # 1/total_tokens scaling + per-episode backward() accumulation = exact token-mean, no padding.
+    # total_tokens counts only kept tokens, so dropped PII positions don't skew the token-mean.
+    total_tokens = int(sum(float(ep["keep"].sum()) for ep in eps))
+    last_loss = 0.0
+    for _ in range(max(1, epochs)):
+        opt.zero_grad(set_to_none=True)
+        for i, ep in enumerate(eps):
+            new_lp, old_lp = _new_logps(model, ep, device)
+            # Drop rewritten PII tokens before the ratio; zeroing post-hoc risks 0*inf=nan grads.
+            keep      = ep["keep"].to(device).bool()
+            new_lp, old_lp = new_lp[keep], old_lp[keep]
+            ratio     = torch.exp(new_lp - old_lp)            # ~1 on fresh data; clip bites at epochs>1
+            a         = adv[i].to(device)
+            unclipped = ratio * a
+            clipped   = torch.clamp(ratio, 1 - clip_eps, 1 + clip_eps) * a
+            loss      = -torch.sum(torch.min(unclipped, clipped)) / total_tokens   # token-mean via accumulation
+            loss.backward()
+            last_loss += float(loss.detach())
+        torch.nn.utils.clip_grad_norm_(trainable, max_grad_norm)
+        opt.step()
+    return last_loss
+
+
 def train(model_id: str | None = None, *, batch: int = 8, epochs: int = 1, lr: float = 1e-5,
           clip_eps: float = 0.2, max_grad_norm: float = 1.0, targets=lora_utils.FED_TARGETS,
           reuse=None) -> dict:
@@ -124,11 +175,10 @@ def train(model_id: str | None = None, *, batch: int = 8, epochs: int = 1, lr: f
         return {"trained": False, "reason": "10% rule: too few user-graded runs",
                 "n_user": n_user, "need": need, "n_ready": len(eps), "skipped_mm": skipped_mm}
 
-    returns  = torch.tensor([sum(float(e["reward"]) for e in ep["traj"]) for ep in eps])
-    centered = returns - returns.mean() # batch-mean baseline (REINFORCE++)
-    if float(centered.std()) == 0.0:
+    returns = torch.tensor([sum(float(e["reward"]) for e in ep["traj"]) for ep in eps])
+    adv = advantages(returns)
+    if adv is None:
         return {"trained": False, "reason": "zero-variance returns", "n_ready": len(eps), "skipped_mm": skipped_mm}
-    adv = centered / centered.std().clamp_min(1e-6) # z-norm; one scalar per episode
 
     if reuse is not None:
         model, processor = reuse                # already loaded with the global folded (see cli._repl)
@@ -143,49 +193,21 @@ def train(model_id: str | None = None, *, batch: int = 8, epochs: int = 1, lr: f
         model, processor = fetch_model(model_id, for_training=True,
                                        weight_deltas=fed_client.pending_globals(config.load()))
 
-    # Rewrite PII to surrogates before any gradient sees it; free the filter before training so it
-    # doesn't hold VRAM. Detect/load failures propagate rather than train on raw PII.
-    tokenizer = getattr(processor, "tokenizer", processor)
-    for ep in eps:
-        new_seq, pii_pos = privacy_filter.anonymize_sequence(ep["seq"], tokenizer)
-        ep["seq"] = new_seq
-        # keep mask, in _new_logps' per-step generated-token order; 0 = a rewritten PII token.
-        keep = [0.0 if (int(e["gen_start"]) + j) in pii_pos else 1.0
-                for e in ep["traj"] for j in range(len(e["masks"]))]
-        ep["keep"] = torch.tensor(keep)
-    privacy_filter.free_filter()
+    anonymize(eps, getattr(processor, "tokenizer", processor))
 
     # Trains a fresh `local` adapter on top of the frozen global; its ΔW is what we share.
     model = lora_utils.attach_lora(model, targets=targets)
     model.train()
-    device = next(model.parameters()).device
     trainable = [p for p in model.parameters() if p.requires_grad]
     opt = bnb.optim.Adam8bit(trainable, lr=lr)
 
-    # 1/total_tokens scaling + per-episode backward() accumulation = exact token-mean, no padding.
-    # total_tokens counts only kept tokens, so dropped PII positions don't skew the token-mean.
     gen_tokens   = sum(len(e["masks"]) for ep in eps for e in ep["traj"])
     total_tokens = int(sum(float(ep["keep"].sum()) for ep in eps))
     if total_tokens == 0: # every generated token was PII → nothing to learn from
         return {"trained": False, "reason": "all tokens masked", "n_ready": len(eps),
                 "skipped_mm": skipped_mm}
-    last_loss = 0.0
-    for _ in range(max(1, epochs)):
-        opt.zero_grad(set_to_none=True)
-        for i, ep in enumerate(eps):
-            new_lp, old_lp = _new_logps(model, ep, device)
-            # Drop rewritten PII tokens before the ratio; zeroing post-hoc risks 0*inf=nan grads.
-            keep      = ep["keep"].to(device).bool()
-            new_lp, old_lp = new_lp[keep], old_lp[keep]
-            ratio     = torch.exp(new_lp - old_lp)            # ~1 on fresh data; clip bites at epochs>1
-            a         = adv[i].to(device)
-            unclipped = ratio * a
-            clipped   = torch.clamp(ratio, 1 - clip_eps, 1 + clip_eps) * a
-            loss      = -torch.sum(torch.min(unclipped, clipped)) / total_tokens   # token-mean via accumulation
-            loss.backward()
-            last_loss += float(loss.detach())
-        torch.nn.utils.clip_grad_norm_(trainable, max_grad_norm)
-        opt.step()
+    last_loss = reinforce(model, eps, adv, opt, trainable, epochs=epochs, clip_eps=clip_eps,
+                          max_grad_norm=max_grad_norm)
 
     # No local apply: nothing is written to disk here. Instead export the adapter's factors (+ scaling)
     # as the federated contribution; the federated client densifies B@A into a weight-space ΔW, masks

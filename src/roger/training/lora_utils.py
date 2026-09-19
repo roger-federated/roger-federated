@@ -15,9 +15,12 @@ FED_TARGETS = ["q_proj", "v_proj"]
 
 
 def attach_lora(model, *, r: int = 16, alpha: int = 32, dropout: float = 0.05,
-                targets=FED_TARGETS):                # all training is federated → default to the basis
+                targets=FED_TARGETS,                 # all training is federated → default to the basis
+                rank_pattern: dict | None = None):
     """Return the model wrapped with a single trainable LoRA adapter. Works for a quantized (QLoRA)
-    or full base. The Ctrl-D reuse path passes the already-loaded (non-PeftModel) served model."""
+    or full base. The Ctrl-D reuse path passes the already-loaded (non-PeftModel) served model.
+    `rank_pattern` {module: rank}: the federation's per-module rank map (federated/delta.rank_for); alpha
+    follows it, so every module's scale is 1 — the factor contract keeps the scale inside the factors."""
     is_quantized = getattr(model, "is_loaded_in_4bit", False) or getattr(model, "is_loaded_in_8bit", False)
     if is_quantized:
         # casts norms to fp32, enables input grads, turns on gradient checkpointing
@@ -26,7 +29,8 @@ def attach_lora(model, *, r: int = 16, alpha: int = 32, dropout: float = 0.05,
         model.gradient_checkpointing_enable()
         model.enable_input_require_grads()   # checkpointing needs a grad-bearing input on a frozen base
     cfg = LoraConfig(task_type="CAUSAL_LM", r=r, lora_alpha=alpha, lora_dropout=dropout,
-                     target_modules=targets, bias="none")   # targets: name list or "all-linear"
+                     target_modules=targets, bias="none",   # targets: name list or "all-linear"
+                     rank_pattern=rank_pattern or {}, alpha_pattern=rank_pattern or {})
     model = get_peft_model(model, cfg)
     model.config.use_cache = False   # incompatible with gradient checkpointing
     return model
