@@ -4,19 +4,17 @@ Runs a local OpenAI-compatible runtime server exactly as the user typed it, with
 proxy (runtime/proxy.py) in front so every chat that flows through it is saved (runtime/capture.py),
 the federation's daily global update attached as a LoRA adapter on the runtime's own flag
 (runtime/adapter.py), and, after the runtime exits, a training round over the saved chats
-(runtime/train.py). `roger train` still reaches the legacy apps/cli.py; nothing else does.
+(runtime/train.py).
 
 Usage:
   roger llama-server -m model.gguf --port 8080
   roger vllm serve meta-llama/Llama-3-8B --port 8000
-  roger train …                               # legacy LoRA update over ~/.roger/runs
 """
 import shutil, signal, subprocess, sys, threading
 
 from roger.runtime import adapter, capture, dialect, grader, notice, proxy, train
 
 _USAGE = """usage: roger <runtime-command> [args…]     (e.g. roger llama-server -m x.gguf --port 8080)
-       roger train [--batch N] [--epochs N] [--lr F]
 
 Runs the runtime as-is and relays its port; chats are saved under ~/.roger/messages/<runtime>/.
 On the first launch of each day the federation's model update is pulled, and every launch attaches it to
@@ -139,7 +137,7 @@ def run(argv: list[str]) -> int:
     # The runtime is gone and its VRAM free: train on what has piled up, if enough has. Never changes
     # the exit status — that stays the runtime's.
     try:
-        from roger.apps import config
+        from roger import config
         train.maybe_train(provider, served, config.load())
     except KeyboardInterrupt:
         print("roger: training skipped; the conversations are kept for next time.", file=sys.stderr)
@@ -148,10 +146,6 @@ def run(argv: list[str]) -> int:
 
 def main() -> None:
     argv = sys.argv[1:]
-    if argv and argv[0] == "train":                    # legacy path; the only reason cli.py is still imported
-        from roger.apps import cli
-        cli.main()
-        return
     if not argv or argv[0].startswith("-"):
         print(_USAGE, file=sys.stdout if argv and argv[0] in ("-h", "--help") else sys.stderr)
         sys.exit(0 if argv and argv[0] in ("-h", "--help") else 2)

@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 import numpy as np
 from safetensors.numpy import load as st_load
 
-from roger.agency.path_utils import state_dir
+from roger.paths import state_dir
 from roger.federated import transport
 from roger.runtime import dialect, notice
 
@@ -36,8 +36,8 @@ def pull_today(feds: list[str], hint: str, out=sys.stderr) -> bool:
     """First launch of the UTC day, per federation: resolve `hint` (what the command line calls the model)
     to the id the federation trains it as, fetch the global if it moved, persist blob + cursor. Returns
     whether anything new arrived. The day is stamped even when nothing came back (unreachable,
-    unsupported) so later launches don't re-poll all day — the legacy CLI's policy; a transient outage
-    costs one day, not 30s of connect timeout on every launch while offline."""
+    unsupported) so later launches don't re-poll all day: a transient outage costs one day, not 30s of
+    connect timeout on every launch while offline."""
     today, fetched = _today(), False
     for url in feds:
         st = transport.load_state(url, hint)
@@ -110,13 +110,14 @@ def _adapter_stem(hint: str) -> str:
 def prepare(argv: list[str], out=sys.stderr) -> tuple[str, int] | None:
     """The wrapper's one call before spawning the runtime: today's pull (first launch of the day) and the
     adapter to attach for this command line — (path, rank), or None when there's nothing to attach."""
-    from roger.apps import config              # first run writes the default config = default federation
+    from roger import config              # first run writes the default config = default federation
     cfg = config.load()
     feds = cfg.get("federations") or []
     hint = dialect.served_model(argv)
     spec = dialect.RUNTIMES.get(dialect.runtime_name(argv[0]))
     if not feds or hint is None or spec is None:
         return None
+    notice.privacy_notice(cfg, out)               # before the pull below: the first federation contact
     pull_today(feds, hint, out)
     factors = load_factors(feds, hint)
     if not factors:

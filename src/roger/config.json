@@ -1,0 +1,7 @@
+{
+  "train_every": 8,
+  "contribute": true,
+  "federations": [
+    "server.rogerfederated.com"
+  ]
+}

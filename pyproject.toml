@@ -8,36 +8,26 @@ version = "0.1.0"
 description = "Roger Federated — The world's first true agent, built together with the community using federated local reinforcement learning."
 requires-python = ">=3.10"
 dependencies = [
-    "torch",
-    "torchvision",   # Gemma4 image processor imports torchvision.transforms.v2
-    "transformers",  # also dequantizes llama-server's GGUF for the wrapper's training round (gguf_file=);
-                     # gemma-4 GGUFs need the gemma4 tensor processor, on main but not yet in 5.17.0
-    "accelerate",
-    "peft",          # LoRA adapters for the local REINFORCE++ trainer (training/lora_utils.py)
-    "bitsandbytes; sys_platform != 'darwin' and (platform_machine == 'x86_64' or platform_machine == 'AMD64')",
-    "lm-format-enforcer",
-    "pillow",
-    "numpy",
-    "mcp",
-    "ddgs",          # keyless DuckDuckGo search + page fetch backing the web_search/web_fetch tools
-    "httpx",         # federated gradient-sharing transport (federated/transport.py); also an mcp dep
-    "safetensors",   # the federated ΔW wire format; the wrapper reads it without torch (runtime/adapter.py)
+    # The wrapper itself needs only the five light ones below; everything else is the post-exit
+    # training round (training/), imported lazily so `roger <runtime>` starts in well under a second.
+    "httpx",         # the reverse proxy + federated transport (runtime/proxy.py, federated/transport.py)
+    "numpy",         # builds the runtime's LoRA adapter without torch (runtime/adapter.py)
+    "safetensors",   # the federated wire format, read torch-free by runtime/adapter.py
     "gguf",          # writes llama.cpp LoRA adapters for the federation update (runtime/adapter.py)
     "cryptography",  # X25519 EC-DH pairwise secrets for secure aggregation (federated/secure_agg.py)
-    "rich",
-    "prompt_toolkit",
+    "torch",
+    "transformers",  # dequantizes llama-server's GGUF for the training round (gguf_file=); gemma-4 GGUFs
+                     # need the gemma4 tensor processor, on main but not yet in 5.17.0
+    "accelerate",    # device_map="auto" offload when the trained model outgrows the GPU
+    "peft",          # the LoRA adapter the round trains (training/lora_utils.py)
+    "bitsandbytes; sys_platform != 'darwin' and (platform_machine == 'x86_64' or platform_machine == 'AMD64')",
 ]
 
-[project.optional-dependencies]
-audio = ["pydub"]  # AudioSegment support in rollout_utils (guarded import)
-
 [project.scripts]
-roger = "roger.runtime.wrapper:main"   # `roger <runtime> …` wrapper; `roger train` delegates to apps/cli.py
+roger = "roger.runtime.wrapper:main"   # the `roger <runtime-command> …` wrapper
 
 [tool.setuptools.packages.find]
 where = ["src"]                          # single package `roger` + its subpackages
 
 [tool.setuptools.package-data]
-"roger.tools"  = ["command_policy.txt"]  # ship the run_command guardrail policy as data
-"roger.apps"   = ["config.json"]         # ship the baseline config defaults as data
-"roger.skills" = ["*.md"]                # ship the bundled default skills as data
+"roger" = ["config.json"]                # ship the baseline config defaults as data

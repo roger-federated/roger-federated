@@ -7,9 +7,9 @@ tokens is not enough: the kept generated tokens are still *conditioned on* the P
 association leaks anyway. So we rewrite the sequence itself, at train time only — inference is left
 untouched, so the live agent still sees and acts on the real text (no capability loss).
 
-Detection uses `openai/privacy-filter` (single-pass token classifier) via the shared VRAM-aware
-loader. Substitution is done at the *token* level, 1:1 positional, so the count is preserved and the
-trainer's token-aligned tensors (old_logp / masks / gen_start) stay valid with no rebuild.
+Detection uses `openai/privacy-filter` (single-pass token classifier). Substitution is done at the
+*token* level, 1:1 positional, so the count is preserved and the trainer's token-aligned tensors
+(old_logp / masks / gen_start) stay valid with no rebuild.
 
 `detect_pii_spans` is the seam tests stub out, so unit tests need no model download.
 """
@@ -39,11 +39,12 @@ def _retained_chars(entity_type: str) -> set:
 def _get_pipe():
     global _PIPE
     if _PIPE is None:
-        from transformers import AutoModelForTokenClassification, pipeline
-        from roger.loading.model_setup import fetch_model
-        # Reuse the policy loader so the filter quantizes/offloads against whatever VRAM is free
-        # (the policy may already be resident on the Ctrl-D / reuse training path).
-        model, tok = fetch_model(PII_MODEL_ID, model_cls=AutoModelForTokenClassification)
+        from transformers import AutoModelForTokenClassification, AutoTokenizer, pipeline
+        # device_map="auto": the policy is already resident when this runs, so let accelerate place
+        # the detector in whatever VRAM is left and offload the rest rather than OOM against it.
+        model = AutoModelForTokenClassification.from_pretrained(
+            PII_MODEL_ID, dtype="auto", **({"device_map": "auto"} if torch.cuda.is_available() else {}))
+        tok = AutoTokenizer.from_pretrained(PII_MODEL_ID)
         # aggregation_strategy="simple" → coherent entity spans with char offsets + type, in one pass
         _PIPE = pipeline("token-classification", model=model, tokenizer=tok,
                          aggregation_strategy="simple")

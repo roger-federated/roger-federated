@@ -8,17 +8,41 @@ OpenAI-compatible server has: `GET /v1/models`. Its ids are whatever the runtime
 federation's advertised allowlist by normalised containment rather than equality: as far as the
 federation's LoRA is concerned, `gemma-4-12B-it-Q4_K_M.gguf` *is* the `google/gemma-4-12B-it` base.
 
+It also carries the one-time privacy notice (`privacy_notice`), which must be shown before this
+client's first-ever federation contact.
+
 Everything here only ever prints (stderr, like the wrapper's other notices) and is fail-soft: an
-unreachable federation stays silent, exactly as the legacy CLI's startup probe did.
+unreachable federation stays silent.
 """
-import re, sys, time
+import os, re, sys, time
 
 import httpx
 
 from roger.federated import CLIENT_VERSION, UPDATE_CMD, transport
+from roger.paths import state_dir
 from roger.runtime import dialect
 
 _POLL = 2.0        # seconds between /v1/models attempts while the runtime loads
+
+_PRIVACY_URL = "https://github.com/roger-federated/roger-federated/blob/main/PRIVACY.md"
+
+
+def privacy_notice(cfg: dict, out=sys.stderr) -> None:
+    """One-time notice, before this client's first-ever federation activity, of what gets sent to the
+    configured federation server(s) and how to opt out. Sentinel in state_dir() so it shows once per
+    machine, not once per launch. Not gated on a keypress: the processing basis is legitimate interest
+    with a standing right to object (opt out), not consent, so transparency is what's required, not
+    sign-off. `CLIENT_VERSION` 2 is the build that adopted it (see federated/__init__.py)."""
+    if not cfg.get("federations"):
+        return
+    sentinel = os.path.join(state_dir(), "privacy_ack")
+    if os.path.exists(sentinel):
+        return
+    print("roger: this client contributes an encrypted gradient update to your configured federation "
+          f"server(s) by default (never raw data). Details: {_PRIVACY_URL}\n"
+          'roger: opt out anytime by setting "federations": [] in ~/.roger/config.json.', file=out)
+    os.makedirs(os.path.dirname(sentinel), exist_ok=True)
+    open(sentinel, "w").close()
 
 
 def served_models(backend_url: str, alive) -> list[str]:
@@ -60,8 +84,8 @@ def resolve(served: list[str], accepted: list[str]) -> str | None:
 
 def announce(served: list[str], cfg: dict, out=sys.stderr) -> None:
     """One /status probe per federation → one line each: accepted (and as which id), or not, plus what
-    it does accept so the user can switch. Same verdicts the legacy CLI printed at startup (unsupported
-    model, outdated client, update available), now keyed off what the runtime says it serves."""
+    it does accept so the user can switch, followed by the version verdicts (outdated client, update
+    available) — all keyed off what the runtime says it serves."""
     feds = cfg.get("federations") or []
     if not feds:
         return
@@ -104,7 +128,7 @@ def run(backend_url: str, alive) -> None:
     """Daemon-thread body for the wrapper: wait for the runtime, then print the verdicts. Swallows
     everything — a notice must never take the relay down or spray a traceback over the runtime's output."""
     try:
-        from roger.apps import config              # first run writes the default config = default federation
+        from roger import config              # first run writes the default config = default federation
         cfg = config.load()
         if not cfg.get("federations"):
             return

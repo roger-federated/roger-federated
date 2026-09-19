@@ -9,7 +9,7 @@ import json, os, re, tempfile, uuid
 from datetime import datetime, timezone
 from typing import Callable
 
-from roger.agency.path_utils import state_dir
+from roger.paths import state_dir
 from roger.runtime import signals
 
 # Suffix match, not exact: llama-server also serves `/chat/completions` without the `/v1`, and some

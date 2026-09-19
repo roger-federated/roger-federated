@@ -414,13 +414,33 @@ def test_announce_verdicts(monkeypatch):
     assert "https://f trains google/gemma-4-12B-it, google/gemma-4-E2B-it" in s and "⚠" not in s
     # Unreachable federation (fail-soft {}): silence, never a false warning.
     assert _announce(gguf, {"https://f": {}}, monkeypatch=monkeypatch) == ""
-    # Client-version policy and leech mode ride along, like the legacy startup did.
+    # Client-version policy and leech mode ride along too.
     s = _announce(gguf, {"https://f": {"mode": "bootstrap", "models": accepted, "min_client": CLIENT_VERSION + 1}},
                   cfg={"contribute": False}, monkeypatch=monkeypatch)
     assert "out of date" in s and '"contribute" is off' in s
     s = _announce(gguf, {"https://f": {"mode": "bootstrap", "models": accepted, "latest_client": CLIENT_VERSION + 1}}, monkeypatch=monkeypatch)
     assert "newer roger client is available" in s and "out of date" not in s
     assert _announce(gguf, {}, monkeypatch=monkeypatch) == ""   # no federations configured: nothing to say
+
+
+def test_privacy_notice_shows_once_per_machine(tmp_path, monkeypatch):
+    # Transparency obligation: it must be printed before this client's first federation contact, and
+    # the sentinel must survive across launches so it is not re-printed every time.
+    import io
+    monkeypatch.setattr(notice, "state_dir", lambda: str(tmp_path))
+    out = io.StringIO()
+    notice.privacy_notice({"federations": ["https://f"]}, out=out)
+    assert "encrypted gradient update" in out.getvalue() and "PRIVACY.md" in out.getvalue()
+    assert os.path.exists(os.path.join(str(tmp_path), "privacy_ack"))
+    out2 = io.StringIO()
+    notice.privacy_notice({"federations": ["https://f"]}, out=out2)
+    assert out2.getvalue() == ""                          # shown once per machine, not per launch
+    # No federation configured: nothing is ever sent, so there is nothing to disclose (and no sentinel,
+    # so the notice still fires the first time the user does configure one).
+    fresh = io.StringIO()
+    monkeypatch.setattr(notice, "state_dir", lambda: str(tmp_path / "fresh"))
+    notice.privacy_notice({"federations": []}, out=fresh)
+    assert fresh.getvalue() == "" and not os.path.exists(str(tmp_path / "fresh"))
 
 
 def test_transport_defaults_bare_host_to_https(monkeypatch):
@@ -592,7 +612,8 @@ def test_build_peft_dir(tmp_path):
 def _fed_env(tmp_path, monkeypatch, status, blob):
     monkeypatch.setattr(transport, "state_dir", lambda: str(tmp_path))
     monkeypatch.setattr(adapter, "state_dir", lambda: str(tmp_path))
-    monkeypatch.setattr("roger.apps.config.load", lambda: {"federations": ["http://f"]})
+    monkeypatch.setattr(notice, "state_dir", lambda: str(tmp_path))   # the privacy sentinel, not ~/.roger
+    monkeypatch.setattr("roger.config.load", lambda: {"federations": ["http://f"]})
     pulls, statuses = [], []
     monkeypatch.setattr(transport, "federation_status", lambda url, mid: statuses.append(mid) or status)
     monkeypatch.setattr(transport, "pull", lambda url, cur, mid: pulls.append((cur, mid)) or (blob, "v7"))
@@ -646,7 +667,7 @@ def test_prepare_reports_dense_global_and_builds_peft_for_vllm(tmp_path, monkeyp
     # Unknown runtime / no model on the command line / no federations: nothing happens at all.
     assert adapter.prepare(["someserver", "--model", "x", "--port", "1"], out=err) is None
     assert adapter.prepare(["vllm", "serve", "--port", "8000"], out=err) is None
-    monkeypatch.setattr("roger.apps.config.load", lambda: {"federations": []})
+    monkeypatch.setattr("roger.config.load", lambda: {"federations": []})
     assert adapter.prepare(["vllm", "serve", "google/gemma-4-12B-it", "--port", "8000"], out=err) is None
 
 
