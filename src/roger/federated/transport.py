@@ -6,7 +6,8 @@ misbehaving returns None / a status string rather than raising, so a sharing hic
 down the agent (same convention as the web_search/web_fetch tools).
 
 Endpoints (all under a federation's base URL, served over HTTPS):
-  GET  {url}/status?model_id= -> {mode: "bootstrap"|"busy"|"unsupported", models, min_client, latest_client, ...}
+  GET  {url}/status?model_id= -> {mode: "bootstrap"|"busy"|"unsupported", models, min_client, latest_client,
+                              rank, epoch, phase}
                               (which aggregation regime this federation wants for the model — async DP
                               while sparse, secure-agg cohorts once busy, or "unsupported" when the
                               federation's allowlist excludes the model; probed before contributing so a
@@ -15,14 +16,16 @@ Endpoints (all under a federation's base URL, served over HTTPS):
                               `models` is the allowlist itself (null = any model), so the runtime
                               wrapper can tell the user which models to run — see runtime/notice.py.
                               min_client/latest_client advertise the protocol version this federation
-                              requires/prefers, so an out-of-date client self-skips + nudges an update)
-  POST {url}/round/register   {model_id, pubkey(hex)} -> {round_id, token, peers: [hex, ...]}   (server
+                              requires/prefers, so an out-of-date client self-skips + nudges an update.
+                              rank/epoch/phase: the LoRA-factor state to train against right now — see
+                              delta.py)
+  POST {url}/round/register   {model_id, pubkey(hex)} -> {round_id, token, peers: [hex, ...], epoch, phase, rank}   (server
                               distributes the round's peer X25519 public keys; keys are collected
                               centrally. `token` is this registration's secret, echoed back on
                               /contribute so the server can verify we're the same party that sealed
                               into this cohort)
   POST {url}/contribute       octet-stream = the masked, packed contribution -> 200
-  POST {url}/contribute_dp    octet-stream = a single DP-noised, UNMASKED dense ΔW (bootstrap mode) -> 200
+  POST {url}/contribute_dp    octet-stream = one DP-noised, UNMASKED factor Δ (bootstrap mode) -> 200
   GET  {url}/global?since=&model_id=  -> 200 octet-stream (the cumulative global; see delta.py for the
                               blob contract — the runtime wrapper expects it in LoRA-factor form) +
                               X-Cursor header, or 204 when nothing new since `since`.
@@ -108,7 +111,7 @@ def federation_mode(url: str, model_id: str) -> str:
 
 
 def contribute_dp(url: str, blob: bytes) -> str:
-    """Upload one DP-noised, unmasked dense ΔW for asynchronous (cohort-free) aggregation — the
+    """Upload one DP-noised, unmasked factor Δ for asynchronous (cohort-free) aggregation — the
     cold-start path that needs no peer set and no arrival coincidence. Same fail-soft string contract
     as `contribute`."""
     try:
@@ -120,20 +123,22 @@ def contribute_dp(url: str, blob: bytes) -> str:
         return f"failed: {e}"
 
 
-def register_and_peers(url: str, my_pub: bytes, model_id: str) -> tuple[str, str, list[bytes]] | None:
-    """Announce our round public key and get back (round_id, token, peer keys). The round_id identifies
+def register_and_peers(url: str, my_pub: bytes, model_id: str) -> tuple[str, str, list[bytes], int | None] | None:
+    """Announce our round public key and get back (round_id, token, peer keys, epoch). The round_id identifies
     the sealed cohort we were placed in; we echo it on the upload so the server routes our contribution
     to the right round (several cohorts of a model can collect at once). The token is our proof of
     cohort membership, echoed alongside it so the server can verify the upload comes from the same
-    party that registered (not just anyone sharing our IP). None on any failure (so the caller skips
-    this federation rather than uploading an unmaskable contribution)."""
+    party that registered (not just anyone sharing our IP). `epoch` is the factor epoch as of the seal
+    (None from a server that predates it): an update trained in an earlier epoch is dropped here rather
+    than uploaded to be voided. None on any failure (so the caller skips this federation rather than
+    uploading an unmaskable contribution)."""
     try:
         r = httpx.post(f"{_base(url)}/round/register", timeout=_TIMEOUT,
                        json={"model_id": model_id, "pubkey": my_pub.hex()})
         r.raise_for_status()
         data = r.json()
         return (data.get("round_id", ""), data.get("token", ""),
-                [bytes.fromhex(h) for h in data.get("peers", [])])
+                [bytes.fromhex(h) for h in data.get("peers", [])], data.get("epoch"))
     except Exception:
         return None
 

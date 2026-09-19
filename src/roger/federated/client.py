@@ -4,8 +4,10 @@ Entry points the CLI calls:
   maybe_daily_pull(cfg)         — first startup of a new UTC day: download + persist the global blob.
   pending_globals(cfg)          — at model load: the dense ΔW to fold into the base (summed across
                                   federations), or None.
-  contribute_delta(delta, cfg)  — after a training round: secure-agg masked upload (busy) or, while
-                                  sparse, an async DP-noised unmasked upload (bootstrap); server picks.
+  contribute_delta(delta, cfg)  — legacy CLI: the dense-ΔW upload, which the factor-contract server
+                                  no longer accepts (kept until the legacy harness is removed).
+  contribute_factor(url, …)     — the wrapper's upload: one LoRA factor's Δ to one federation,
+                                  secure-agg masked (busy) or DP-noised unmasked (bootstrap).
 
 Plus is_leeching(cfg) for the startup reprimand. All of this is a no-op when no federation is
 configured, so the rest of the app is unaffected when sharing is off.
@@ -87,14 +89,16 @@ def _clip(dense: dict, max_norm: float) -> dict:
 
 
 def _pack(masked: torch.Tensor, spec: list, compat: str, model_id: str, round_id: str,
-          token: str) -> bytes:
-    # Carry the layout (spec) + base hash so the server can rebuild, place, and check each ΔW, the
+          token: str, stamp: dict | None = None) -> bytes:
+    # Carry the layout (spec) + base hash so the server can rebuild, place, and check each Δ, the
     # round_id from registration so the server routes this upload to the cohort we masked against, and
-    # the token proving we're the registrant who masked against that cohort's peer set.
+    # the token proving we're the registrant who masked against that cohort's peer set. `stamp` = the
+    # factor contract's {base, epoch} (see delta.py).
     spec_json = [[k, list(shape)] for k, shape in spec]
     return st_save({"masked": masked},
                    metadata={"model_id": model_id, "compat": compat,
-                             "spec": json.dumps(spec_json), "round_id": round_id, "token": token})
+                             "spec": json.dumps(spec_json), "round_id": round_id, "token": token,
+                             **(stamp or {})})
 
 
 def contribute_delta(delta: dict, cfg: dict) -> bool:
@@ -129,12 +133,53 @@ def contribute_delta(delta: dict, cfg: dict) -> bool:
         res = transport.register_and_peers(url, pub, model_id)
         if res is None:                         # unreachable/sub-quorum: don't upload an unmaskable payload
             continue
-        round_id, token, peers = res
+        round_id, token, peers, _ = res
         masked = secure_agg.mask(q, priv, peers)
         # "ok" = received into a collecting cohort, not that the round finalized (no finalization signal).
         if transport.contribute(url, _pack(masked, spec, compat, model_id, round_id, token)) == "ok":
             accepted = True
     return accepted
+
+
+def _clip_factor(update: dict, max_norm: float) -> dict:
+    # Same best-effort bound as _clip, in factor space: the server voids a cohort whose ‖ΣΔ‖ exceeds
+    # k·clip, so an honest member keeps its own ‖Δ‖ within the clip.
+    total = float(torch.sqrt(sum((t.float() ** 2).sum() for t in update.values())))
+    if total <= max_norm:
+        return update
+    return {k: v.float() * (max_norm / (total + 1e-12)) for k, v in update.items()}
+
+
+def contribute_factor(url: str, update: dict, base: dict, epoch: int, model_id: str,
+                      mode: str = "busy") -> bool:
+    """Upload one round's factor update {`<module>.lora_B.weight` (or A): Δ} to ONE federation, in the
+    regime `mode` its /status reported. Under the factor contract a member contributes to exactly one
+    federation — the one whose global it trained against — since Δ is only meaningful next to that
+    federation's frozen factor. Returns whether the upload was accepted; the caller keeps its data
+    otherwise.
+    bootstrap: Gaussian noise straight on the factor (σ = DP_Z·rms(Δ)); the frozen factor is public and
+      the map Δ ↦ Δ·A linear, so the weight-space noise is exactly Gaussian (unlike the dense scheme).
+    busy: quantize + mask against the sealed cohort; dropped if the cohort sealed in a later epoch,
+      since the server would void it anyway."""
+    update = _clip_factor(update, CLIP_NORM)
+    stamp = {"base": delta_mod.base_to_json(base), "epoch": str(epoch)}
+    if mode == "bootstrap":
+        noisy = {}
+        for k, v in update.items():
+            v = v.float()
+            noisy[k] = v + torch.randn(v.shape) * (DP_Z * v.pow(2).mean().sqrt())
+        return transport.contribute_dp(url, delta_mod.to_bytes(noisy, model_id, stamp)) == "ok"
+    q, spec = secure_agg.quantize(update)
+    priv, pub = secure_agg.gen_keypair()
+    res = transport.register_and_peers(url, pub, model_id)
+    if res is None:                              # unreachable/sub-quorum: never upload an unmaskable payload
+        return False
+    round_id, token, peers, sealed_epoch = res
+    if sealed_epoch is not None and int(sealed_epoch) != epoch:
+        return False                             # trained against a factor the federation moved past
+    compat = delta_mod.compat_from_shapes(base)
+    blob = _pack(secure_agg.mask(q, priv, peers), spec, compat, model_id, round_id, token, stamp)
+    return transport.contribute(url, blob) == "ok"
 
 
 def maybe_daily_pull(cfg: dict) -> bool:
