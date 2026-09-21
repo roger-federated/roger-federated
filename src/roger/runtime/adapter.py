@@ -109,13 +109,28 @@ def _adapter_stem(hint: str) -> str:
 
 def prepare(argv: list[str], out=sys.stderr) -> tuple[str, int] | None:
     """The wrapper's one call before spawning the runtime: today's pull (first launch of the day) and the
-    adapter to attach for this command line — (path, rank), or None when there's nothing to attach."""
+    adapter to attach for this command line — (path, rank), or None when there's nothing to attach. The
+    two ways a command line rules the update out on its own — the user's own LoRA, and no model named —
+    are warned about rather than passed over silently: neither is visible from the session otherwise."""
     from roger import config              # first run writes the default config = default federation
     cfg = config.load()
     feds = cfg.get("federations") or []
+    runtime = dialect.runtime_name(argv[0])
+    spec = dialect.RUNTIMES.get(runtime)
+    if not feds or spec is None:
+        return None                       # opted out, or a runtime whose adapter format we don't know
+    # Both checks below cost the user the federation silently if left unsaid: the command line looks
+    # like a working roger session either way, and the loss only shows up as chats that never train.
+    if (flag := dialect.user_adapter(argv)) is not None:
+        print(f"roger: cannot attach the federation's LoRA adapter because {flag} already loads one of "
+              "yours; drop it to receive the federation's update. Chats are still saved and graded.",
+              file=out)
+        return None
     hint = dialect.served_model(argv)
-    spec = dialect.RUNTIMES.get(dialect.runtime_name(argv[0]))
-    if not feds or hint is None or spec is None:
+    if hint is None:
+        print(f"roger: this {runtime} command line doesn't name a model ({dialect.names_model(spec)}), "
+              "so roger can't tell which model is served: no federation update will be attached and "
+              "this session's chats can't be trained on. They're still saved and graded.", file=out)
         return None
     notice.privacy_notice(cfg, out)               # before the pull below: the first federation contact
     pull_today(feds, hint, out)
