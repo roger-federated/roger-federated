@@ -37,10 +37,12 @@
   pulled on the first launch of the UTC day (state + blob keyed per federation *and* served model), and
   every launch rebuilds a LoRA adapter from disk — GGUF (`--lora`, alpha=0 ⇒ scale 1, arch/shapes from the
   base gguf header, llama q-row permute) or PEFT dir (vllm `--enable-lora --lora-modules roger=… --max-lora-rank`,
-  proxy rewrites chat requests' `model` to `roger`). Torch-free. Two command lines rule the update out
-  by themselves and warn on stderr rather than skipping silently: one already loading the user's own LoRA
-  (`dialect.user_adapter`; roger neither stacks onto it nor overwrites it) and one naming no model at all
-  (llama-server's `-hf`, a vllm config file), which also means those chats can never be trained on. It expects the broadcast in **LoRA-factor
+  proxy rewrites chat requests' `model` to `roger`). Torch-free. Three command lines rule the update
+  out by themselves and warn on stderr rather than skipping silently (the relay, capture and grading work
+  regardless, so the session otherwise looks healthy): a runtime outside `RUNTIMES`, one already loading
+  the user's own LoRA (`dialect.user_adapter`; roger neither stacks onto it nor overwrites it), and one
+  naming no model at all (llama-server's `-hf`, a vllm config file). The first and last also mean
+  `served_model` is null on every capture, so those chats can never be trained on. It expects the broadcast in **LoRA-factor
   form** (contract in `federated/delta.py` docstring), which `roger-server` now serves. **Automatic
   training round** (`runtime/train.py` gate, `training/wire_trainer.py` torch half): after the runtime exits
   (VRAM free), once ≥ `train_every` graded conversations for the served model exist (newest capture file of

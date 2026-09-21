@@ -110,17 +110,25 @@ def _adapter_stem(hint: str) -> str:
 def prepare(argv: list[str], out=sys.stderr) -> tuple[str, int] | None:
     """The wrapper's one call before spawning the runtime: today's pull (first launch of the day) and the
     adapter to attach for this command line — (path, rank), or None when there's nothing to attach. The
-    two ways a command line rules the update out on its own — the user's own LoRA, and no model named —
-    are warned about rather than passed over silently: neither is visible from the session otherwise."""
+    three ways a command line rules the update out on its own — an unknown runtime, the user's own LoRA,
+    and no model named — are warned about rather than passed over silently; none of them is visible from
+    the session otherwise. Opting out of the federation is the user's own doing, so it says nothing."""
     from roger import config              # first run writes the default config = default federation
     cfg = config.load()
     feds = cfg.get("federations") or []
+    if not feds:
+        return None                       # opted out of the federation entirely: nothing to attach
     runtime = dialect.runtime_name(argv[0])
     spec = dialect.RUNTIMES.get(runtime)
-    if not feds or spec is None:
-        return None                       # opted out, or a runtime whose adapter format we don't know
-    # Both checks below cost the user the federation silently if left unsaid: the command line looks
-    # like a working roger session either way, and the loss only shows up as chats that never train.
+    # Each check below costs the user the federation silently if left unsaid: the relay, the capture and
+    # the self-grading all work regardless, so the session looks healthy and the loss only shows up as
+    # chats that never train. notice.announce makes that worse — it reads the model off /v1/models, so it
+    # will report the federation as training this very model while nothing here can train it.
+    if spec is None:
+        print(f"roger: {runtime} isn't a runtime roger knows ({', '.join(dialect.RUNTIMES)}), so no "
+              "federation update can be attached and this session's chats can't be trained on. They're "
+              "still saved and graded.", file=out)
+        return None
     if (flag := dialect.user_adapter(argv)) is not None:
         print(f"roger: cannot attach the federation's LoRA adapter because {flag} already loads one of "
               "yours; drop it to receive the federation's update. Chats are still saved and graded.",

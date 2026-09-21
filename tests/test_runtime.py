@@ -664,7 +664,8 @@ def test_prepare_reports_dense_global_and_builds_peft_for_vllm(tmp_path, monkeyp
     d, rank = adapter.prepare(["vllm", "serve", "google/gemma-4-12B-it", "--port", "8000"], out=err)
     assert os.path.isfile(os.path.join(d, "adapter_config.json")) and rank == 2
     assert json.loads(open(os.path.join(d, "adapter_config.json")).read())["base_model_name_or_path"] == "google/gemma-4-12B-it"
-    # Unknown runtime / no model on the command line / no federations: nothing happens at all.
+    # Unknown runtime / no model on the command line / no federations: nothing is attached (the first
+    # two say why — see test_prepare_warns_instead_of_skipping_silently).
     assert adapter.prepare(["someserver", "--model", "x", "--port", "1"], out=err) is None
     assert adapter.prepare(["vllm", "serve", "--port", "8000"], out=err) is None
     monkeypatch.setattr("roger.config.load", lambda: {"federations": []})
@@ -692,10 +693,14 @@ def test_prepare_warns_instead_of_skipping_silently(tmp_path, monkeypatch):
     err = io.StringIO()
     assert adapter.prepare(["vllm", "serve", "--port", "8000"], out=err) is None
     assert "serve <model> / --model" in err.getvalue()
-    # A runtime roger knows nothing about is not its business to comment on.
+    # A runtime roger has no adapter format for: relay and grading still work, training never will.
     err = io.StringIO()
-    assert adapter.prepare(["someserver", "--lora", "x", "--port", "1"], out=err) is None
-    assert err.getvalue() == ""
+    assert adapter.prepare(["someserver", "--model", "x", "--port", "1"], out=err) is None
+    assert "isn't a runtime roger knows" in err.getvalue() and "llama-server" in err.getvalue()
+    # Opting out of the federation is the user's own doing: nothing to warn about.
+    monkeypatch.setattr("roger.config.load", lambda: {"federations": []})
+    err = io.StringIO()
+    assert adapter.prepare(["someserver", "--port", "1"], out=err) is None and err.getvalue() == ""
     assert pulls == []                      # none of these reached the federation at all
 
 
