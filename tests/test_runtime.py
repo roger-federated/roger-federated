@@ -664,11 +664,44 @@ def test_prepare_reports_dense_global_and_builds_peft_for_vllm(tmp_path, monkeyp
     d, rank = adapter.prepare(["vllm", "serve", "google/gemma-4-12B-it", "--port", "8000"], out=err)
     assert os.path.isfile(os.path.join(d, "adapter_config.json")) and rank == 2
     assert json.loads(open(os.path.join(d, "adapter_config.json")).read())["base_model_name_or_path"] == "google/gemma-4-12B-it"
-    # Unknown runtime / no model on the command line / no federations: nothing happens at all.
+    # Unknown runtime / no model on the command line / no federations: nothing is attached (the first
+    # two say why — see test_prepare_warns_instead_of_skipping_silently).
     assert adapter.prepare(["someserver", "--model", "x", "--port", "1"], out=err) is None
     assert adapter.prepare(["vllm", "serve", "--port", "8000"], out=err) is None
     monkeypatch.setattr("roger.config.load", lambda: {"federations": []})
     assert adapter.prepare(["vllm", "serve", "google/gemma-4-12B-it", "--port", "8000"], out=err) is None
+
+
+def test_prepare_warns_instead_of_skipping_silently(tmp_path, monkeypatch):
+    import io
+    base = _base_gguf(tmp_path / "gemma-4-12B-it-Q4_K_M.gguf")
+    blob, _ = _factor_blob()
+    pulls, _ = _fed_env(tmp_path, monkeypatch, {"mode": "busy", "models": None}, blob)
+    # The user's own LoRA wins, and is said so: roger's is never appended next to it.
+    err = io.StringIO()
+    argv = ["llama-server", "--lora", "mine.gguf", "-m", base, "--port", "8080"]
+    assert adapter.prepare(argv, out=err) is None
+    assert "cannot attach" in err.getvalue() and "--lora" in err.getvalue()
+    err = io.StringIO()
+    assert adapter.prepare(["vllm", "serve", "org/name", "--enable-lora", "--port", "8000"], out=err) is None
+    assert "cannot attach" in err.getvalue() and "--enable-lora" in err.getvalue()
+    # No model named (llama-server's -hf download, a vllm config file): the session would otherwise look
+    # healthy while contributing nothing, so the flags that would fix it are named.
+    err = io.StringIO()
+    assert adapter.prepare(["llama-server", "-hf", "org/name-GGUF", "--port", "8080"], out=err) is None
+    assert "doesn't name a model" in err.getvalue() and "-m / --model" in err.getvalue()
+    err = io.StringIO()
+    assert adapter.prepare(["vllm", "serve", "--port", "8000"], out=err) is None
+    assert "serve <model> / --model" in err.getvalue()
+    # A runtime roger has no adapter format for: relay and grading still work, training never will.
+    err = io.StringIO()
+    assert adapter.prepare(["someserver", "--model", "x", "--port", "1"], out=err) is None
+    assert "isn't a runtime roger knows" in err.getvalue() and "llama-server" in err.getvalue()
+    # Opting out of the federation is the user's own doing: nothing to warn about.
+    monkeypatch.setattr("roger.config.load", lambda: {"federations": []})
+    err = io.StringIO()
+    assert adapter.prepare(["someserver", "--port", "1"], out=err) is None and err.getvalue() == ""
+    assert pulls == []                      # none of these reached the federation at all
 
 
 # ---------------------------------------------------------------------------
