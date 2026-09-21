@@ -37,7 +37,10 @@
   pulled on the first launch of the UTC day (state + blob keyed per federation *and* served model), and
   every launch rebuilds a LoRA adapter from disk — GGUF (`--lora`, alpha=0 ⇒ scale 1, arch/shapes from the
   base gguf header, llama q-row permute) or PEFT dir (vllm `--enable-lora --lora-modules roger=… --max-lora-rank`,
-  proxy rewrites chat requests' `model` to `roger`). Torch-free. It expects the broadcast in **LoRA-factor
+  proxy rewrites chat requests' `model` to `roger`). Torch-free. Two command lines rule the update out
+  by themselves and warn on stderr rather than skipping silently: one already loading the user's own LoRA
+  (`dialect.user_adapter`; roger neither stacks onto it nor overwrites it) and one naming no model at all
+  (llama-server's `-hf`, a vllm config file), which also means those chats can never be trained on. It expects the broadcast in **LoRA-factor
   form** (contract in `federated/delta.py` docstring), which `roger-server` now serves. **Automatic
   training round** (`runtime/train.py` gate, `training/wire_trainer.py` torch half): after the runtime exits
   (VRAM free), once ≥ `train_every` graded conversations for the served model exist (newest capture file of
@@ -154,8 +157,8 @@
 - `config.py` — `~/.roger/config.json` (+ the shipped `config.json` defaults as package data)
 - `runtime/`  — the provider wrapper (the entry point): `wrapper` (console script `main`, process
                 lifecycle, Ctrl-C), `dialect` (**all runtime/framework-specific code lives here and only
-                here**: `plan` = `--port` argv rewrite, `RUNTIMES` table of model flags + adapter args,
-                GGUF/PEFT adapter writers), `proxy` (runtime-agnostic stdlib `ThreadingHTTPServer`
+                here**: `plan` = `--port` argv rewrite, `RUNTIMES` table of model flags, adapter
+                args and the user's own LoRA flags, GGUF/PEFT adapter writers), `proxy` (runtime-agnostic stdlib `ThreadingHTTPServer`
                 reverse proxy over a shared `httpx.Client`, streaming relay), `capture` (chat-path
                 filter, SSE→non-stream reassembly, atomic JSON writes + `update_record` to `messages/`),
                 `notice` (runtime `/v1/models` → federation `/status` supported-model verdicts on stderr,

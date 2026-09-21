@@ -5,8 +5,9 @@ every supported server speaks, adapter.py pulls the federation's update. What di
   - the command line: the `--port`/`--host` convention `plan()` rewrites to slot the proxy in front, and
     where each runtime names its model (`served_model`);
   - how it loads a LoRA: llama.cpp's GGUF adapter (`build_gguf`) and PEFT's directory layout, which vllm
-    reads (`build_peft`), plus the arguments that attach one (`attach_adapter`) and, for vllm, the model
-    name chat requests must be pointed at.
+    reads (`build_peft`), plus the arguments that attach one (`attach_adapter`), the flags that say the
+    user is already loading one of their own (`user_adapter`) and, for vllm, the model name chat requests
+    must be pointed at.
 Supporting another runtime means one more `RUNTIMES` entry (and a writer, if its adapter format is new).
 Runtimes with their own conventions (ollama's env-configured port and native NDJSON dialect, LM Studio's
 detached `lms server start`) are deliberately not special-cased.
@@ -217,18 +218,22 @@ def _vllm_rank(r: int) -> int:
 # positional after a subcommand) — what the daily pull resolves against the federation's allowlist and
 # what the adapter is built for. `build`: writes the adapter in the format the runtime loads a LoRA in
 # (signature of build_gguf/build_peft). `adapter_args`: the arguments that attach one at `path` of rank `r`.
+# `adapter_flags`: the same territory seen from the user's side — the flags that mean they are already
+# loading a LoRA of their own, which roger must not fight over (see `user_adapter`).
 # `request_model`: the model name chat requests must carry to hit the adapter (llama-server applies
 # `--lora` to everything; vllm serves it as a separate model).
 RUNTIMES = {
     "llama-server": dict(
         model_flags=("-m", "--model"), model_after=None,
-        build=build_gguf, adapter_args=lambda path, r: ["--lora", path], request_model=None),
+        build=build_gguf, adapter_args=lambda path, r: ["--lora", path], request_model=None,
+        adapter_flags=("--lora", "--lora-scaled")),
     "vllm": dict(
         model_flags=("--model",), model_after="serve",
         build=build_peft,
         adapter_args=lambda path, r: ["--enable-lora", "--lora-modules", f"{LORA_NAME}={path}",
                                       "--max-lora-rank", str(_vllm_rank(r))],
-        request_model=LORA_NAME),
+        request_model=LORA_NAME,
+        adapter_flags=("--enable-lora", "--lora-modules", "--max-lora-rank")),
 }
 
 
@@ -250,6 +255,29 @@ def served_model(argv: list[str]) -> str | None:
         i = argv.index(spec["model_after"]) + 1
         if i < len(argv) and not argv[i].startswith("-"):
             return argv[i]
+    return None
+
+
+def names_model(spec: dict) -> str:
+    """How this runtime is told which model to serve ("-m / --model"), for the warning when the command
+    line doesn't — derived from the same table `served_model` reads, so it can't drift from it."""
+    ways = list(spec["model_flags"])
+    if spec["model_after"]:
+        ways.insert(0, f"{spec['model_after']} <model>")
+    return " / ".join(ways)
+
+
+def user_adapter(argv: list[str]) -> str | None:
+    """The LoRA flag the user put on the command line themselves, or None. roger attaches the federation's
+    update through those very flags, so appending its own would either stack two adapters (llama-server
+    applies every `--lora`) or overwrite the user's (a repeated `--lora-modules`/`--max-lora-rank` is
+    last-wins) — in both cases silently serving something neither side asked for. Their adapter wins."""
+    spec = RUNTIMES.get(runtime_name(argv[0]))
+    if spec is None:
+        return None
+    for a in argv[1:]:
+        if a.split("=", 1)[0] in spec["adapter_flags"]:       # both `--lora X` and `--lora=X`
+            return a.split("=", 1)[0]
     return None
 
 
