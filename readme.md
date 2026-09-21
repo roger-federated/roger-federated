@@ -44,7 +44,9 @@ uv tool install . --torch-backend auto   # installs `roger` globally; auto-picks
 
 **Run:**
 
-Roger wraps the local runtime you already use: prefix its usual command with `roger` and pass the arguments as normal. The user must specify `--port` so that roger can relay it. Therefore, runtimes with conventions that are not OpenAI-compatible (ollama and LM Studio) are not supported yet
+Roger wraps the local runtime you already use: prefix its usual command with `roger` and pass the arguments as normal. The user must specify `--port` so that roger can relay it. Therefore, runtimes with conventions that are not OpenAI-compatible (ollama and LM Studio) are not supported yet.
+
+If you are new to using a local runtime, click [`here`](https://docs.vllm.ai/en/latest/getting_started/installation/) to install vLLM.
 
 ```bash
 roger vllm serve google/gemma-4-12B-it --port 8000
