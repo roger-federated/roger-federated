@@ -51,7 +51,8 @@
   (VRAM free), once ≥ `train_every` graded conversations for the served model exist (newest capture file of
   each chat, deduped by prefix; captures carry `served_model`), it trains in the foreground (Ctrl-C skips) on
   the model loaded *without download* — llama-server's GGUF via transformers `gguf_file=` (gemma-4 needs a
-  transformers with the gemma4 GGUF processor: on main, not in 5.17.0), vllm's HF cache `local_files_only` —
+  transformers with the gemma4 GGUF processor: on main, not in 5.17.0), vllm's HF cache `local_files_only`, an MLX quant (vllm-metal on Apple silicon) via `mx.dequantize` →
+  text-only CausalLM (`wire_trainer._load_mlx`; `mlx` dep on darwin-arm64) —
   and uploads to exactly ONE federation (first in `federations` order that trains the model; only its global is
   attached for training, at scale 1 — while inference attaches all globals concatenated, each at 1/N); accepted ⇒ the conversation files (+ superseded prefixes) are
   deleted. **Factor contract (RoLoRA, mirrors roger-server):** each epoch trains one factor (`/status`

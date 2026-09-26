@@ -13,11 +13,13 @@ Training happens with the federation's global adapter attached — in fact the g
 trained. Under the factor contract (federated/delta.py) an epoch trains one factor against the other,
 frozen: the adapter is initialised from the persisted global (or, on a cold federation, the derived
 `init_A` and B=0), only `phase`'s factor gets gradients, and what is shared is that factor's Δ. The model
-is loaded without any download: llama-server's GGUF is dequantized by transformers (`gguf_file=`), and
-vllm's HF weights come from the cache `vllm serve` filled (`local_files_only`).
+is loaded without any download: llama-server's GGUF is dequantized by transformers (`gguf_file=`), vllm's
+HF weights come from the cache `vllm serve` filled (`local_files_only`), and an MLX checkpoint (what
+vllm-metal serves on Apple silicon) is dequantized by MLX itself (`_load_mlx`).
 """
 import json, os, re
 
+import numpy as np
 import torch
 
 from roger.federated import delta as delta_mod
@@ -28,18 +30,76 @@ from roger.training import lora_utils, trainer
 # Loading
 # ---------------------------------------------------------------------------
 
+def _mlx_dir(source: str) -> str | None:
+    """The local directory of `source` when it is an MLX quantized checkpoint, else None. mlx-lm/mlx-vlm
+    record their quantization under `quantization` in config.json (transformers' own quants use
+    `quantization_config` + `quant_method`), and store it as packed ints + per-group `scales`/`biases`
+    that transformers can't load."""
+    if source.endswith(".gguf"):
+        return None
+    try:
+        from huggingface_hub import snapshot_download
+        d = source if os.path.isdir(source) else snapshot_download(source, local_files_only=True)
+        with open(os.path.join(d, "config.json")) as f:
+            return d if "quantization" in json.load(f) else None
+    except Exception:
+        return None
+
+
+def _load_mlx(d: str, dtype):
+    """The language model of an MLX checkpoint as transformers' text-only CausalLM. Dequantized by MLX's
+    own `mx.dequantize`, which knows every mode MLX writes (affine at any width, mxfp4/nvfp4/mxfp8), so no
+    bit layout is re-derived here; per-layer overrides in `quantization` cover mixed-precision quants
+    (OptiQ). Beyond that the checkpoint IS the HF weights: an MLX VLM keeps the decoder under
+    `language_model.` (`language_model.model.layers.N…`, the rest HF's naming; checked tensor by tensor
+    against google/gemma-4-12B-it: norms bit-identical, every projection within quantization error), so
+    stripping that prefix yields the text model's state dict, and the vision/audio towers, which training
+    never touches, are left out."""
+    import mlx.core as mx
+    from transformers import AutoConfig
+    from transformers.models.auto.modeling_auto import MODEL_FOR_CAUSAL_LM_MAPPING
+    with open(os.path.join(d, "config.json")) as f:
+        q = json.load(f)["quantization"]
+    W = {}
+    for name in sorted(os.listdir(d)):
+        if name.endswith(".safetensors"):
+            W.update(mx.load(os.path.join(d, name)))   # lazy: nothing is read until dequantized below
+    vlm = any(k.startswith("language_model.") for k in W)
+    sd = {}
+    for k, w in W.items():
+        if (vlm and not k.startswith("language_model.")) or k.endswith((".scales", ".biases")):
+            continue
+        base = k.removesuffix(".weight")
+        if base + ".scales" in W:
+            lq = q[base] if isinstance(q.get(base), dict) else q
+            w = mx.dequantize(w, W[base + ".scales"], W.get(base + ".biases"),
+                              group_size=lq.get("group_size", q["group_size"]), bits=lq.get("bits", q["bits"]),
+                              mode=lq.get("mode", q.get("mode", "affine")))
+        # One tensor at a time through float32 (numpy has no bf16), so the peak is the model at `dtype`.
+        sd[k.removeprefix("language_model.") if vlm else k] = torch.from_numpy(np.array(w.astype(mx.float32))).to(dtype)
+    del W
+    tc = AutoConfig.from_pretrained(d).get_text_config()
+    # The concrete class: the Auto* front refuses a None path, which is how a state dict is handed over.
+    return MODEL_FOR_CAUSAL_LM_MAPPING[type(tc)].from_pretrained(None, config=tc, state_dict=sd, dtype=dtype)
+
+
 def load(source: str):
     """(model, tokenizer) for the model the runtime served: a local .gguf (llama-server's `-m`) is
-    dequantized by transformers; anything else (vllm's HF id or local dir) is read from disk/cache only.
-    Raises when transformers can't load it (e.g. an architecture its GGUF loader doesn't map yet)."""
+    dequantized by transformers, an MLX checkpoint (vllm-metal) by MLX; anything else (vllm's HF id or
+    local dir) is read from disk/cache only. Raises when transformers can't load it (e.g. an architecture
+    its GGUF loader doesn't map yet)."""
     from transformers import AutoModelForCausalLM, AutoTokenizer
+    cuda = torch.cuda.is_available()
+    dtype = torch.bfloat16 if cuda or torch.backends.mps.is_available() else torch.float32
+    if (mlx := _mlx_dir(source)) is not None:
+        model, tok = _load_mlx(mlx, dtype), AutoTokenizer.from_pretrained(mlx)
+        return (model.to("mps") if torch.backends.mps.is_available() else model), tok
     if source.endswith(".gguf") and os.path.isfile(source):
         where, kw = os.path.dirname(os.path.abspath(source)), {"gguf_file": os.path.basename(source)}
     else:
         where, kw = source, {"local_files_only": True}
     tok = AutoTokenizer.from_pretrained(where, **kw)
-    cuda = torch.cuda.is_available()
-    load_kw = {"dtype": torch.bfloat16 if cuda or torch.backends.mps.is_available() else torch.float32}
+    load_kw = {"dtype": dtype}
     if cuda:
         load_kw["device_map"] = "auto"            # offloads to CPU when the model outgrows the GPU
         if "gguf_file" not in kw:                 # QLoRA on CUDA; a dequantized GGUF stays bf16

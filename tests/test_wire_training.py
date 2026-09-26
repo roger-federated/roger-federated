@@ -285,3 +285,41 @@ def test_maybe_train_names_the_skipped_preferred_federation(msgs_dir, monkeypatc
     rt_train.maybe_train("llama-server", "m.gguf", _CFG, out=out)
     assert "not training for http://a: unreachable." in out.getvalue()
     assert "training for http://b instead" in out.getvalue()
+
+
+def test_load_mlx_checkpoint(tmp_path):
+    # vllm-metal serves MLX checkpoints: packed ints + per-group scales/biases under MLX-VLM naming
+    # (`language_model.…`), per-layer bit overrides (OptiQ), towers the text model must ignore. The loader
+    # must hand back transformers' text model with every weight within quantization error of the original.
+    mx = pytest.importorskip("mlx.core")                     # Apple silicon only, like the checkpoints
+    from transformers import LlamaConfig, LlamaForCausalLM
+    from roger.training import wire_trainer
+    torch.manual_seed(0)
+    cfg = LlamaConfig(vocab_size=128, hidden_size=64, intermediate_size=128, num_hidden_layers=2,
+                      num_attention_heads=4, num_key_value_heads=2, tie_word_embeddings=False)
+    ref = LlamaForCausalLM(cfg).eval()
+    W, q = {}, {"group_size": 32, "bits": 4, "mode": "affine"}
+    for k, t in ref.state_dict().items():
+        a, key = mx.array(t.float().numpy()), "language_model." + k
+        if k.endswith("proj.weight"):
+            bits = 8 if "layers.0." in k else 4
+            if bits != 4:
+                q[key.removesuffix(".weight")] = {"group_size": 32, "bits": bits}
+            base = key.removesuffix(".weight")
+            W[key], W[base + ".scales"], W[base + ".biases"] = mx.quantize(a, group_size=32, bits=bits)
+        else:
+            W[key] = a.astype(mx.bfloat16)
+    W["vision_tower.patch.weight"] = mx.zeros((4, 4))
+    mx.save_safetensors(str(tmp_path / "model.safetensors"), W)
+    (tmp_path / "config.json").write_text(json.dumps({**cfg.to_dict(), "quantization": q}))
+    assert wire_trainer._mlx_dir(str(tmp_path)) == str(tmp_path)
+    assert wire_trainer._mlx_dir("m.gguf") is None and wire_trainer._mlx_dir("no/such-repo") is None
+    m = wire_trainer._load_mlx(str(tmp_path), torch.float32).eval()
+    got = m.state_dict()
+    for k, t in ref.state_dict().items():
+        rel = float((got[k] - t).norm() / t.norm())
+        # 8-bit ≈ 0.4%, 4-bit ≈ 8%, unquantized bf16 ≈ 0.2%
+        assert rel < (0.02 if "layers.0." in k and "proj" in k else 0.15 if "proj" in k else 0.01), (k, rel)
+    ids = torch.tensor([[1, 5, 9, 17, 33]])
+    with torch.no_grad():
+        assert (m(ids).logits - ref(ids).logits).abs().max() < 0.2

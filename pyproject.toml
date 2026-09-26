@@ -14,6 +14,8 @@ dependencies = [
     "numpy",         # builds the runtime's LoRA adapter without torch (runtime/adapter.py)
     "safetensors",   # the federated wire format, read torch-free by runtime/adapter.py
     "gguf",          # writes llama.cpp LoRA adapters for the federation update (runtime/adapter.py)
+    "mlx; sys_platform == 'darwin' and platform_machine == 'arm64'",   # dequantizes vllm-metal's MLX
+                     # checkpoints for the training round (training/wire_trainer._load_mlx)
     "cryptography",  # X25519 EC-DH pairwise secrets for secure aggregation (federated/secure_agg.py)
     "torch",
     "transformers",  # dequantizes llama-server's GGUF for the training round (gguf_file=); gemma-4 GGUFs
