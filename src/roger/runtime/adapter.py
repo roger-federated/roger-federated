@@ -44,8 +44,7 @@ def pull_today(feds: list[str], hint: str, out=sys.stderr) -> bool:
         if st.get("last_sync") == today:
             continue
         status = transport.federation_status(url, hint)
-        accepted = status.get("models")           # None: no allowlist (or a server predating the field)
-        model_id = notice.resolve([hint], accepted) if accepted is not None else hint
+        model_id = notice.resolve([hint], status)  # the canonical id, via the federation's alias table
         if status and model_id is not None and status.get("mode", "busy") != "unsupported":
             print(f"roger: pulling today's federation update for {model_id} from {url}…", file=out)
             res = transport.pull(url, st.get("cursor"), model_id)

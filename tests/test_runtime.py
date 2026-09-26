@@ -340,16 +340,54 @@ from roger.runtime import notice
 
 
 def test_resolve_matches_runtime_names_to_accepted_ids():
-    accepted = ["google/gemma-4-12B-it", "google/gemma-4-12B-it-assistant", "google/gemma-4-E2B-it"]
+    # A server predating the alias table: the name-containment heuristic.
+    st = {"models": ["google/gemma-4-12B-it", "google/gemma-4-12B-it-assistant", "google/gemma-4-E2B-it"]}
     # A gguf path with a quantization suffix, an exact HF id, and an alias all name the same base.
-    assert notice.resolve(["/models/gemma-4-12B-it-Q4_K_M.gguf"], accepted) == "google/gemma-4-12B-it"
-    assert notice.resolve(["google/gemma-4-12B-it"], accepted) == "google/gemma-4-12B-it"
-    assert notice.resolve(["Gemma_4_12b_IT"], accepted) == "google/gemma-4-12B-it"
+    assert notice.resolve(["/models/gemma-4-12B-it-Q4_K_M.gguf"], st) == "google/gemma-4-12B-it"
+    assert notice.resolve(["google/gemma-4-12B-it"], st) == "google/gemma-4-12B-it"
+    assert notice.resolve(["Gemma_4_12b_IT"], st) == "google/gemma-4-12B-it"
     # Longest name wins: the drafter must not resolve to the base it extends.
-    assert notice.resolve(["gemma-4-12B-it-assistant.gguf"], accepted) == "google/gemma-4-12B-it-assistant"
-    assert notice.resolve(["gemma-4-E2B-it-Q8_0.gguf"], accepted) == "google/gemma-4-E2B-it"
-    assert notice.resolve(["meta-llama/Llama-3.1-8B-Instruct"], accepted) is None
-    assert notice.resolve([], accepted) is None and notice.resolve(["x"], []) is None
+    assert notice.resolve(["gemma-4-12B-it-assistant.gguf"], st) == "google/gemma-4-12B-it-assistant"
+    assert notice.resolve(["gemma-4-E2B-it-Q8_0.gguf"], st) == "google/gemma-4-E2B-it"
+    assert notice.resolve(["meta-llama/Llama-3.1-8B-Instruct"], st) is None
+    assert notice.resolve([], st) is None and notice.resolve(["x"], {"models": []}) is None
+    # No allowlist: the raw id stands for itself.
+    assert notice.resolve(["x/y"], {}) == "x/y"
+
+
+def test_resolve_by_alias_table(tmp_path):
+    import gguf
+    g, qat = "google/gemma-4-12B-it", "google/gemma-4-12B-it-qat-q4_0-unquantized"
+    st = {"models": [g, qat], "aliases": {g: ["mlx-community/gemma-4-12B-it-OptiQ-4bit", "unsloth/gemma-4-12b-it-GGUF"],
+                                           qat: ["mlx-community/gemma-4-12B-it-qat-4bit"]}}
+    # An alias by hub id (vllm), case-insensitively, and inside the HF cache (vllm / `hf download`).
+    assert notice.resolve(["mlx-community/gemma-4-12B-it-OptiQ-4bit"], st) == g
+    assert notice.resolve(["MLX-Community/Gemma-4-12B-it-optiq-4bit"], st) == g
+    assert notice.resolve(["mlx-community/gemma-4-12B-it-qat-4bit"], st) == qat
+    hub = "/u/.cache/huggingface/hub/models--unsloth--gemma-4-12b-it-GGUF/snapshots/abc/gemma-4-12b-it-Q4_K_M.gguf"
+    assert notice.resolve([hub], st) == g
+    # A llama.cpp -hf download, cached flat as org_name_<file>.
+    assert notice.resolve(["/u/Library/Caches/llama.cpp/unsloth_gemma-4-12b-it-GGUF_gemma-4-12b-it-Q4_K_M.gguf"], st) == g
+    # Same-named forks and unlisted builds do NOT resolve, however close the name: that is the point.
+    for fork in ["someone/gemma-4-12B-it-heretic", "mlx-community/gemma-4-12B-it-OptiQ-4bit-SWE",
+                 "/models/gemma-4-12B-it-Q4_K_M.gguf",           # bare file, no readable header
+                 "/hub/models--zaakirio--gemma-4-12b-it-uncensored-GGUF/snapshots/a/x.gguf"]:
+        assert notice.resolve([fork], st) is None, fork
+    # A bare GGUF on disk: the header's declared name decides; equality, never containment.
+    def gguf_named(name, fname):
+        w = gguf.GGUFWriter(str(tmp_path / fname), "gemma4")
+        w.add_name(name)
+        w.add_tensor("t", np.zeros((2, 2), dtype=np.float32))
+        w.write_header_to_file(); w.write_kv_data_to_file(); w.write_tensors_to_file(); w.close()
+        return str(tmp_path / fname)
+    assert notice.resolve([gguf_named("Gemma 4 12B It", "a.gguf")], st) == g
+    assert notice.resolve([gguf_named("Google_Gemma 4 12B It", "b.gguf")], st) == g      # LM Studio's form
+    assert notice.resolve([gguf_named("Gemma 4 12B It Qat Q4_0 Unquantized", "c.gguf")], st) == qat
+    assert notice.resolve([gguf_named("Gemma 4 12B It Heretic", "gemma-4-12B-it-Q4_K_M.gguf")], st) is None
+    # No allowlist: aliases still fold into their canonical (one global per model, not per quant).
+    anyst = {"models": None, "aliases": st["aliases"]}
+    assert notice.resolve(["mlx-community/gemma-4-12B-it-OptiQ-4bit"], anyst) == g
+    assert notice.resolve(["x/y"], anyst) == "x/y"
 
 
 class _Runtime(BaseHTTPRequestHandler):
@@ -406,6 +444,10 @@ def test_announce_verdicts(monkeypatch):
     # Unsupported: says so, lists what IS accepted so the user can switch.
     s = _announce(["llama-3.1-8b.gguf"], {"https://f": {"mode": "unsupported", "models": accepted}}, monkeypatch=monkeypatch)
     assert "⚠ https://f doesn't accept llama-3.1-8b.gguf" in s and "google/gemma-4-12B-it, google/gemma-4-E2B-it" in s
+    s = _announce(["llama-3.1-8b.gguf"], {"https://f": {"mode": "unsupported", "models": accepted,
+                                                        "aliases": {accepted[0]: ["mlx-community/gemma-4-12B-it-4bit"]}}},
+                  monkeypatch=monkeypatch)
+    assert "MLX or GGUF quantization" in s
     # No allowlist (or a server predating `models`): the server's own verdict on the raw id decides.
     assert "✓ https://f accepts llama-3.1-8b.gguf" in _announce(["llama-3.1-8b.gguf"], {"https://f": {"mode": "bootstrap"}}, monkeypatch=monkeypatch)
     assert "⚠ https://f doesn't accept x" in _announce(["x"], {"https://f": {"mode": "unsupported"}}, monkeypatch=monkeypatch)

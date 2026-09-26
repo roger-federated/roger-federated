@@ -4,6 +4,8 @@ The rest of runtime/ is framework-agnostic: proxy.py relays bytes, capture.py re
 every supported server speaks, adapter.py pulls the federation's update. What differs per runtime lives here:
   - the command line: the `--port`/`--host` convention `plan()` rewrites to slot the proxy in front, and
     where each runtime names its model (`served_model`);
+  - what that name says about the model's identity: which hub repo a path came from (`names_repo`: the HF
+    cache layout, llama.cpp's `-hf` cache names) and, for a bare GGUF, the name it declares (`declared_name`);
   - how it loads a LoRA: llama.cpp's GGUF adapter (`build_gguf`) and PEFT's directory layout, which vllm
     reads (`build_peft`), plus the arguments that attach one (`attach_adapter`), the flags that say the
     user is already loading one of their own (`user_adapter`) and, for vllm, the model name chat requests
@@ -279,6 +281,31 @@ def user_adapter(argv: list[str]) -> str | None:
         if a.split("=", 1)[0] in spec["adapter_flags"]:       # both `--lora X` and `--lora=X`
             return a.split("=", 1)[0]
     return None
+
+
+def names_repo(served: str, repo: str) -> bool:
+    """Whether a runtime's name for its model (an HF id, a path) is exactly hub repo `repo`: the id itself
+    (vllm serves the repo id), a path inside the HF cache (`…/models--org--name/snapshots/…`, where vllm and
+    `hf download` put it), or a llama.cpp `-hf` download (cached flat as `org_name_<file>.gguf`). Exact on
+    purpose: a same-named fork (`…-it-heretic`) must not pass for the repo. Hub ids are case-insensitive."""
+    s, repo = served.replace("\\", "/").rstrip("/").casefold(), repo.casefold()
+    return (s == repo or f"/models--{repo.replace('/', '--')}/" in f"/{s}/"
+            or os.path.basename(s).startswith(repo.replace("/", "_") + "_"))
+
+
+def declared_name(served: str) -> str | None:
+    """The name a local GGUF declares for itself (`general.name`), or None when `served` isn't a readable
+    .gguf. A file outside any cache has no repo to go by, and its file name proves little; the header does
+    better: quantizers carry the source model's name over ("Gemma 4 12B It"), while convert_hf_to_gguf
+    names a finetune after itself ("Gemma 4 12B It Heretic"). Header only; GGUFReader maps lazily."""
+    if not served.casefold().endswith(".gguf") or not os.path.isfile(served):
+        return None
+    try:
+        from gguf import GGUFReader
+        f = GGUFReader(served).fields.get("general.name")
+        return str(f.contents()) if f is not None else None
+    except Exception:
+        return None
 
 
 def attach_adapter(p: Plan, argv0: str, path: str, rank: int) -> Plan:

@@ -80,8 +80,7 @@ def _federation(feds: list[str], served: str) -> tuple[tuple[str, str, dict] | N
         if not probe:
             skipped.append((url, "unreachable"))
             continue
-        accepted = probe.get("models")
-        model_id = notice.resolve([served], accepted) if accepted is not None else served
+        model_id = notice.resolve([served], probe)
         st = transport.federation_status(url, model_id) if model_id is not None else {}
         if model_id is None or st.get("mode", "busy") == "unsupported":
             skipped.append((url, f"doesn't train {os.path.basename(served)}"))

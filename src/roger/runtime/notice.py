@@ -4,9 +4,11 @@ federations train, and if not, which models they do accept.
 The wrapper never sees a model id on the command line (`-m x.gguf`, `--hf-repo …`, `vllm serve org/name`
 are all runtime-specific), so the runtime is asked instead, through the one standard surface every
 OpenAI-compatible server has: `GET /v1/models`. Its ids are whatever the runtime chose to call the model
-(vllm: the HF repo id; llama-server: the gguf path, or `--alias`), so they are matched against a
-federation's advertised allowlist by normalised containment rather than equality: as far as the
-federation's LoRA is concerned, `gemma-4-12B-it-Q4_K_M.gguf` *is* the `google/gemma-4-12B-it` base.
+(vllm: the HF repo id; llama-server: the gguf path, or `--alias`), so they are resolved against what a
+federation advertises: its allowlist of canonical ids (`models`) and, per id, the curated repos it accepts
+as the same weights (`aliases`: MLX/GGUF/AWQ quants, reuploads). As far as the federation's LoRA is
+concerned `mlx-community/gemma-4-12B-it-OptiQ-4bit` *is* `google/gemma-4-12B-it`, but a same-named fork
+(`gemma-4-12B-it-heretic`) is not, so matching is exact (see `resolve`), never by name similarity.
 
 It also carries the one-time privacy notice (`privacy_notice`), which must be shown before this
 client's first-ever federation contact.
@@ -69,17 +71,36 @@ def _norm(s: str) -> str:
     return re.sub(r"[^a-z0-9]", "", s.lower())
 
 
-def resolve(served: list[str], accepted: list[str]) -> str | None:
-    """The accepted model id that one of the runtime's served ids names, or None. A served id names an
-    accepted `org/name` when `name` occurs in it once both are stripped to [a-z0-9] — that survives
-    quantization suffixes, file paths, case and separator differences alike. The longest such name wins
-    so `…-it-assistant` never resolves to `…-it` (both would match the former)."""
-    hits = []
-    for a in accepted:
-        name = _norm(a.rsplit("/", 1)[-1])
-        if name and any(name in _norm(s) for s in served):
-            hits.append((len(name), a))
-    return max(hits)[1] if hits else None
+def resolve(served: list[str], status: dict) -> str | None:
+    """The canonical id a federation (its `/status`) trains one of the runtime's served ids as, or None.
+    With an alias table, a served id resolves to a canonical when it names that canonical's repo or one of
+    its aliases exactly (`dialect.names_repo`: the id, an HF cache path, a llama.cpp -hf download), or, for
+    a bare GGUF, when the name the file declares is the canonical's own. With no allowlist (`models` null:
+    any model is accepted) an unlisted id stands for itself, but a listed alias still maps to its canonical
+    so every quantization feeds the one global. A server predating `aliases` gets the old heuristic:
+    `name` of an accepted `org/name` occurring in the served id once both are stripped to [a-z0-9], longest
+    name winning (so `…-it-assistant` never resolves to `…-it`) — which also admits forks, hence the table."""
+    models, aliases = status.get("models"), status.get("aliases")
+    if aliases is None:
+        if models is None:
+            return served[0] if served else None
+        hits = []
+        for a in models:
+            name = _norm(a.rsplit("/", 1)[-1])
+            if name and any(name in _norm(s) for s in served):
+                hits.append((len(name), a))
+        return max(hits)[1] if hits else None
+    canon = list(aliases) if models is None else models
+    for c in canon:
+        if any(dialect.names_repo(s, repo) for repo in (c, *aliases.get(c, ())) for s in served):
+            return c
+    # Bare GGUFs: compared with the canonical's name alone and org-qualified (LM Studio's quants declare
+    # "Google_Gemma 4 12B It"). Equality, not containment: "Gemma 4 12B It Heretic" is another model.
+    declared = {_norm(d) for s in served if (d := dialect.declared_name(s))}
+    for c in canon:
+        if declared & {_norm(c.rsplit("/", 1)[-1]), _norm(c)}:
+            return c
+    return (served[0] if served else None) if models is None else None
 
 
 def announce(served: list[str], cfg: dict, out=sys.stderr) -> None:
@@ -110,13 +131,15 @@ def announce(served: list[str], cfg: dict, out=sys.stderr) -> None:
                       "federation. Pick a model it accepts to contribute and receive its updates.", file=out)
             else:
                 print(f"roger: ✓ {url} accepts {what}; the chats saved here will train it.", file=out)
-        elif (hit := resolve(served, accepted)) is not None:
+        elif (hit := resolve(served, st)) is not None:
             print(f"roger: ✓ {url} trains {hit}, which this runtime serves as {what}; the chats saved "
                   "here will feed it.", file=out)
         else:
             print(f"roger: ⚠ {url} doesn't accept {what}: chats are still saved but won't train the "
                   f"federation. Models it accepts: {', '.join(accepted) or 'none right now'} — run one of "
-                  "these to contribute and receive its updates.", file=out)
+                  "these" + (" (or a build of one it lists, such as an MLX or GGUF quantization)"
+                             if any(st.get("aliases") or {}) else "")
+                  + " to contribute and receive its updates.", file=out)
         if CLIENT_VERSION < int(st.get("min_client", 0) or 0):
             print(f"roger: ⚠ your roger client is out of date: {url} rejects this version's gradients. "
                   f"Update to keep contributing:\n  {UPDATE_CMD}", file=out)

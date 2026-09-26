@@ -24,8 +24,11 @@
   wrapper): once the runtime answers `GET /v1/models` (the only standard way to learn the model — argv is
   runtime-specific), each federation's `/status` is probed and one stderr line per federation says whether
   it trains that model, and if not which it accepts (server advertises its allowlist as `models`, null =
-  any); runtime ids (gguf paths, aliases) are matched to accepted `org/name` ids by normalised [a-z0-9]
-  containment of `name`, longest wins. Fail-soft silent when a federation is unreachable; also carries the
+  any); runtime ids are resolved (`notice.resolve`) against `models` + the server's curated `aliases`
+  table ({canonical: [same-weights repos]}, roger-server `aliases.py`) by EXACT match only (hub id, HF-cache
+  `models--org--name` path, llama.cpp `-hf` cache name, or a bare GGUF's header `general.name` == the
+  canonical's name) and uploaded under the canonical id (init_A is seeded from it); same-named forks never
+  resolve. Old servers without `aliases` keep the [a-z0-9]-containment heuristic. Fail-soft silent when a federation is unreachable; also carries the
   version verdicts (outdated client / update available) and the "contribute is off" nudge. `notice.privacy_notice`
   is the one-time transparency notice (sentinel `~/.roger/privacy_ack`, printed from `adapter.prepare`
   right before the day's pull = this client's first federation contact; the obligation `CLIENT_VERSION`
