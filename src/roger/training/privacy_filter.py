@@ -14,9 +14,13 @@ Detection uses `openai/privacy-filter` (single-pass token classifier). Substitut
 `detect_pii_spans` is the seam tests stub out, so unit tests need no model download.
 """
 import hashlib
+import os
 import random
+import secrets
 
 import torch
+
+from roger.paths import state_dir
 
 PII_MODEL_ID = "openai/privacy-filter"
 
@@ -26,6 +30,7 @@ PII_MODEL_ID = "openai/privacy-filter"
 _RETAIN = {"email": set("@."), "phone": set("+-() ")}
 
 _PIPE = None   # lazily-built HF token-classification pipeline; freed after data is anonymized
+_SALT = None   # this install's surrogate key (_salt); read once per process
 
 
 def _retained_chars(entity_type: str) -> set:
@@ -118,6 +123,32 @@ def anonymize_sequence(seq_ids: torch.Tensor, tokenizer) -> tuple[torch.Tensor, 
     return torch.tensor(new_ids, dtype=seq_ids.dtype), pii_positions
 
 
+def _salt() -> bytes:
+    """A random key that never leaves this machine. An unkeyed hash makes the surrogate a PUBLIC function
+    of the value: anyone with this file can map a guessed phone number / SSN / email to the exact tokens
+    that stood in for it, then probe a shared global for that context. Low-entropy PII is enumerable, so
+    the substitution would only rename it. Persisted (not per-process) so surrogates stay reproducible
+    across runs on this install, as before."""
+    global _SALT
+    if _SALT is None:
+        path = os.path.join(state_dir(), "pii_salt")
+        try:
+            with open(path, "rb") as f:
+                _SALT = f.read()
+        except FileNotFoundError:
+            os.makedirs(state_dir(), exist_ok=True)
+            key = secrets.token_bytes(32)
+            try:                                    # O_EXCL: two racing rounds keep the first writer's key
+                fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                with os.fdopen(fd, "wb") as f:
+                    f.write(key)
+                _SALT = key
+            except FileExistsError:
+                with open(path, "rb") as f:
+                    _SALT = f.read()
+    return _SALT
+
+
 def _seed(value: str) -> int:
-    # blake2b (not Python's salted hash()) so the surrogate is reproducible across processes/runs.
-    return int.from_bytes(hashlib.blake2b(value.encode("utf-8"), digest_size=8).digest(), "big")
+    # keyed blake2b (not Python's salted hash()): stable on this install, unpredictable off it.
+    return int.from_bytes(hashlib.blake2b(value.encode("utf-8"), digest_size=8, key=_salt()).digest(), "big")
