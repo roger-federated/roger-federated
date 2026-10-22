@@ -27,6 +27,15 @@ _RETAIN = {"email": set("@."), "phone": set("+-() ")}
 
 _PIPE = None   # lazily-built HF token-classification pipeline; freed after data is anonymized
 
+# The detector attends through a 128-token sliding window (8 layers → ≤1,024 tokens of context either
+# side), but the transformers implementation materialises the full n×n score matrix: 14 heads × n² × 4 B,
+# 3 GiB at 7.6k tokens, so any longer episode OOMs a 12 GB card even with no policy resident. Detection
+# errors propagate on purpose (never train on raw PII), so one long chat would fail every later round.
+# The pipeline's own `stride` windowing bounds that at 14 × WINDOW² × 4 B (~0.2 GiB): with OVERLAP tokens
+# shared between neighbours, any entity shorter than that sits whole in some window, and the pipeline keeps
+# the longest of the overlapping detections. The overlap covers the model's full one-sided reach.
+WINDOW, OVERLAP = 2048, 1024
+
 
 def _retained_chars(entity_type: str) -> set:
     t = (entity_type or "").lower()
@@ -45,6 +54,7 @@ def _get_pipe():
         model = AutoModelForTokenClassification.from_pretrained(
             PII_MODEL_ID, dtype="auto", **({"device_map": "auto"} if torch.cuda.is_available() else {}))
         tok = AutoTokenizer.from_pretrained(PII_MODEL_ID)
+        tok.model_max_length = WINDOW            # the pipeline's chunk size once `stride` is set
         # aggregation_strategy="simple" → coherent entity spans with char offsets + type, in one pass
         _PIPE = pipeline("token-classification", model=model, tokenizer=tok,
                          aggregation_strategy="simple")
@@ -62,7 +72,7 @@ def free_filter():
 
 def detect_pii_spans(text: str) -> list[tuple[int, int, str]]:
     """(char_start, char_end, entity_type) for every PII span. The test seam."""
-    return [(d["start"], d["end"], d["entity_group"]) for d in _get_pipe()(text)]
+    return [(d["start"], d["end"], d["entity_group"]) for d in _get_pipe()(text, stride=OVERLAP)]
 
 
 def _token_char_spans(ids: list[int], tokenizer) -> tuple[list[tuple[int, int]], str]:
