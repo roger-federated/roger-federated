@@ -4,9 +4,15 @@ Run with:  PYTHONPATH=src python -m pytest tests/test_privacy_filter.py
 `detect_pii_spans` is stubbed so the tests need no 1.5B model download. A tiny stub tokenizer with
 fully-controlled token<->char boundaries lets us assert exactly which tokens are kept vs replaced.
 """
+import os
+import stat
+import tempfile
+
 import torch
 
 import roger.training.privacy_filter as pf
+
+pf._SALT = b"\x00" * 32   # fixed key: the tests never read or create the real ~/.roger/pii_salt
 
 
 class StubTok:
@@ -114,6 +120,30 @@ def test_keep_mask_index_select_no_nan():
     print("PASS test_keep_mask_index_select_no_nan")
 
 
+def test_surrogate_seed_is_keyed_and_persisted():
+    # Without a local key the surrogate is a public function of the value (enumerable for phones/SSNs).
+    saved, home = pf._SALT, os.environ.get("HOME")
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            os.environ["HOME"] = d
+            pf._SALT = None
+            first = pf._seed("078-05-1120")
+            path = os.path.join(d, ".roger", "pii_salt")
+            assert len(open(path, "rb").read()) == 32
+            assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
+            pf._SALT = None                                     # a later process re-reads the same key
+            assert pf._seed("078-05-1120") == first
+        pf._SALT = b"\x01" * 32                                 # another install: a different surrogate
+        assert pf._seed("078-05-1120") != first
+    finally:
+        pf._SALT = saved
+        if home is None:
+            os.environ.pop("HOME", None)
+        else:
+            os.environ["HOME"] = home
+    print("PASS test_surrogate_seed_is_keyed_and_persisted")
+
+
 if __name__ == "__main__":
     test_anonymize_email_preserves_length_and_structure()
     test_anonymize_secret_scrambles_punctuation()
@@ -121,3 +151,4 @@ if __name__ == "__main__":
     test_anonymize_repeated_value_consistent()
     test_anonymize_no_pii_is_noop()
     test_keep_mask_index_select_no_nan()
+    test_surrogate_seed_is_keyed_and_persisted()

@@ -14,9 +14,13 @@ Detection uses `openai/privacy-filter` (single-pass token classifier). Substitut
 `detect_pii_spans` is the seam tests stub out, so unit tests need no model download.
 """
 import hashlib
+import os
 import random
+import secrets
 
 import torch
+
+from roger.paths import state_dir
 
 PII_MODEL_ID = "openai/privacy-filter"
 
@@ -26,6 +30,16 @@ PII_MODEL_ID = "openai/privacy-filter"
 _RETAIN = {"email": set("@."), "phone": set("+-() ")}
 
 _PIPE = None   # lazily-built HF token-classification pipeline; freed after data is anonymized
+_SALT = None   # this install's surrogate key (_salt); read once per process
+
+# The detector attends through a 128-token sliding window (8 layers → ≤1,024 tokens of context either
+# side), but the transformers implementation materialises the full n×n score matrix: 14 heads × n² × 4 B,
+# 3 GiB at 7.6k tokens, so any longer episode OOMs a 12 GB card even with no policy resident. Detection
+# errors propagate on purpose (never train on raw PII), so one long chat would fail every later round.
+# The pipeline's own `stride` windowing bounds that at 14 × WINDOW² × 4 B (~0.2 GiB): with OVERLAP tokens
+# shared between neighbours, any entity shorter than that sits whole in some window, and the pipeline keeps
+# the longest of the overlapping detections. The overlap covers the model's full one-sided reach.
+WINDOW, OVERLAP = 2048, 1024
 
 
 def _retained_chars(entity_type: str) -> set:
@@ -45,6 +59,7 @@ def _get_pipe():
         model = AutoModelForTokenClassification.from_pretrained(
             PII_MODEL_ID, dtype="auto", **({"device_map": "auto"} if torch.cuda.is_available() else {}))
         tok = AutoTokenizer.from_pretrained(PII_MODEL_ID)
+        tok.model_max_length = WINDOW            # the pipeline's chunk size once `stride` is set
         # aggregation_strategy="simple" → coherent entity spans with char offsets + type, in one pass
         _PIPE = pipeline("token-classification", model=model, tokenizer=tok,
                          aggregation_strategy="simple")
@@ -62,7 +77,7 @@ def free_filter():
 
 def detect_pii_spans(text: str) -> list[tuple[int, int, str]]:
     """(char_start, char_end, entity_type) for every PII span. The test seam."""
-    return [(d["start"], d["end"], d["entity_group"]) for d in _get_pipe()(text)]
+    return [(d["start"], d["end"], d["entity_group"]) for d in _get_pipe()(text, stride=OVERLAP)]
 
 
 def _token_char_spans(ids: list[int], tokenizer) -> tuple[list[tuple[int, int]], str]:
@@ -118,6 +133,32 @@ def anonymize_sequence(seq_ids: torch.Tensor, tokenizer) -> tuple[torch.Tensor, 
     return torch.tensor(new_ids, dtype=seq_ids.dtype), pii_positions
 
 
+def _salt() -> bytes:
+    """A random key that never leaves this machine. An unkeyed hash makes the surrogate a PUBLIC function
+    of the value: anyone with this file can map a guessed phone number / SSN / email to the exact tokens
+    that stood in for it, then probe a shared global for that context. Low-entropy PII is enumerable, so
+    the substitution would only rename it. Persisted (not per-process) so surrogates stay reproducible
+    across runs on this install, as before."""
+    global _SALT
+    if _SALT is None:
+        path = os.path.join(state_dir(), "pii_salt")
+        try:
+            with open(path, "rb") as f:
+                _SALT = f.read()
+        except FileNotFoundError:
+            os.makedirs(state_dir(), exist_ok=True)
+            key = secrets.token_bytes(32)
+            try:                                    # O_EXCL: two racing rounds keep the first writer's key
+                fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                with os.fdopen(fd, "wb") as f:
+                    f.write(key)
+                _SALT = key
+            except FileExistsError:
+                with open(path, "rb") as f:
+                    _SALT = f.read()
+    return _SALT
+
+
 def _seed(value: str) -> int:
-    # blake2b (not Python's salted hash()) so the surrogate is reproducible across processes/runs.
-    return int.from_bytes(hashlib.blake2b(value.encode("utf-8"), digest_size=8).digest(), "big")
+    # keyed blake2b (not Python's salted hash()): stable on this install, unpredictable off it.
+    return int.from_bytes(hashlib.blake2b(value.encode("utf-8"), digest_size=8, key=_salt()).digest(), "big")
