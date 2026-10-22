@@ -83,6 +83,28 @@ def _load_mlx(d: str, dtype):
     return MODEL_FOR_CAUSAL_LM_MAPPING[type(tc)].from_pretrained(None, config=tc, state_dict=sd, dtype=dtype)
 
 
+def _place_keep_big_embeddings_on_cpu(model, min_params: int = 1_000_000_000):
+    """Move the model to CUDA except nn.Embedding tables with >= min_params (frozen, never trained here), which
+    stay on CPU behind hooks: ids go to CPU for the lookup, the embeddings come back to the GPU. A table tied to
+    another module's weight (e.g. the LM head) is never left behind."""
+    dev = torch.device("cuda", torch.cuda.current_device())
+    tied = {id(m.weight) for m in model.modules() if isinstance(m, torch.nn.Linear)}
+    big = [m for m in model.modules() if isinstance(m, torch.nn.Embedding)
+           and m.weight.numel() >= min_params and id(m.weight) not in tied]
+    keep = {id(t) for m in big for t in list(m.parameters()) + list(m.buffers())}
+    for mod in model.modules():
+        for name, p in list(mod._parameters.items()):
+            if p is not None and id(p) not in keep:
+                mod._parameters[name] = torch.nn.Parameter(p.data.to(dev), requires_grad=p.requires_grad)
+        for name, b in list(mod._buffers.items()):
+            if b is not None and id(b) not in keep:
+                mod._buffers[name] = b.to(dev)
+    for m in big:
+        m.register_forward_pre_hook(lambda _m, args: tuple(a.to("cpu") if torch.is_tensor(a) else a for a in args))
+        m.register_forward_hook(lambda _m, _args, out: out.to(dev))
+    return model
+
+
 def load(source: str):
     """(model, tokenizer) for the model the runtime served: a local .gguf (llama-server's `-m`) is
     dequantized by transformers, an MLX checkpoint (vllm-metal) by MLX; anything else (vllm's HF id or
@@ -110,7 +132,16 @@ def load(source: str):
                     load_in_4bit=True, bnb_4bit_quant_type="nf4", bnb_4bit_compute_dtype=torch.bfloat16)
             except ImportError:
                 pass
-    model = AutoModelForCausalLM.from_pretrained(where, **load_kw, **kw)
+    if cuda and "quantization_config" not in load_kw and "gguf_file" not in kw:
+        # bf16 fallback (no bitsandbytes): device_map="auto" either fills the GPU and OOMs the round (gemma-4-E2B
+        # on 12 GB) or, capped, CPU-offloads layers as meta tensors the LoRA init cannot copy into. Instead: load
+        # on CPU, keep only the HUGE frozen embedding tables there (lookups are cheap; gemma-4's per-layer table is
+        # 2.35B params), and move everything else to the GPU.
+        load_kw.pop("device_map", None)
+        model = AutoModelForCausalLM.from_pretrained(where, **load_kw, **kw)
+        _place_keep_big_embeddings_on_cpu(model)
+    else:
+        model = AutoModelForCausalLM.from_pretrained(where, **load_kw, **kw)
     if not cuda and torch.backends.mps.is_available():
         model = model.to("mps")
     return model, tok
