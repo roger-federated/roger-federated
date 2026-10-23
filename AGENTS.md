@@ -63,23 +63,26 @@
   assistant turn located by a prefix probe; return = mean(self_eval scores) + mean(self_eval reactions) + Σ tool_signals; old log-probs
   recomputed (no-grad) since the wire has none.
 - **Self-evaluation over the wire (`runtime/grader.py`).** The reward source is the model's own
-  end-of-session grade (a reason-then-force prefill: let it reason, then force the schema). The wrapper chains
+  end-of-session grade (reason-then-force: let it reason, then force the schema). The wrapper chains
   exchanges into conversations by message-prefix (in-memory registry, `grader.track`; every request
   carries the full history, so the previous exchange's transcript is a prefix of the next). Once a
   conversation is idle `IDLE_S` (5 min) — or at Ctrl-C, before the runtime is stopped — one eval call
   goes to the **backend port directly** (never relayed, never captured; under the relay's
-  `request_model` when set, so a vllm adapter grades its own work): the transcript + a final
-  assistant message holding the seed (prefill), `response_format` json_schema with properties ordered
-  `reasoning` then `scores` (reason-then-force, over the API this time), no `tools`. Per-metric scores
+  `request_model` when set, so a vllm adapter grades its own work): the transcript + the reply + ONE
+  user message asking for the grade (`ASK`), `response_format` json_schema with properties ordered
+  `reasoning` (capped at `REASONING_MAX` chars) then `scores` (reason-then-force, over the API this time),
+  `chat_template_kwargs.enable_thinking: false`, no `tools`. The same request on every runtime, so one
+  federation's members share one scale; no assistant prefill, since llama-server replays a prefill through
+  the schema grammar and rejects prose, and a separate seed message means two assistant turns. Per-metric scores
   (`METRICS`: efficiency/accuracy/completeness, each clamped to [-1,1]) are persisted as `self_eval`
   on the conversation's newest file; **no aggregate is stored** — the optimiser averages. The same call
   also classifies the **user's reactions** — the wire's only human signal, since roger can't prompt
   inside a third-party client: each assistant message the user directly answered is
-  quoted in the seed (`REACTION_SEED`, snippet of the answer) and forced as a `reactions.reply_N` property
-  after `scores`, judged from the user's words only; stored as `self_eval.reactions` {message index:
-  [-1,1]} (same keys as `tool_signals`). No answered replies ⇒ the bare SEED/SCHEMA. One generic
-  fallback: a 4xx (alternation-strict templates reject two assistant messages) retries once with the
-  seed appended to the last reply. Failures land as `self_eval.error`, never retried. Because of the
+  quoted in the request (`REACTION_ASK`, snippet of the answer) and forced as a `reactions.reply_N` label
+  (pushed_back/neutral/confirmed) BEFORE `reasoning`, judged from the user's words only; stored as
+  `self_eval.reactions` {message index: -1/0/1} (same keys as `tool_signals`). No answered replies ⇒ the
+  bare ASK/SCHEMA. An unparseable answer or a 5xx is asked for once more (`ATTEMPTS`); a 4xx is not.
+  Failures land as `self_eval.error`, and the conversation is not graded again. Because of the
   Ctrl-C ordering the runtime child runs in its **own process group** (`start_new_session` /
   `CREATE_NEW_PROCESS_GROUP`) and gets the interrupt from roger after grading; a second Ctrl-C skips.
 - **Tool-result signals over the wire (`runtime/signals.py`).** The verifiable per-step reward: the

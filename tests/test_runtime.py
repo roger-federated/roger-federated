@@ -113,7 +113,7 @@ class _Upstream(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     gate = threading.Event()
     evals: list = []                 # bodies of self-eval requests received
-    eval_mode = "ok"                 # "ok" | "strict" (400 on consecutive assistant msgs) | "garbage"
+    eval_mode = "ok"                 # "ok" | "flaky" (the first answer isn't JSON) | "garbage" (none is)
 
     def log_message(self, *_): pass
 
@@ -148,17 +148,15 @@ class _Upstream(BaseHTTPRequestHandler):
             self._json(400, {"body": body.decode()})
             return
         msgs = req.get("messages") or []
-        if msgs and msgs[-1]["role"] == "assistant" and grader.SEED in (msgs[-1].get("content") or ""):
+        if msgs and msgs[-1]["role"] == "user" and grader.ASK in (msgs[-1].get("content") or ""):
             self.evals.append(req)
-            if self.eval_mode == "strict" and len(msgs) > 1 and msgs[-2]["role"] == "assistant":
-                self._json(400, {"error": "roles must alternate"})
-                return
             verdict = {"reasoning": "ok", "scores": {"efficiency": 0.7, "accuracy": 3, "completeness": -0.5}}
             asked = req["response_format"]["json_schema"]["schema"]["properties"].get("reactions")
             if asked:                                    # one per forced reply_N, alternating labels
                 verdict["reactions"] = {k: ("pushed_back" if n % 2 == 0 else "confirmed")
                                         for n, k in enumerate(asked["properties"])}
-            content = "not json" if self.eval_mode == "garbage" else json.dumps(verdict)
+            bad = self.eval_mode == "garbage" or (self.eval_mode == "flaky" and len(self.evals) == 1)
+            content = "not json" if bad else json.dumps(verdict)
             self._json(200, {"object": "chat.completion", "model": "m",
                              "choices": [{"index": 0, "message": {"role": "assistant", "content": content}}]})
             return
@@ -795,20 +793,24 @@ def _captured_entry(stack, msgs_dir):
     return path, reg[0]
 
 
-def test_grade_prefills_seed_forces_schema_and_persists_scores(stack):
+def test_grade_asks_in_a_user_turn_forces_schema_and_persists_scores(stack):
     base, backend_port, msgs = stack
     path, entry = _captured_entry(stack, msgs)
     with httpx.Client() as c:
         res = grader.grade(c, f"http://127.0.0.1:{backend_port}", entry)
     (sent,) = _Upstream.evals
     assert "tools" not in sent and sent["stream"] is False and sent["max_tokens"] == grader.MAX_TOKENS
-    assert list(sent["response_format"]["json_schema"]["schema"]["properties"]) == ["reasoning", "scores"]
+    schema = sent["response_format"]["json_schema"]["schema"]
+    assert list(schema["properties"]) == ["reasoning", "scores"]
+    assert schema["properties"]["reasoning"]["maxLength"] == grader.REASONING_MAX    # the JSON always closes
+    assert sent["chat_template_kwargs"] == {"enable_thinking": False}
+    # no prefill and no two assistant turns: the reply, then one user turn asking for the grade
     assert sent["messages"][-2:] == [{"role": "assistant", "content": "Hello"},
-                                     {"role": "assistant", "content": grader.SEED}]
+                                     {"role": "user", "content": grader.ASK}]
     rec = json.loads(path.read_text())
     assert rec["self_eval"] == res and entry["graded"] is True
     assert res["scores"] == {"efficiency": 0.7, "accuracy": 1.0, "completeness": -0.5}   # clamped
-    assert res["reasoning"] == "ok" and res["seed_placement"] == "message" and "score" not in res
+    assert res["reasoning"] == "ok" and res["attempts"] == 1 and "score" not in res
     assert res["graded_messages"] == 2
     assert len(_files(msgs)) == 1                       # the eval itself was never captured
 
@@ -836,10 +838,11 @@ def test_grade_reads_the_users_reactions_per_answered_reply(stack, tmp_path):
     assert schema["required"] == ["reactions", "reasoning", "scores"]
     assert schema["properties"]["reactions"]["required"] == ["reply_1", "reply_2"]
     assert schema["properties"]["reactions"]["properties"]["reply_1"]["enum"] == list(grader.REACTIONS)
-    seed = sent["messages"][-1]["content"]
-    assert seed.startswith(grader.SEED) and grader.REACTION_SEED in seed
-    assert 'reply_1: the user answered "no, it still crashes"' in seed           # whitespace collapsed
-    assert 'reply_2: the user answered "works, thanks!"' in seed
+    ask = sent["messages"][-1]["content"]
+    assert ask.startswith(grader.REACTION_ASK) and ask.endswith(grader.ASK)      # reactions asked first
+    assert 'reply_1: the user answered "no, it still crashes"' in ask            # whitespace collapsed
+    assert 'reply_2: the user answered "works, thanks!"' in ask
+    assert "still fails" in grader.REACTION_ASK                                  # a repeated failure is pushback
     assert sent["max_tokens"] == grader.MAX_TOKENS + 32
     # credited to the assistant message the user answered (the run's last one, not the tool-calling one),
     # keyed by message index like tool_signals, labels mapped to -1/0/1
@@ -858,15 +861,14 @@ def test_grade_asks_the_adapter_the_relay_retargets_to(stack):
     assert sent["model"] == dialect.LORA_NAME
 
 
-def test_grade_falls_back_to_appended_seed_for_strict_templates(stack):
+def test_grade_asks_once_more_after_an_unparseable_answer(stack):
     base, backend_port, msgs = stack
-    _Upstream.eval_mode = "strict"
+    _Upstream.eval_mode = "flaky"
     path, entry = _captured_entry(stack, msgs)
     with httpx.Client() as c:
         res = grader.grade(c, f"http://127.0.0.1:{backend_port}", entry)
-    assert len(_Upstream.evals) == 2
-    assert _Upstream.evals[1]["messages"][-1] == {"role": "assistant", "content": "Hello\n\n" + grader.SEED}
-    assert res["seed_placement"] == "appended" and res["scores"]["efficiency"] == 0.7
+    assert len(_Upstream.evals) == 2 and _Upstream.evals[0] == _Upstream.evals[1]
+    assert res["attempts"] == 2 and res["scores"]["efficiency"] == 0.7 and "error" not in res
 
 
 def test_grade_records_error_and_never_raises(stack):
@@ -876,6 +878,7 @@ def test_grade_records_error_and_never_raises(stack):
     with httpx.Client() as c:
         res = grader.grade(c, f"http://127.0.0.1:{backend_port}", entry)
     assert "error" in res and "scores" not in res and entry["graded"] is True
+    assert len(_Upstream.evals) == grader.ATTEMPTS                               # asked twice, then given up
     assert json.loads(path.read_text())["self_eval"]["error"] == res["error"]
     # Dead backend: also an error, not an exception.
     entry["graded"] = False
