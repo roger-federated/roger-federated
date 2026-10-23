@@ -1,0 +1,134 @@
+name: Auto Fix
+
+# Opens fix PRs for `user-feedback` issues: findings from people trying roger, filed by the
+# outreach agent (roger-emarketeer's feedback_issues.py). Runs every other day and takes up to
+# three issues, one after another, whose `fix_after` (a random 2-6 h after filing; 3 h after
+# creation for issues filed without it) has passed. Label an issue `hold` to stop it.
+# `needs-decision` issues get a comment laying out the options, never a code change. Review PR
+# then reviews each PR as usual; merging stays manual.
+
+on:
+  schedule:
+    - cron: "41 9 */2 * *"
+  workflow_dispatch:
+    inputs:
+      issue:
+        description: "Issue number to fix now, ignoring fix_after"
+        required: false
+        default: ""
+
+concurrency:
+  group: auto-fix
+  cancel-in-progress: false
+
+jobs:
+  pick:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: read
+    outputs:
+      issues: ${{ steps.pick.outputs.issues }}
+    steps:
+      - name: Pick the due issues
+        id: pick
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCED: ${{ inputs.issue }}
+        run: |
+          gh issue list --repo "$GITHUB_REPOSITORY" --label user-feedback --state open --limit 100 \
+            --json number,body,labels,createdAt > issues.json
+          python3 - <<'EOF'
+          import json, os, re
+          from datetime import datetime, timedelta, timezone
+
+          def ts(s):
+              return datetime.fromisoformat(s.replace("Z", "+00:00"))
+
+          forced = os.environ.get("FORCED", "").strip()
+          now, due = datetime.now(timezone.utc), []
+          for i in json.load(open("issues.json")):
+              labels = {l["name"] for l in i["labels"]}
+              if str(i["number"]) != forced and labels & {"hold", "agent-fix-started"}:
+                  continue
+              m = re.search(r"fix_after=(\S+)", i["body"] or "")
+              after = ts(m.group(1)) if m else ts(i["createdAt"]) + timedelta(hours=3)
+              if str(i["number"]) == forced or after <= now:
+                  due.append((str(i["number"]) != forced, after, i["number"], "needs-decision" in labels))
+          due.sort()
+          picked = [{"number": n, "decision": d} for _, _, n, d in due[:3]]
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"issues={json.dumps(picked) if picked else ''}\n")
+          print(f"due: {[d[2] for d in due]}, taking {[p['number'] for p in picked]}")
+          EOF
+
+  fix:
+    needs: pick
+    if: needs.pick.outputs.issues
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      max-parallel: 1
+      fail-fast: false
+      matrix:
+        issue: ${{ fromJSON(needs.pick.outputs.issues) }}
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      id-token: write
+      actions: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      N: ${{ matrix.issue.number }}
+
+    steps:
+      - name: Claim it
+        run: |
+          gh label create agent-fix-started --repo "$GITHUB_REPOSITORY" --color 5319E7 --force \
+            --description "auto_fix.yml has picked this issue up"
+          gh issue edit "$N" --repo "$GITHUB_REPOSITORY" --add-label agent-fix-started
+
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Install roger and the test deps (CPU)
+        if: ${{ !matrix.issue.decision }}
+        run: |
+          pip install --index-url https://download.pytorch.org/whl/cpu torch
+          pip install -e . pytest
+
+      - name: Fix
+        uses: anthropics/claude-code-action@1d6de8cb0c237e7c15e9e1bdf973826ebae490cc # v1.0.248; @v1 floats
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          settings: |
+            {
+              "attribution": {
+                "commit": "",
+                "pr": ""
+              }
+            }
+          prompt: |
+            Issue #${{ matrix.issue.number }} in this repo is a finding from someone who tried roger
+            (label `user-feedback`). Read it with `gh issue view ${{ matrix.issue.number }} --comments`
+            and read AGENTS.md before touching code. Work through these in order and stop at the first that applies:
+
+            1. If main already fixes it, comment with the commit that does, and close the issue.
+            2. If it is labelled `needs-decision` (it is: ${{ matrix.issue.decision }}), or a fix would
+               change the wire contract mirrored with roger-server (`federated/delta.py`, `federated/secure_agg.py`),
+               the DP clip or noise parameters, or what the privacy filter guarantees, do not change code. Comment
+               with the realistic options, what each costs, and which you would pick, then stop.
+            3. If the description is too thin to locate the problem, or it is not a problem in roger, comment
+               saying exactly what is missing or why, then stop.
+            4. Otherwise create the branch `agent-fix/issue-${{ matrix.issue.number }}` from main, make the
+               smallest change that fixes it in the style of the surrounding code, and add or extend a test under
+               tests/ that fails without the fix. Run `python -m pytest -q tests` (CPU-only, no downloads) and keep
+               it green. Commit, push the branch, and open a PR with `gh pr create` whose body starts with
+               "Fixes #${{ matrix.issue.number }}" and says what changed and how it was tested. Never merge.
+
+            Credit the reporter only as the issue's footer does (a name, or "a tester"); never add more about them.
+            Be brief.
+          claude_args: |
+            --allowedTools "Read,Edit,Write,Glob,Grep,Bash(git:*),Bash(gh issue view:*),Bash(gh issue comment:*),Bash(gh issue close:*),Bash(gh pr create:*),Bash(gh pr list:*),Bash(python -m pytest:*)"
