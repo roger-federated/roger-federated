@@ -92,13 +92,18 @@ def _place_keep_big_embeddings_on_cpu(model, min_params: int = 1_000_000_000):
     big = [m for m in model.modules() if isinstance(m, torch.nn.Embedding)
            and m.weight.numel() >= min_params and id(m.weight) not in tied]
     keep = {id(t) for m in big for t in list(m.parameters()) + list(m.buffers())}
+    moved = {}   # id(old) -> its GPU copy, so a tied weight (lm_head = embed_tokens) stays ONE tensor on the GPU
     for mod in model.modules():
         for name, p in list(mod._parameters.items()):
             if p is not None and id(p) not in keep:
-                mod._parameters[name] = torch.nn.Parameter(p.data.to(dev), requires_grad=p.requires_grad)
+                if id(p) not in moved:
+                    moved[id(p)] = torch.nn.Parameter(p.data.to(dev), requires_grad=p.requires_grad)
+                mod._parameters[name] = moved[id(p)]
         for name, b in list(mod._buffers.items()):
             if b is not None and id(b) not in keep:
-                mod._buffers[name] = b.to(dev)
+                if id(b) not in moved:
+                    moved[id(b)] = b.to(dev)
+                mod._buffers[name] = moved[id(b)]
     for m in big:
         m.register_forward_pre_hook(lambda _m, args: tuple(a.to("cpu") if torch.is_tensor(a) else a for a in args))
         m.register_forward_hook(lambda _m, _args, out: out.to(dev))

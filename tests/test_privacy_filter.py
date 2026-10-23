@@ -133,7 +133,15 @@ def test_surrogate_seed_is_keyed_and_persisted():
             assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
             pf._SALT = None                                     # a later process re-reads the same key
             assert pf._seed("078-05-1120") == first
-        pf._SALT = b"\x01" * 32                                 # another install: a different surrogate
+            assert os.listdir(os.path.join(d, ".roger")) == ["pii_salt"]   # no temp file left behind
+            open(path, "wb").close()                            # a truncated key must not unkey the seed
+            pf._SALT = None
+            try:
+                pf._seed("078-05-1120")
+                raise AssertionError("an empty pii_salt was accepted")
+            except RuntimeError:
+                pass
+        pf._SALT = b"\x01" * 32                                # another install: a different surrogate
         assert pf._seed("078-05-1120") != first
     finally:
         pf._SALT = saved

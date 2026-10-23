@@ -142,20 +142,25 @@ def _salt() -> bytes:
     global _SALT
     if _SALT is None:
         path = os.path.join(state_dir(), "pii_salt")
-        try:
-            with open(path, "rb") as f:
-                _SALT = f.read()
-        except FileNotFoundError:
+        if not os.path.exists(path):
             os.makedirs(state_dir(), exist_ok=True)
-            key = secrets.token_bytes(32)
-            try:                                    # O_EXCL: two racing rounds keep the first writer's key
-                fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-                with os.fdopen(fd, "wb") as f:
-                    f.write(key)
-                _SALT = key
+            # Written whole to a temp file, then linked into place: a crash mid-write can't leave an empty key
+            # (blake2b accepts one, which would silently unkey the seed), and link fails if the file exists, so
+            # two racing rounds keep the first writer's key.
+            tmp = f"{path}.{os.getpid()}.tmp"
+            with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "wb") as f:
+                f.write(secrets.token_bytes(32))
+            try:
+                os.link(tmp, path)
             except FileExistsError:
-                with open(path, "rb") as f:
-                    _SALT = f.read()
+                pass
+            finally:
+                os.unlink(tmp)
+        with open(path, "rb") as f:
+            key = f.read()
+        if len(key) != 32:
+            raise RuntimeError(f"{path} is not a 32-byte key; delete it to generate a new one")
+        _SALT = key
     return _SALT
 
 
