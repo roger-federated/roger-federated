@@ -9,12 +9,16 @@ averaging them into a reward is the optimiser's job.
 
 The same call also reads the user's reactions — the only human signal available, since roger can't
 prompt the user inside a third-party client. Every assistant reply the user answered
-gets one number, judged from the user's own words (a correction, a repeated request, a thank-you), not
+gets one label, judged from the user's own words (a correction, a repeated request, a thank-you), not
 from the model's opinion of its reply — so it stays a human signal. Each answered reply is named in the
 seed with a snippet of the user's answer and forced as its own schema property, so the grammar can't
-skip or misalign one; they're stored as `reactions` keyed by the reply's message index (the same keys
-as `tool_signals`). The newest reply has no answer yet: it gets one if the chat continues and is graded
-again at its new end.
+skip or misalign one; they're stored as `reactions` (-1/0/1) keyed by the reply's message index (the
+same keys as `tool_signals`). The newest reply has no answer yet: it gets one if the chat continues and
+is graded again at its new end.
+
+The reactions are named labels, forced BEFORE `reasoning`: as a bare -1..1 number emitted after the
+model had argued its own work was good, a small model scored pushback +1 (gemma-4-E2B did on every
+pushback chat in an external test), handing the worst chats the maximum return.
 """
 import json, sys, threading, time
 from datetime import datetime, timezone
@@ -29,10 +33,12 @@ METRICS = {"efficiency": "how directly I reached the goal, with very few wasted,
 SEED = ("Let me honestly grade how well I completed the task in this conversation, one score per "
         "criterion — " + "; ".join(f"{m}: {d}" for m, d in METRICS.items()) + ". For each: 1 for a "
         "clean, fully-correct solve, around 0 for partial or clumsy, negative if I largely failed.")
-REACTION_SEED = ("Separately, and judging only from the user's own words rather than from how good I think "
-                 "my reply was, how did the user react to each reply of mine they answered: -1 if they said "
-                 "it was wrong or didn't work, or had to repeat or rephrase their request; 1 if they confirmed "
-                 "it worked or thanked me; 0 if neutral or they simply moved on. The replies they answered: ")
+REACTION_SEED = ("But first, judging only from the user's own words and not from how good I think my reply "
+                 "was, label how the user reacted to each reply of mine they answered: pushed_back if they "
+                 "said it was wrong or didn't work, corrected me, objected, or had to repeat or rephrase their "
+                 "request; confirmed if they said it worked or thanked me; neutral if they simply moved on. "
+                 "The replies they answered: ")
+REACTIONS = {"pushed_back": -1.0, "neutral": 0.0, "confirmed": 1.0}   # label → stored reaction
 SNIPPET = 160       # chars of each user answer quoted in the seed, enough to tell the replies apart
 IDLE_S = 300        # a conversation nobody has extended for this long is over
 TICK_S = 15
@@ -118,7 +124,7 @@ def _answered(msgs: list) -> list[tuple[int, str]]:
 def _prompt(rec: dict) -> tuple[str, dict, list[int]]:
     """(seed, schema, answered-reply indices) for one conversation. Without answered replies it is
     exactly SEED + SCHEMA; otherwise the reaction request is appended to the seed and a `reactions`
-    object with one forced `reply_N` property per answered reply is added after `scores`."""
+    object with one forced `reply_N` label per answered reply is put before `reasoning`."""
     answered = _answered(rec["request"].get("messages") or [])
     if not answered:
         return SEED, SCHEMA, []
@@ -126,10 +132,11 @@ def _prompt(rec: dict) -> tuple[str, dict, list[int]]:
                        for n, (_, text) in enumerate(answered, 1))
     names = [f"reply_{n}" for n in range(1, len(answered) + 1)]
     schema = json.loads(json.dumps(SCHEMA))
-    schema["properties"]["reactions"] = {"type": "object",
-                                         "properties": {k: {"type": "number"} for k in names},
-                                         "required": names, "additionalProperties": False}
-    schema["required"].append("reactions")
+    reactions = {"type": "object",
+                 "properties": {k: {"type": "string", "enum": list(REACTIONS)} for k in names},
+                 "required": names, "additionalProperties": False}
+    schema["properties"] = {"reactions": reactions, **schema["properties"]}
+    schema["required"].insert(0, "reactions")
     return SEED + " " + REACTION_SEED + quotes + ".", schema, [i for i, _ in answered]
 
 
@@ -178,7 +185,8 @@ def grade(client: httpx.Client, backend: str, entry: dict, model: str | None = N
                           seed_placement="appended" if appended else "message",
                           graded_messages=len(msgs) - 1)
             if answered:
-                result["reactions"] = {str(i): _clamp(obj["reactions"][f"reply_{n}"])
+                # a runtime that ignored the enum: unknown labels count as neutral, not as a failed grade
+                result["reactions"] = {str(i): REACTIONS.get(obj["reactions"][f"reply_{n}"], 0.0)
                                        for n, i in enumerate(answered, 1)}
     except Exception as e:                                # httpx errors, bad JSON, missing metric, …
         result["error"] = f"{e.__class__.__name__}: {str(e)[:200]}"

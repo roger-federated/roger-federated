@@ -155,8 +155,8 @@ class _Upstream(BaseHTTPRequestHandler):
                 return
             verdict = {"reasoning": "ok", "scores": {"efficiency": 0.7, "accuracy": 3, "completeness": -0.5}}
             asked = req["response_format"]["json_schema"]["schema"]["properties"].get("reactions")
-            if asked:                                    # one per forced reply_N, alternating -2 / 0.5
-                verdict["reactions"] = {k: (-2 if n % 2 == 0 else 0.5)
+            if asked:                                    # one per forced reply_N, alternating labels
+                verdict["reactions"] = {k: ("pushed_back" if n % 2 == 0 else "confirmed")
                                         for n, k in enumerate(asked["properties"])}
             content = "not json" if self.eval_mode == "garbage" else json.dumps(verdict)
             self._json(200, {"object": "chat.completion", "model": "m",
@@ -831,16 +831,19 @@ def test_grade_reads_the_users_reactions_per_answered_reply(stack, tmp_path):
         res = grader.grade(c, f"http://127.0.0.1:{backend_port}", entry)
     (sent,) = _Upstream.evals
     schema = sent["response_format"]["json_schema"]["schema"]
-    assert list(schema["properties"]) == ["reasoning", "scores", "reactions"]
+    # labelled before the model argues about its own work, from a closed set
+    assert list(schema["properties"]) == ["reactions", "reasoning", "scores"]
+    assert schema["required"] == ["reactions", "reasoning", "scores"]
     assert schema["properties"]["reactions"]["required"] == ["reply_1", "reply_2"]
+    assert schema["properties"]["reactions"]["properties"]["reply_1"]["enum"] == list(grader.REACTIONS)
     seed = sent["messages"][-1]["content"]
     assert seed.startswith(grader.SEED) and grader.REACTION_SEED in seed
     assert 'reply_1: the user answered "no, it still crashes"' in seed           # whitespace collapsed
     assert 'reply_2: the user answered "works, thanks!"' in seed
     assert sent["max_tokens"] == grader.MAX_TOKENS + 32
     # credited to the assistant message the user answered (the run's last one, not the tool-calling one),
-    # keyed by message index like tool_signals, clamped
-    assert res["reactions"] == {"4": -1.0, "6": 0.5}
+    # keyed by message index like tool_signals, labels mapped to -1/0/1
+    assert res["reactions"] == {"4": -1.0, "6": 1.0}
     assert json.loads(path.read_text())["self_eval"]["reactions"] == res["reactions"]
 
 
