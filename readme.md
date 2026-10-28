@@ -64,7 +64,7 @@ Please *exit the runtime properly using Ctrl-C*, so roger can auto-grade the con
 
 **Connect your agent harness:**
 
-Point any harness that speaks the OpenAI chat-completions or Responses API at the port you passed to `--port`; roger relays it to the runtime and records the conversations. For example, [opencode](https://opencode.ai/docs/providers/) with an `opencode.json` in your project:
+Point any harness that speaks the OpenAI chat-completions API (`/v1/chat/completions`) at the port you passed to `--port`; roger relays it to the runtime and records, grades and trains on the conversations. For example, [opencode](https://opencode.ai/docs/providers/) with an `opencode.json` in your project:
 
 ```json
 {
