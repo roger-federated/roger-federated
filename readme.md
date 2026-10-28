@@ -62,6 +62,28 @@ On the first launch of each day, roger pulls your federations' latest model upda
 
 Please *exit the runtime properly using Ctrl-C*, so roger can auto-grade the conversation and perform finetune in case enough conversations have accumulated.
 
+**Connect your agent harness:**
+
+Point any harness that speaks the OpenAI chat-completions or Responses API at the port you passed to `--port`; roger relays it to the runtime and records the conversations. For example, [opencode](https://opencode.ai/docs/providers/) with an `opencode.json` in your project:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "roger": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "roger",
+      "options": { "baseURL": "http://localhost:8080/v1" },
+      "models": { "google/gemma-4-12B-it": { "name": "Gemma 4 12B (roger)" } }
+    }
+  }
+}
+```
+
+Then run `opencode` and select the `roger` model with `/models`. With vLLM use port `8000` and the model id you passed to `vllm serve`.
+
+Note: Claude Code speaks the Anthropic Messages API (`/v1/messages`), which roger relays but does not record, so Claude Code sessions are not trained on.
+
 <details>
 <summary>Remote execution on a trusted machine over SSH</summary>
 
