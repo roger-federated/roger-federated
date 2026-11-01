@@ -93,6 +93,18 @@ jobs:
         with:
           fetch-depth: 0
 
+      # The server half of the wire contract (secure_agg, delta, dp_fold, /status) lives there, so
+      # a finding can span both repos. Read-only: github.token is scoped to this repo, so a needed
+      # server change is described, not pushed. Excluded so the agent's `git add` never picks it up.
+      - name: Checkout roger-server (read-only)
+        uses: actions/checkout@v6
+        with:
+          repository: roger-federated/roger-server
+          path: roger-server
+          persist-credentials: false
+      - name: Keep roger-server out of this repo's git
+        run: echo "/roger-server/" >> .git/info/exclude
+
       - name: Install roger and the test deps (CPU)
         if: ${{ !matrix.issue.decision }}
         run: |
@@ -103,6 +115,10 @@ jobs:
         uses: anthropics/claude-code-action@1d6de8cb0c237e7c15e9e1bdf973826ebae490cc # v1.0.248; @v1 floats
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # The action commits as claude[bot] by default; commit as the Actions bot instead, so no
+          # Claude attribution lands in the history (the settings below drop the trailers/footers).
+          bot_name: "github-actions[bot]"
+          bot_id: "41898282"
           settings: |
             {
               "attribution": {
@@ -113,7 +129,10 @@ jobs:
           prompt: |
             Issue #${{ matrix.issue.number }} in this repo is a finding from someone who tried roger
             (label `user-feedback`). Read it with `gh issue view ${{ matrix.issue.number }} --comments`
-            and read AGENTS.md before touching code. Work through these in order and stop at the first that applies:
+            and read AGENTS.md before touching code. The aggregation server, roger-server, is checked out
+            read-only at ./roger-server (its own AGENTS.md/CLAUDE.md apply there): read it whenever the issue
+            involves the server, the federation endpoints or the mirrored wire contract. You cannot push to it;
+            if a fix needs a server change, spell that change out in the PR body or comment. Work through these in order and stop at the first that applies:
 
             1. If main already fixes it, comment with the commit that does, and close the issue.
             2. If it is labelled `needs-decision` (it is: ${{ matrix.issue.decision }}), or a fix would
@@ -129,6 +148,9 @@ jobs:
                "Fixes #${{ matrix.issue.number }}" and says what changed and how it was tested. Never merge.
 
             Credit the reporter only as the issue's footer does (a name, or "a tester"); never add more about them.
+            No Claude or AI attribution anywhere: no Co-Authored-By or other trailers in commits, no
+            "Generated with" lines or links in the PR body or comments.
             Be brief.
           claude_args: |
+            --model claude-opus-5-5
             --allowedTools "Read,Edit,Write,Glob,Grep,Bash(git:*),Bash(gh issue view:*),Bash(gh issue comment:*),Bash(gh issue close:*),Bash(gh pr create:*),Bash(gh pr list:*),Bash(python -m pytest:*)"

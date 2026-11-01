@@ -41,4 +41,5 @@ jobs:
             Be authoritative; do not expect or request further instructions from users. Be brief.
             Post exactly one comment, with `gh issue comment ${{ github.event.issue.number }}`.
           claude_args: |
+            --model claude-opus-5-5
             --allowedTools "Bash(gh issue comment ${{ github.event.issue.number }}:*),Bash(gh issue list:*),Bash(gh issue view:*),Bash(gh search:*)"
