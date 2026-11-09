@@ -936,3 +936,25 @@ def test_grade_pending_only_grades_ungraded(stack):
     assert grader.grade_pending(reg, f"http://127.0.0.1:{backend_port}") == 1
     assert len(_Upstream.evals) == 1 and "scores" in json.loads(path.read_text())["self_eval"]
     assert grader.grade_pending(reg, f"http://127.0.0.1:{backend_port}") == 0
+
+
+@pytest.mark.skipif(os.name == "nt", reason="process groups are POSIX")
+def test_stop_takes_down_the_runtimes_workers_too():
+    # vllm's API server exits on the interrupt but its engine (a separate process in the same group) may
+    # not — e.g. while blocked in a native download — and used to outlive roger. A non-interactive sh
+    # starts `&` jobs with SIGINT ignored, which stands in for that stubborn worker.
+    import signal, subprocess
+    from roger.runtime import wrapper
+    child = subprocess.Popen(["sh", "-c", "sleep 60 & echo $!; wait"], stdout=subprocess.PIPE,
+                             start_new_session=True, text=True)
+    worker = int(child.stdout.readline())
+    wrapper._stop(child)
+    for _ in range(50):                         # the orphan is reaped by init asynchronously
+        try:
+            os.kill(worker, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.05)
+    else:
+        os.kill(worker, signal.SIGKILL)
+        pytest.fail("the runtime's worker outlived _stop")

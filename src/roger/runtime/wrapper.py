@@ -10,7 +10,7 @@ Usage:
   roger llama-server -m model.gguf --port 8080
   roger vllm serve meta-llama/Llama-3-8B --port 8000
 """
-import shutil, signal, subprocess, sys, threading
+import os, shutil, signal, subprocess, sys, threading
 
 from roger.runtime import adapter, capture, dialect, grader, notice, proxy, train
 from roger.runtime.console import say
@@ -45,25 +45,48 @@ def _wait(child: subprocess.Popen) -> int:
             pass
 
 
+def _signal(child: subprocess.Popen, how: str) -> None:
+    """Deliver "interrupt" / "terminate" / "kill" to the runtime."""
+    # The whole group, not just the runtime's own pid: a terminal's Ctrl-C would have reached every
+    # process of a directly-launched runtime, and vllm runs its engine as a separate process. Signalled
+    # alone, the API server exits and leaves `VLLM::EngineCore` orphaned — still downloading, still
+    # holding the GPU memory, still printing to the terminal roger has already handed back.
+    if sys.platform == "win32":
+        # CTRL_BREAK_EVENT already reaches the group; terminate/kill stay per-process here.
+        {"interrupt": lambda: child.send_signal(signal.CTRL_BREAK_EVENT),
+         "terminate": child.terminate, "kill": child.kill}[how]()
+        return
+    sig = {"interrupt": signal.SIGINT, "terminate": signal.SIGTERM, "kill": signal.SIGKILL}[how]
+    try:
+        os.killpg(child.pid, sig)                       # start_new_session made its pid the group id
+    except ProcessLookupError:                          # the group is already empty
+        pass
+
+
 def _stop(child: subprocess.Popen) -> int:
     """After Ctrl-C. The runtime sits in its own process group (so the terminal's interrupt reached
     only us and the pending self-grades could run first); now deliver the interrupt ourselves and
     give it time to shut down on its own before escalating."""
-    child.send_signal(signal.CTRL_BREAK_EVENT if sys.platform == "win32" else signal.SIGINT)
+    _signal(child, "interrupt")
     try:
         rc = child.wait(timeout=10)
     except subprocess.TimeoutExpired:
-        child.terminate()
+        _signal(child, "terminate")
         try:
             child.wait(timeout=5)
         except subprocess.TimeoutExpired:
-            child.kill()
+            _signal(child, "kill")
             child.wait()
         rc = 130
     except KeyboardInterrupt:                          # second Ctrl-C: the user means it
-        child.kill()
+        _signal(child, "kill")
         child.wait()
         rc = 130
+    # Whatever the runtime left behind in its group (a worker that ignored the interrupt, e.g. one
+    # blocked in a native download) must not outlive roger. While such leftovers exist the group id
+    # can't be reused, so this reaches only them; with none left it finds the group empty.
+    if sys.platform != "win32":
+        _signal(child, "kill")
     return 130 if rc < 0 else rc                       # POSIX reports death-by-signal as -SIG
 
 
