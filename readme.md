@@ -49,7 +49,7 @@ Roger wraps the local runtime you already use: prefix its usual command with `ro
 If you are new to using a local runtime, click [`here`](https://docs.vllm.ai/en/latest/getting_started/installation/) to install vLLM.
 
 ```bash
-roger vllm serve google/gemma-4-12B-it --port 8000
+roger vllm serve google/gemma-4-12B-it --port 8000 --enable-auto-tool-choice --tool-call-parser gemma4 --reasoning-parser gemma4
 ```
 or
 ```bash
