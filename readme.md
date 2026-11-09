@@ -53,10 +53,15 @@ roger vllm serve google/gemma-4-12B-it --port 8000 --enable-auto-tool-choice --t
 ```
 or
 ```bash
-roger llama-server -m model.gguf --port 8080
+roger llama-server -m path/to/supported/model.gguf --port 8000
 ```
 
-Once the runtime is up, roger tells you whether your federations accept the model you are using, and if not, which models they do accept, so you can switch.
+Some (non-QAT) quantizations of a supported model are accepted too, e.g. on Apple silicon:
+```bash
+roger vllm serve mlx-community/gemma-4-12B-it-OptiQ-4bit --port 8000 --language-model-only --enable-auto-tool-choice --tool-call-parser gemma4 --reasoning-parser gemma4
+```
+
+Once the runtime is up, roger tells you whether your federations accept the model you are using, and if not, which models they do accept, so you can switch. The full list of a federation's models and their accepted aliases is at its `/status` endpoint, e.g. `curl https://server.rogerfederated.com/status`.
 
 On the first launch of each day, roger pulls your federations' latest model update for the model and keeps it under `~/.roger/federated/`. Every launch then attaches it as a LoRA adapter, so your model file is never modified and no model copy is stored.
 
@@ -73,14 +78,14 @@ Point any harness that speaks the OpenAI chat-completions API (`/v1/chat/complet
     "roger": {
       "npm": "@ai-sdk/openai-compatible",
       "name": "roger",
-      "options": { "baseURL": "http://localhost:8080/v1" },
+      "options": { "baseURL": "http://localhost:8000/v1" },
       "models": { "google/gemma-4-12B-it": { "name": "Gemma 4 12B (roger)" } }
     }
   }
 }
 ```
 
-Then run `opencode` and select the `roger` model with `/models`. With vLLM use port `8000` and the model id you passed to `vllm serve`.
+Then run `opencode` and select the `roger` model with `/models`. With vLLM, use the model id you passed to `vllm serve`.
 
 Note: Claude Code speaks the Anthropic Messages API (`/v1/messages`), which roger relays but does not record, so Claude Code sessions are not trained on.
 
