@@ -51,6 +51,15 @@ class _Server(ThreadingHTTPServer):
         # legitimately take minutes to produce its first byte on a small GPU.
         self.client = httpx.Client(timeout=httpx.Timeout(connect=5.0, read=None, write=None, pool=None))
 
+    def handle_error(self, request, client_address):
+        # A client that hangs up before we answer (an IDE polling the port while the runtime is still
+        # loading gives up before our connect retries do) makes the write of our 502 raise
+        # BrokenPipe/ConnectionReset. Nobody is left to tell, so it's not worth the stdlib's full traceback
+        # on the user's terminal. Anything else is a real bug in the relay and still gets printed.
+        if isinstance(sys.exc_info()[1], ConnectionError):
+            return
+        super().handle_error(request, client_address)
+
 
 def start(host: str, port: int, backend_url: str, on_exchange: Sink | None,
           request_model: str | None = None) -> ThreadingHTTPServer:

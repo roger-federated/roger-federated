@@ -329,6 +329,27 @@ def test_upgrade_refused_and_dead_backend_is_502(stack, monkeypatch):
         proxy.stop(dead)
 
 
+def test_client_hangup_is_not_a_traceback(capsys):
+    # The stdlib prints a full traceback for any exception escaping a handler; a client that left before
+    # our 502 could be written isn't one worth showing, but a genuine relay bug still is.
+    srv = proxy.start("127.0.0.1", dialect.free_port(), "http://127.0.0.1:1", None)
+    try:
+        for exc in (BrokenPipeError(32, "Broken pipe"), ConnectionResetError(54, "reset")):
+            try:
+                raise exc
+            except OSError:
+                srv.handle_error(None, ("127.0.0.1", 1))
+        assert capsys.readouterr().err == ""
+        try:
+            raise ValueError("relay bug")
+        except ValueError:
+            srv.handle_error(None, ("127.0.0.1", 1))
+        assert "relay bug" in capsys.readouterr().err
+    finally:
+        srv.server_close()
+        srv.client.close()
+
+
 # ---------------------------------------------------------------------------
 # Federation notice: what the runtime serves vs. what the federation accepts
 # ---------------------------------------------------------------------------
