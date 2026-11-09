@@ -33,6 +33,7 @@ from datetime import datetime, timezone
 import httpx
 
 from roger.runtime import capture
+from roger.runtime.console import say
 
 METRICS = {"efficiency": "how directly you reached the goal, with very few wasted, wrong or redundant steps",
            "accuracy": "how correct the result is",
@@ -223,7 +224,7 @@ def run(registry: list, backend: str, stop: threading.Event, model: str | None =
                 try:
                     grade(client, backend, e, model)
                 except Exception as e2:               # belt and braces: grading never kills the relay
-                    print(f"roger: self-grading failed: {e2!r}", file=sys.stderr)
+                    say(f"self-grading failed: {e2!r}", file=sys.stderr)
 
 
 def grade_pending(registry: list, backend: str, model: str | None = None) -> int:
@@ -233,8 +234,8 @@ def grade_pending(registry: list, backend: str, model: str | None = None) -> int
         pending = [e for e in registry if not e["graded"]]
     if not pending:
         return 0
-    print(f"roger: grading {len(pending)} conversation(s) before shutdown (Ctrl-C again to skip)",
-          file=sys.stderr)
+    say(f"grading {len(pending)} conversation(s) before shutdown (Ctrl-C again to skip)",
+        file=sys.stderr)
     with _client() as client:
         for e in pending:
             grade(client, backend, e, model)

@@ -20,6 +20,8 @@ from typing import NamedTuple
 import numpy as np
 from safetensors.numpy import save_file as st_save_file
 
+from roger.runtime.console import say
+
 _PEFT_PREFIX = "base_model.model."
 
 
@@ -166,8 +168,8 @@ def build_gguf(factors: dict, base_path: str, dest: str, model_id: str = "",
     whatever the rank — the scale is already in B. None when nothing matched."""
     import gguf
     if not os.path.isfile(base_path):
-        print(f"roger: {base_path} isn't a local file, so the federation's update can't be attached "
-              "(point -m at a local gguf).", file=out)
+        say(f"{base_path} isn't a local file, so the federation's update can't be attached "
+            "(point -m at a local gguf).", file=out)
         return None
     arch, n_blocks, shapes, n_head = _read_base(base_path)
     names = _gguf_names(arch, n_blocks, factors)
@@ -175,8 +177,8 @@ def build_gguf(factors: dict, base_path: str, dest: str, model_id: str = "",
     for mod, (A, B) in factors.items():
         name = names.get(mod)
         if name is None or shapes.get(name) != (B.shape[0], A.shape[1]):
-            print(f"roger: federation update has no matching tensor for {_hf_path(mod)} in "
-                  f"{os.path.basename(base_path)}; skipping it", file=out)
+            say(f"federation update has no matching tensor for {_hf_path(mod)} in "
+                f"{os.path.basename(base_path)}; skipping it", file=out)
             continue
         if arch == "llama" and n_head and name.endswith("attn_q.weight"):
             B = _permute(B, n_head)

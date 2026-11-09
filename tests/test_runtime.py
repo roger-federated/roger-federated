@@ -329,6 +329,27 @@ def test_upgrade_refused_and_dead_backend_is_502(stack, monkeypatch):
         proxy.stop(dead)
 
 
+def test_say_tags_every_line_and_colours_only_a_terminal(monkeypatch):
+    import io
+    from roger.runtime import console
+
+    class Tty(io.StringIO):
+        def isatty(self):
+            return True
+
+    plain, tty = io.StringIO(), Tty()
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.setattr(console.sys, "platform", "darwin")    # skip the Windows console probe
+    console.say("one\n  two", file=plain)
+    console.say("one", file=tty)
+    assert plain.getvalue() == "ROGER: one\nROGER:   two\n"   # piped: greppable, no escape codes
+    assert tty.getvalue() == console._BADGE + "one\n"
+    monkeypatch.setenv("NO_COLOR", "1")
+    tty2 = Tty()
+    console.say("one", file=tty2)
+    assert tty2.getvalue() == "ROGER: one\n"
+
+
 def test_client_hangup_is_not_a_traceback(capsys):
     # The stdlib prints a full traceback for any exception escaping a handler; a client that left before
     # our 502 could be written isn't one worth showing, but a genuine relay bug still is.

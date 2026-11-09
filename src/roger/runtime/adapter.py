@@ -26,6 +26,7 @@ from safetensors.numpy import load as st_load
 from roger.paths import state_dir
 from roger.federated import transport
 from roger.runtime import dialect, notice
+from roger.runtime.console import say
 
 
 def _today() -> str:
@@ -46,7 +47,7 @@ def pull_today(feds: list[str], hint: str, out=sys.stderr) -> bool:
         status = transport.federation_status(url, hint)
         model_id = notice.resolve([hint], status)  # the canonical id, via the federation's alias table
         if status and model_id is not None and status.get("mode", "busy") != "unsupported":
-            print(f"roger: pulling today's federation update for {model_id} from {url}…", file=out)
+            say(f"pulling today's federation update for {model_id} from {url}…", file=out)
             res = transport.pull(url, st.get("cursor"), model_id)
             if res is not None:
                 blob, cursor = res
@@ -124,32 +125,32 @@ def prepare(argv: list[str], out=sys.stderr) -> tuple[str, int] | None:
     # chats that never train. notice.announce makes that worse — it reads the model off /v1/models, so it
     # will report the federation as training this very model while nothing here can train it.
     if spec is None:
-        print(f"roger: {runtime} isn't a runtime roger knows ({', '.join(dialect.RUNTIMES)}), so no "
-              "federation update can be attached and this session's chats can't be trained on. They're "
-              "still saved and graded.", file=out)
+        say(f"{runtime} isn't a runtime roger knows ({', '.join(dialect.RUNTIMES)}), so no "
+            "federation update can be attached and this session's chats can't be trained on. They're "
+            "still saved and graded.", file=out)
         return None
     if (flag := dialect.user_adapter(argv)) is not None:
-        print(f"roger: cannot attach the federation's LoRA adapter because {flag} already loads one of "
-              "yours; drop it to receive the federation's update. Chats are still saved and graded.",
-              file=out)
+        say(f"cannot attach the federation's LoRA adapter because {flag} already loads one of "
+            "yours; drop it to receive the federation's update. Chats are still saved and graded.",
+            file=out)
         return None
     hint = dialect.served_model(argv)
     if hint is None:
-        print(f"roger: this {runtime} command line doesn't name a model ({dialect.names_model(spec)}), "
-              "so roger can't tell which model is served: no federation update will be attached and "
-              "this session's chats can't be trained on. They're still saved and graded.", file=out)
+        say(f"this {runtime} command line doesn't name a model ({dialect.names_model(spec)}), "
+            "so roger can't tell which model is served: no federation update will be attached and "
+            "this session's chats can't be trained on. They're still saved and graded.", file=out)
         return None
     notice.privacy_notice(cfg, out)               # before the pull below: the first federation contact
     pull_today(feds, hint, out)
     factors = load_factors(feds, hint)
     if not factors:
         if any(transport.load_global(url, hint) is not None for url in feds):
-            print("roger: the federation's global isn't in adapter (LoRA-factor) form yet, so it can't "
-                  "be attached to the runtime; chats are still saved.", file=out)
+            say("the federation's global isn't in adapter (LoRA-factor) form yet, so it can't "
+                "be attached to the runtime; chats are still saved.", file=out)
         return None
     model_id = next((m for url in feds if (m := transport.load_state(url, hint).get("model_id"))), hint)
     built = spec["build"](factors, hint, _adapter_stem(hint), model_id, out)
     if built is not None:
-        print(f"roger: attaching the federation's update ({len(factors)} modules, rank {built[1]}) "
-              f"to {os.path.basename(hint)} via adapter {built[0]}", file=out)
+        say(f"attaching the federation's update ({len(factors)} modules, rank {built[1]}) "
+            f"to {os.path.basename(hint)} via adapter {built[0]}", file=out)
     return built

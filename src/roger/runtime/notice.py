@@ -23,6 +23,7 @@ import httpx
 from roger.federated import CLIENT_VERSION, UPDATE_CMD, transport
 from roger.paths import state_dir
 from roger.runtime import dialect
+from roger.runtime.console import say
 
 _POLL = 2.0        # seconds between /v1/models attempts while the runtime loads
 
@@ -40,9 +41,9 @@ def privacy_notice(cfg: dict, out=sys.stderr) -> None:
     sentinel = os.path.join(state_dir(), "privacy_ack")
     if os.path.exists(sentinel):
         return
-    print("roger: this client contributes an encrypted gradient update to your configured federation "
-          f"server(s) by default (never raw data). Details: {_PRIVACY_URL}\n"
-          'roger: opt out anytime by setting "federations": [] in ~/.roger/config.json.', file=out)
+    say("this client contributes an encrypted gradient update to your configured federation "
+        f"server(s) by default (never raw data). Details: {_PRIVACY_URL}\n"
+        'opt out anytime by setting "federations": [] in ~/.roger/config.json.', file=out)
     os.makedirs(os.path.dirname(sentinel), exist_ok=True)
     open(sentinel, "w").close()
 
@@ -111,8 +112,8 @@ def announce(served: list[str], cfg: dict, out=sys.stderr) -> None:
     if not feds:
         return
     if not cfg.get("contribute", True):
-        print('roger: "contribute" is off in ~/.roger/config.json: chats are saved but nothing is ever '
-              "shared back. Set it to true to pull your weight.", file=out)
+        say('"contribute" is off in ~/.roger/config.json: chats are saved but nothing is ever '
+            "shared back. Set it to true to pull your weight.", file=out)
     what = ", ".join(served)
     for url in feds:
         st = transport.federation_status(url, served[0] if served else "")
@@ -122,29 +123,29 @@ def announce(served: list[str], cfg: dict, out=sys.stderr) -> None:
         if not served:
             # The runtime never told us its model: can't judge, but the list is still the useful part.
             if accepted:
-                print(f"roger: {url} trains {', '.join(accepted)}; couldn't tell which model this runtime "
-                      "serves (no /v1/models), so make sure it is one of these to contribute.", file=out)
+                say(f"{url} trains {', '.join(accepted)}; couldn't tell which model this runtime "
+                    "serves (no /v1/models), so make sure it is one of these to contribute.", file=out)
         elif accepted is None:
             # Old server, or one accepting any model: only its own verdict on the raw id is available.
             if st.get("mode", "busy") == "unsupported":
-                print(f"roger: ⚠ {url} doesn't accept {what}: chats are still saved but won't train the "
-                      "federation. Pick a model it accepts to contribute and receive its updates.", file=out)
+                say(f"⚠ {url} doesn't accept {what}: chats are still saved but won't train the "
+                    "federation. Pick a model it accepts to contribute and receive its updates.", file=out)
             else:
-                print(f"roger: ✓ {url} accepts {what}; the chats saved here will train it.", file=out)
+                say(f"✓ {url} accepts {what}; the chats saved here will train it.", file=out)
         elif (hit := resolve(served, st)) is not None:
-            print(f"roger: ✓ {url} trains {hit}, which this runtime serves as {what}; the chats saved "
-                  "here will feed it.", file=out)
+            say(f"✓ {url} trains {hit}, which this runtime serves as {what}; the chats saved "
+                "here will feed it.", file=out)
         else:
-            print(f"roger: ⚠ {url} doesn't accept {what}: chats are still saved but won't train the "
-                  f"federation. Models it accepts: {', '.join(accepted) or 'none right now'} — run one of "
-                  "these" + (" (or a build of one it lists, such as an MLX or GGUF quantization)"
-                             if any(st.get("aliases") or {}) else "")
-                  + " to contribute and receive its updates.", file=out)
+            say(f"⚠ {url} doesn't accept {what}: chats are still saved but won't train the "
+                f"federation. Models it accepts: {', '.join(accepted) or 'none right now'} — run one of "
+                "these" + (" (or a build of one it lists, such as an MLX or GGUF quantization)"
+                           if any(st.get("aliases") or {}) else "")
+                + " to contribute and receive its updates.", file=out)
         if CLIENT_VERSION < int(st.get("min_client", 0) or 0):
-            print(f"roger: ⚠ your roger client is out of date: {url} rejects this version's gradients. "
-                  f"Update to keep contributing:\n  {UPDATE_CMD}", file=out)
+            say(f"⚠ your roger client is out of date: {url} rejects this version's gradients. "
+                f"Update to keep contributing:\n  {UPDATE_CMD}", file=out)
         elif int(st.get("latest_client", 0) or 0) > CLIENT_VERSION:
-            print(f"roger: a newer roger client is available. Update with: {UPDATE_CMD}", file=out)
+            say(f"a newer roger client is available. Update with: {UPDATE_CMD}", file=out)
 
 
 def run(backend_url: str, alive) -> None:

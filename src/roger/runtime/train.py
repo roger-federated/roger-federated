@@ -16,6 +16,7 @@ import glob, json, os, sys
 
 from roger.federated import CLIENT_VERSION, UPDATE_CMD, transport
 from roger.runtime import adapter, capture, grader, notice
+from roger.runtime.console import say
 
 
 # ---------------------------------------------------------------------------
@@ -115,45 +116,45 @@ def maybe_train(provider: str, served: str | None, cfg: dict, out=sys.stderr) ->
     fed, skipped = _federation(feds, served)
     # The config order is the user's priority, so every federation passed over is named with its reason.
     for url, why in skipped:
-        print(f"roger: not training for {url}: {why}.", file=out)
+        say(f"not training for {url}: {why}.", file=out)
     if fed is None:
-        print("roger: no configured federation can take this model's training; keeping its conversations.",
-              file=out)
+        say("no configured federation can take this model's training; keeping its conversations.",
+            file=out)
         return
     if skipped:
-        print(f"roger: training for {fed[0]} instead (next in your federations list).", file=out)
+        say(f"training for {fed[0]} instead (next in your federations list).", file=out)
     url, model_id, _ = fed
     blob = _refresh(url, served, model_id)
     status = transport.federation_status(url, model_id)   # the epoch/phase to train, read right before
     if not status:
-        print(f"roger: {url} is unreachable; training later.", file=out)
+        say(f"{url} is unreachable; training later.", file=out)
         return
     if blob is not None:
         meta = adapter._metadata(blob)
         if int(meta.get("epoch", status.get("epoch", 0))) != int(status.get("epoch", 0)):
-            print("roger: the federation moved to a new epoch mid-pull; training later.", file=out)
+            say("the federation moved to a new epoch mid-pull; training later.", file=out)
             return
-    print(f"roger: training {model_id} on {len(convs)} conversation(s) for {url} "
-          "(Ctrl-C to skip; they're kept)…", file=out)
+    say(f"training {model_id} on {len(convs)} conversation(s) for {url} "
+        "(Ctrl-C to skip; they're kept)…", file=out)
     from roger.federated import client as fed_client
     from roger.training import wire_trainer
     try:
         res = wire_trainer.train([c["record"] for c in convs], served, model_id, blob, status)
         if not res["trained"]:
-            print(f"roger: not training this time: {res['reason']}.", file=out)
+            say(f"not training this time: {res['reason']}.", file=out)
             return
         ok = fed_client.contribute_factor(url, res["update"], res["base"], res["epoch"], model_id,
                                           status.get("mode", "busy"))
     except KeyboardInterrupt:
-        print("roger: training skipped; the conversations are kept for next time.", file=out)
+        say("training skipped; the conversations are kept for next time.", file=out)
         return
     except Exception as e:
-        print(f"roger: training failed ({e.__class__.__name__}: {e}); conversations kept.", file=out)
+        say(f"training failed ({e.__class__.__name__}: {e}); conversations kept.", file=out)
         return
     if ok:
         discard(convs)
-        print(f"roger: contributed a {res['phase']}-factor update from {res['n_episodes']} conversation(s) "
-              f"(mean return {res['mean_return']:+.2f}); they've been deleted.", file=out)
+        say(f"contributed a {res['phase']}-factor update from {res['n_episodes']} conversation(s) "
+            f"(mean return {res['mean_return']:+.2f}); they've been deleted.", file=out)
     else:
-        print(f"roger: {url} didn't accept the update; the conversations are kept for next time.", file=out)
+        say(f"{url} didn't accept the update; the conversations are kept for next time.", file=out)
 

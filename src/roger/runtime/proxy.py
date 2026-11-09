@@ -14,6 +14,7 @@ from typing import Callable, Iterable
 import httpx
 
 from roger.runtime import capture
+from roger.runtime.console import say
 
 # Per RFC 7230 these describe the connection they arrived on, so forwarding them would lie to the
 # other side. `expect` is here because the stdlib handler already answered 100-continue on our behalf
@@ -208,7 +209,7 @@ class _Handler(BaseHTTPRequestHandler):
                     srv.on_exchange(self.path, bytes(req_buf), resp.headers.get("content-type", ""),
                                     resp.status_code, bytes(resp_buf))
                 except Exception as e:   # capture must never break relaying
-                    print(f"roger: failed to save exchange: {e!r}", file=sys.stderr)
+                    say(f"failed to save exchange: {e!r}", file=sys.stderr)
         except (BrokenPipeError, ConnectionResetError, httpx.HTTPError) as e:
             # Client went away mid-stream, or upstream died. Closing the upstream response below
             # cancels the runtime's generation; closing our side keeps a half-relayed body from

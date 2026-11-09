@@ -13,6 +13,7 @@ Usage:
 import shutil, signal, subprocess, sys, threading
 
 from roger.runtime import adapter, capture, dialect, grader, notice, proxy, train
+from roger.runtime.console import say
 
 _USAGE = """usage: roger <runtime-command> [args…]     (e.g. roger llama-server -m x.gguf --port 8080)
 
@@ -69,18 +70,18 @@ def _stop(child: subprocess.Popen) -> int:
 def run(argv: list[str]) -> int:
     binary = shutil.which(argv[0])
     if binary is None:
-        print(f"roger: {argv[0]!r} not found on PATH", file=sys.stderr)
+        say(f"{argv[0]!r} not found on PATH", file=sys.stderr)
         return 127
     p = dialect.plan(argv)
     if p is None:
         # Not a server we can sit in front of: be loud that this session contributes nothing, and say
         # what would — the alternative is a user chatting all session with nothing saved.
-        print(f"roger: INACTIVE — {argv[0]} has no --port on its command line, so there is nothing to "
-              "relay and no chats will be saved. Running it as-is.\n"
-              "roger: to contribute, run an OpenAI-compatible server with an explicit --port, e.g.\n"
-              "roger:   roger llama-server -m model.gguf --port 8080\n"
-              "roger:   roger vllm serve <hf-model> --port 8000\n"
-              "roger: (ollama and LM Studio are not supported.)", file=sys.stderr)
+        say(f"INACTIVE — {argv[0]} has no --port on its command line, so there is nothing to "
+            "relay and no chats will be saved. Running it as-is.\n"
+            "to contribute, run an OpenAI-compatible server with an explicit --port, e.g.\n"
+            "  roger llama-server -m model.gguf --port 8080\n"
+            "  roger vllm serve <hf-model> --port 8000\n"
+            "(ollama and LM Studio are not supported.)", file=sys.stderr)
         return _passthrough([binary, *argv[1:]])
 
     provider = dialect.runtime_name(binary)
@@ -92,7 +93,7 @@ def run(argv: list[str]) -> int:
         built = adapter.prepare([binary, *argv[1:]])
     except Exception as e:
         built = None
-        print(f"roger: federation update not attached ({e.__class__.__name__}: {e})", file=sys.stderr)
+        say(f"federation update not attached ({e.__class__.__name__}: {e})", file=sys.stderr)
     if built is not None:
         p = dialect.attach_adapter(p, binary, *built)
     backend = f"http://127.0.0.1:{p.backend_port}"
@@ -104,15 +105,15 @@ def run(argv: list[str]) -> int:
                                             served),
                           p.request_model)
     except OSError as e:
-        print(f"roger: cannot listen on {p.public_host}:{p.public_port} ({e.strerror or e}) — is "
-              f"{argv[0]} already running there? Stop it or pass a different --port.", file=sys.stderr)
+        say(f"cannot listen on {p.public_host}:{p.public_port} ({e.strerror or e}) — is "
+            f"{argv[0]} already running there? Stop it or pass a different --port.", file=sys.stderr)
         return 1
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     stop = threading.Event()
     threading.Thread(target=grader.run, args=(registry, backend, stop, p.request_model), daemon=True).start()
-    print(f"roger: relaying {p.public_host}:{p.public_port} → 127.0.0.1:{p.backend_port}; "
-          f"saving chats to {capture.messages_dir(provider)}; self-grading chats idle for "
-          f"{grader.IDLE_S // 60} min", file=sys.stderr)
+    say(f"relaying {p.public_host}:{p.public_port} → 127.0.0.1:{p.backend_port}; "
+        f"saving chats to {capture.messages_dir(provider)}; self-grading chats idle for "
+        f"{grader.IDLE_S // 60} min", file=sys.stderr)
 
     # Inherit stdio so the runtime's output is exactly as if launched directly, but put it in its
     # own process group: the terminal's Ctrl-C must reach only roger, which grades the still-open
@@ -130,7 +131,7 @@ def run(argv: list[str]) -> int:
         try:
             grader.grade_pending(registry, backend, p.request_model)
         except KeyboardInterrupt:                      # second Ctrl-C: skip the remaining grades
-            print("roger: skipping remaining self-grades", file=sys.stderr)
+            say("skipping remaining self-grades", file=sys.stderr)
         rc = _stop(child)
     finally:
         proxy.stop(srv)
@@ -140,7 +141,7 @@ def run(argv: list[str]) -> int:
         from roger import config
         train.maybe_train(provider, served, config.load())
     except KeyboardInterrupt:
-        print("roger: training skipped; the conversations are kept for next time.", file=sys.stderr)
+        say("training skipped; the conversations are kept for next time.", file=sys.stderr)
     return rc
 
 
